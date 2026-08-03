@@ -4,6 +4,7 @@ from enum import Enum
 
 from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -35,7 +36,9 @@ class Document(Base):
     status: Mapped[DocumentStatus] = mapped_column(
         SQLEnum(DocumentStatus), default=DocumentStatus.PENDING
     )
-    uploaded_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"

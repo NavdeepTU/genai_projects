@@ -292,6 +292,12 @@ After each session, update it with:
 
 **Commit and push every 2–3 work hours.** Track elapsed working time. After 2–3 hours of effort, commit the changes and push to the remote. If no remote is set up yet, ask me for the repository URL and set it before pushing.
 
+**Never touch external tools yourself.** For anything outside our own code — Docker, Kubernetes, Azure or any cloud platform, Grafana, any observability/dashboard tool — don't run the commands or make the change yourself. Give me the exact steps and commands, and I'll run them myself to get hands-on practice. This applies to setup, changes, and debugging on these tools. Coding in this repo is not affected by this rule.
+
+**Summarize changes, don't narrate files.** When a feature is done, don't list out which files hold which code or walk through it section by section. Give a short, technical summary of what changed — written like an answer you'd give in an interview — and explain how this piece fits into the overall architecture. The goal is that I understand where it sits in the bigger picture, not a line-by-line account of the code.
+
+**Actually update PROGRESS.md and actually commit — don't just plan to.** These have been skipped before: PROGRESS.md has stayed empty and code has gone long stretches without a commit or push. Don't treat these as reminders to note for later. At the end of every session, or every 2–3 work hours (whichever comes first), write the update into PROGRESS.md yourself, then commit and push. Before ending a session, check `git status` and `git log` to confirm both actually happened — don't assume.
+
 ---
 
 ## The Golden Rule

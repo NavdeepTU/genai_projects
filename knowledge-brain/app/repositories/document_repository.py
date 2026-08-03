@@ -1,6 +1,7 @@
 import logging
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,3 +54,22 @@ class DocumentRepository:
         except SQLAlchemyError:
             logger.exception("Failed to update status for document %s", document_id)
             raise
+
+    async def find_similar_chunks(self, query_embedding: list[float], limit: int = 5) -> list[Chunk]:
+        """Return the chunks whose embeddings are closest to a query vector.
+
+        `cosine_distance` returns 0 for identical direction and larger
+        values for less similar vectors, so ordering ascending and
+        taking the first few gives us the most relevant chunks first.
+        """
+        stmt = (
+            select(Chunk)
+            .order_by(Chunk.embedding.cosine_distance(query_embedding))
+            .limit(limit)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to search for similar chunks")
+            raise
+        return list(result.scalars().all())

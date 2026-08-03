@@ -21,9 +21,15 @@ class Settings(BaseSettings):
     openai_api_key: str
     embedding_model: str = "text-embedding-3-small"
 
+    # Answer generation
+    generation_model: str = "gpt-4o-mini"
+
     # Chunking
     chunk_size: int = 500
     chunk_overlap: int = 50
+
+    # Retrieval
+    retrieval_top_k: int = 5
 
 
 @lru_cache

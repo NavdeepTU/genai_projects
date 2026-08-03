@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: knowledge-brain-postgres
+    environment:
+      POSTGRES_USER: knowledge_brain
+      POSTGRES_PASSWORD: knowledge_brain
+      POSTGRES_DB: knowledge_brain
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
