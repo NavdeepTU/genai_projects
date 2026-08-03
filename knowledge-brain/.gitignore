@@ -1,0 +1,30 @@
+# Environment variables (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js (frontend, planned)
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Docker / data volumes
+*.log
+.docker/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
