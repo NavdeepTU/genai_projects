@@ -453,6 +453,38 @@
 
   <section class="block">
     <div class="block-title">
+      <h2>Feature 3 — Hybrid search <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Keyword search</span>
+        <span class="path mono">document_repository.py · Postgres full-text search</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Merge: Reciprocal Rank Fusion</span>
+        <span class="path mono">app/services/hybrid_search.py</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">retrieval_service.py updated</span>
+        <span class="path mono">runs vector + keyword search, then merges</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> a query for an exact error code embedded in a test document returned the correct answer; a purely conceptual question (no exact keywords) still returned a correct grounded answer, confirming no regression to plain vector search.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
       <h2>Cross-cutting — correlation IDs, audit log, circuit breakers <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
       <span class="count">3 of 3 built</span>
     </div>
@@ -480,7 +512,6 @@
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">03</span>Hybrid search</li>
       <li><span class="n mono">04</span>Reranking</li>
       <li><span class="n mono">05</span>LangGraph query pipeline</li>
       <li><span class="n mono">06</span>Neo4j relationship graph</li>

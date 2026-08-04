@@ -25,9 +25,13 @@ Close out the current working session on this project:
    entries — this file is a history log, not a current-state snapshot.
 6. Write any new ADRs for significant decisions made this session, in
    `docs/adr/ADR-XXX-name.md`.
-7. Stage and commit all of the above plus the session's code changes,
+7. Check `README.md` — update it only if something changed that a reader
+   would actually need: new setup/run steps, a status change (e.g. the
+   project just became runnable), or an outdated instruction. Keep it
+   minimal — don't turn it into a second architecture doc.
+8. Stage and commit all of the above plus the session's code changes,
    then push to the remote. If no remote is configured, ask me for the
    repository URL first.
-8. Confirm the commit and push actually happened by checking `git status`
+9. Confirm the commit and push actually happened by checking `git status`
    and `git log` — don't assume.
-9. Give a short summary (5–10 lines) of what was updated and pushed.
+10. Give a short summary (5–10 lines) of what was updated and pushed.

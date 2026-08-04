@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,5 +71,29 @@ class DocumentRepository:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
             logger.exception("Failed to search for similar chunks")
+            raise
+        return list(result.scalars().all())
+
+    async def find_by_keyword(self, query: str, limit: int = 5) -> list[Chunk]:
+        """Return the chunks that best match a query via Postgres full-text search.
+
+        Both the chunk text and the query are normalized the same way
+        (lowercased, stop words removed, words stemmed to their root) by
+        `to_tsvector`/`plainto_tsquery` before comparing, and `ts_rank`
+        scores how well each match is, not just whether one exists.
+        """
+        tsquery = func.plainto_tsquery("english", query)
+        tsvector = func.to_tsvector("english", Chunk.text)
+
+        stmt = (
+            select(Chunk)
+            .where(tsvector.op("@@")(tsquery))
+            .order_by(func.ts_rank(tsvector, tsquery).desc())
+            .limit(limit)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to search for chunks by keyword")
             raise
         return list(result.scalars().all())

@@ -256,3 +256,64 @@ commits existed yet.
 - Worth deciding, at some point: does the circuit breaker's per-process
   limitation matter enough to fix now, or is it a "revisit once we
   actually run more than one instance" item?
+
+---
+
+## Session: 2026-08-04 (continued) — Feature 3: Hybrid search
+
+### What we built
+- **Hybrid search — built and verified.** Added `find_by_keyword` to the
+  repository (Postgres full-text search via `tsvector`/`plainto_tsquery`/`ts_rank`,
+  computed on the fly, no persisted index yet) and a new
+  `app/services/hybrid_search.py` implementing Reciprocal Rank Fusion by
+  hand to merge vector and keyword result lists. `retrieval_service.py`
+  now runs both searches (sequentially — they share one `AsyncSession`,
+  which isn't safe for concurrent queries) and merges before generation.
+  Verified live: a query for an exact error code embedded in a test
+  document returned the correct answer (proving keyword search
+  contributed), and a purely conceptual question still worked with no
+  regression to plain vector search.
+- ADR-011 documents both decisions: Postgres full-text search over a
+  dedicated engine, and RRF over normalizing/combining raw scores.
+- Rewrote `README.md` properly — it was thin and, worse, its "run it
+  locally" steps were actually missing two required steps (enabling the
+  pgvector extension, creating the tables), which would have broken for
+  anyone following it fresh. Now includes a real status section, a
+  Mermaid diagram, the actual tech stack in use, working `curl` examples,
+  and a documentation map.
+- Started using memory (outside the project folder) to track deferred,
+  explicitly-not-now optimizations the user asked to hold for a "final
+  optimization pass": parallelizing hybrid search's two queries (separate
+  `AsyncSession`s so they can run concurrently), an HNSW index for vector
+  search, and a GIN index on a persisted `tsvector` column for keyword
+  search.
+
+### What I struggled with
+- Asked a good question — "why do these run in parallel" — that
+  contained a real premise error worth noting: they don't run in
+  parallel at all, they run sequentially, on purpose. Landed once
+  reframed with a "shared phone line" analogy for why one `AsyncSession`
+  can't safely handle two queries at once.
+- Was initially skeptical that keyword search added any value on top of
+  vector search — a fair, common question, resolved with a concrete
+  example (an exact error code a pure embedding match could plausibly
+  miss).
+
+### Concepts to revisit
+- Where deferred optimizations get tracked is a bit split now: some live
+  in `docs/PROGRESS.md` (this file, project history), some in Claude's
+  own memory (cross-session, but outside the actual project folder,
+  which caused real confusion this session about "where did that go").
+  Worth keeping in mind: memory is a staging area until `/end-session`
+  folds it in here — this file is the actual source of truth.
+
+### What's next
+- Reranking is next in the build order if we stick to the plan.
+- Deferred to a future "optimization pass" (see memory,
+  `future-optimizations.md`, and this entry above): parallelize hybrid
+  search's two queries; add an HNSW index for vector search; add a GIN
+  index on a persisted `tsvector` column for keyword search.
+- Still no automated test suite — carried over multiple sessions, still
+  the longest-standing open gap.
+- PII detection, ACL, APIM, and Key Vault remain intentionally deferred
+  per ADR-007.

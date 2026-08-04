@@ -191,6 +191,66 @@ something shared across instances, like Redis.
 
 ---
 
+## Feature 3: Hybrid Search
+
+**What does hybrid search do, in one sentence?**
+It runs a vector (meaning-based) search and a keyword (exact-term) search
+at the same time, then merges the two ranked result lists into one, so
+the system catches both "conceptually similar" matches and "contains
+this exact word/code" matches.
+
+**Why isn't vector search alone good enough?**
+Embedding models represent general meaning, not exact lexical identity —
+they're weak at guaranteeing a match on specific things like error codes,
+product IDs, or rare proper nouns. A document containing the exact string
+"ERR-4521" might not surface for a search on that exact code, because the
+embedding model never learned that string as meaningfully distinct from
+similar-looking text.
+*Further reading: [PostgreSQL's official Full Text Search documentation](https://www.postgresql.org/docs/current/textsearch.html).*
+
+**Why Postgres full-text search instead of a dedicated engine like
+Elasticsearch?**
+Same reasoning as pgvector over Qdrant: it keeps everything in one
+database, no new infrastructure, no second system to keep in sync. A
+dedicated engine is more powerful at real scale, but that's overkill for
+where this project is today.
+
+**How does Postgres actually decide if a chunk "matches" a keyword
+query?**
+It's not raw string matching. Both the chunk's text and the query get
+normalized the same way first — split into words, lowercased, stop words
+like "the" and "a" removed, and each remaining word stemmed to its root
+form (so "running," "runs," and "ran" all become "run"). Then it checks
+whether the query's processed words appear in the chunk's processed
+text, and ranks matches by relevance, not just whether a match exists.
+
+**Why merge the two result lists using Reciprocal Rank Fusion instead of
+just combining their raw scores?**
+Cosine distance (vector search) and text relevance (`ts_rank`) are
+measured on completely different, incomparable scales — there's no
+principled way to add "0.23 cosine distance" to "1.8 relevance score."
+RRF sidesteps that by scoring each chunk based on *where it ranked* in
+each list instead of its raw score, then summing those rank-based scores
+— which both methods can express in exactly the same terms.
+*Further reading: the original paper — [Cormack, Clarke & Buettcher, "Reciprocal Rank Fusion outperforms Condorcet and Individual Rank Learning Methods," ACM SIGIR 2009](https://dl.acm.org/doi/10.1145/1571941.1572114).*
+
+**If a chunk is found by only one of the two searches, does it get
+dropped?**
+No — it's still included in the merged results, just with a score from
+only that one list, so it won't rank as high as a chunk both searches
+agreed on. Nothing gets excluded for appearing in only one list; RRF
+works over the union of both.
+
+**At 10 million rows, what actually gets slow, and why?**
+Not "keyword search is inherently slower than vector search" — both
+sides currently compute their comparison fresh, on every row, on every
+query, with no real index. For keyword search specifically, that means
+re-tokenizing and re-stemming every row's text from scratch on every
+query. The fix is a GIN index on a persisted `tsvector` column, the exact
+same pattern as the HNSW index needed on the vector side.
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

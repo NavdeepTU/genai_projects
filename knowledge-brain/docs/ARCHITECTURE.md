@@ -9,11 +9,11 @@ engine that gives you answers instead of a list of links.
 ## The big picture — how the pieces fit together
 
 Two things exist now: getting a document *into* the system, and asking a
-question *about* it. Nothing beyond plain vector search exists yet — no
-hybrid search, no reranking, no multi-step reasoning. That comes later.
-Every request, regardless of which of the two flows it's on, now also
-gets a correlation ID, an audit log entry, and circuit-breaker protection
-around its OpenAI calls.
+question *about* it. Reranking, a LangGraph multi-step query pipeline,
+and everything after that in the build order don't exist yet. Every
+request, regardless of which of the two flows it's on, now also gets a
+correlation ID, an audit log entry, and circuit-breaker protection around
+its OpenAI calls.
 
 ```mermaid
 flowchart TD
@@ -31,10 +31,13 @@ flowchart TD
         EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
     end
 
-    subgraph retrieve["Asking a question"]
+    subgraph retrieve["Asking a question (hybrid search)"]
         Q --> QEMBED[Embed the question]
-        QEMBED --> SEARCH[Find nearest chunks<br/>pgvector cosine similarity]
-        SEARCH --> GEN["Generate answer<br/>(OpenAI LLM, via circuit breaker)"]
+        QEMBED --> VEC[Vector search<br/>pgvector cosine similarity]
+        Q --> KW[Keyword search<br/>Postgres full-text search]
+        VEC --> RRF[Merge: Reciprocal<br/>Rank Fusion]
+        KW --> RRF
+        RRF --> GEN["Generate answer<br/>(OpenAI LLM, via circuit breaker)"]
     end
 
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
@@ -52,16 +55,19 @@ database. If anything goes wrong along the way, the document is marked as
 failed rather than left in limbo.
 
 **Asking a question:** a user sends a question → it's turned into a
-meaning-vector using the same process as the chunks → the database finds
-the handful of stored chunks whose vectors are closest in meaning → those
-chunks, plus the original question, are handed to an LLM → the LLM answers
-using only that retrieved text, and says it doesn't know rather than
-guessing if the answer isn't there.
+meaning-vector, and two independent searches run one after another: a
+vector search (closest meaning) and a keyword search (Postgres full-text
+search, for exact terms vector search can miss — error codes, product
+IDs, rare proper nouns). The two ranked lists are merged into one using
+Reciprocal Rank Fusion, favoring chunks either search strongly agrees on.
+Those merged chunks, plus the original question, are handed to an LLM,
+which answers using only that retrieved text, and says it doesn't know
+rather than guessing if the answer isn't there.
 
-**What's new since the last update:** every request now carries a
-correlation ID from the moment it arrives, both OpenAI call sites
-(embedding and generation) are protected by a circuit breaker, and both
-user-facing actions write an entry to an append-only audit log.
+**What's new since the last update:** search is now hybrid — vector
+similarity and Postgres full-text keyword search both run, and their
+results are merged with Reciprocal Rank Fusion rather than trusting
+either search alone.
 
 ## The main components
 
@@ -100,9 +106,17 @@ database queries.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — the
 conductor for answering questions, mirroring the ingestion service's role.
-Embeds the question, asks the repository for the closest chunks, then asks
-the generation service to write an answer. Talks to: embedding, the
-repository, and generation.
+Embeds the question, asks the repository for both the closest chunks
+(vector) and the best keyword matches, merges them via hybrid search,
+then asks the generation service to write an answer. Talks to: embedding,
+the repository, hybrid search, and generation.
+
+**Hybrid search (`app/services/hybrid_search.py`)** — merges the vector
+search and keyword search result lists into one ranked list, using
+Reciprocal Rank Fusion (scoring by rank position in each list, summed
+across both, rather than trying to compare their raw, incomparable
+scores). Talks to: nothing directly — it's a pure function called by the
+retrieval service.
 
 **Generation (`app/services/generation.py`)** — sends the question and the
 retrieved chunks to an LLM, with instructions to answer only from that
@@ -110,9 +124,11 @@ text and admit uncertainty rather than guess. This is the piece that
 actually turns "relevant text" into a readable answer.
 
 **Database (Postgres + pgvector, running in Docker)** — stores documents
-and their chunks, including each chunk's meaning-vector, in one place, and
-now also answers "which chunks are closest in meaning to this vector?"
-using pgvector's cosine similarity search.
+and their chunks, including each chunk's meaning-vector, in one place,
+and now answers both "which chunks are closest in meaning to this
+vector?" (pgvector cosine similarity) and "which chunks best match these
+keywords?" (Postgres's built-in full-text search) — no second database
+needed for either.
 
 **Correlation ID middleware (`app/core/middleware.py`)** — stamps every
 incoming request with a unique ID (or reuses one a caller already sent),
@@ -189,6 +205,14 @@ lives in each process's memory — meaning it does not yet work correctly
 across multiple server instances, since each one tracks failures
 independently. See ADR-010.
 
+Keyword search uses Postgres's built-in full-text search rather than a
+dedicated search engine like Elasticsearch, for the same reason pgvector
+was chosen over Qdrant — one database, no new infrastructure. The two
+result lists (vector and keyword) are merged with Reciprocal Rank Fusion
+rather than trying to combine their raw scores directly, since a cosine
+distance and a text-relevance score aren't measured on comparable scales.
+See ADR-011.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address. The
@@ -241,6 +265,21 @@ itself is a superuser and could bypass a real database-level restriction.
 True enforcement needs a separate, deliberately restricted database role,
 which doesn't exist yet. See ADR-009.
 
+**Neither half of hybrid search has a real index yet** — both
+`cosine_distance` and `to_tsvector` are computed fresh, on every row, on
+every query. Fine at our current tiny scale, but at real scale this needs
+an HNSW index on the embedding column and a GIN index on a persisted
+`tsvector` column — deliberately deferred, tracked as a future
+optimization rather than forgotten.
+
+**Keyword search can return fewer chunks than requested, even when vector
+search always returns exactly the requested count** — vector search
+always finds *the closest* chunks, even if they're not a good match;
+keyword search is a real filter and may find fewer matches, or none.
+Reciprocal Rank Fusion handles this naturally — a chunk found by only one
+search still gets included, just without the score boost a chunk found by
+both searches gets.
+
 ## Glossary
 
 **Chunk** — a small piece of a larger document's text.
@@ -287,3 +326,18 @@ the same mechanism in an electrical panel.
 user-initiated actions (who did what, when), kept for accountability —
 its value depends on nobody, including the application itself, being able
 to edit or delete an entry after it's written.
+
+**Hybrid search** — combining keyword (exact-term) search with vector
+(meaning-based) search, so a system can find both "conceptually similar"
+results and "contains this exact word/code" results, instead of only one.
+
+**Full-text search / `tsvector` / GIN index** — Postgres's built-in
+keyword search: `tsvector` is a normalized, searchable form of text
+(lowercased, stop words removed, words stemmed to their root); a GIN
+index lets Postgres search that form quickly instead of reprocessing raw
+text on every query.
+
+**Reciprocal Rank Fusion (RRF)** — a way to merge two independently
+ranked lists into one, by scoring each item based on *where it ranked* in
+each list (not its raw score) and summing those scores — so items both
+lists agree are good naturally rise to the top.
