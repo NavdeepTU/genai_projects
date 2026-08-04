@@ -451,6 +451,32 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> a real question about the uploaded test document returned a correct, grounded answer; a question unrelated to any stored content correctly returned "I don't know" instead of a hallucinated answer.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Cross-cutting — correlation IDs, audit log, circuit breakers <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Correlation ID middleware</span>
+        <span class="path mono">app/core/middleware.py</span>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Append-only audit log</span>
+        <span class="path mono">audit_log.py · audit_repository.py</span>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Circuit breaker</span>
+        <span class="path mono">app/core/circuit_breaker.py · wraps both OpenAI calls</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> correlation IDs confirmed matching in both response body and header, including reusing a client-supplied ID; both user actions confirmed landing in <code>audit_log</code> with correct data; circuit breaker confirmed opening after 3 simulated failures, rejecting the next call without attempting it, and auto-recovering after the cooldown.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">

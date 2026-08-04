@@ -133,6 +133,64 @@ trading a tiny bit of accuracy for a big speed gain.
 
 ---
 
+## Feature: Correlation IDs, Audit Logging, and Circuit Breakers
+
+**What do these three features do, in one sentence each?**
+Correlation IDs let you trace one request's whole story through the
+logs. The audit log is a permanent record of who did what, for
+accountability. Circuit breakers stop hammering an external service
+(OpenAI) once it's clearly failing, instead of every request separately
+waiting for a doomed call to time out.
+
+**Why did we only build these three "enterprise requirements" now, and
+defer PII detection, access control, and the Azure-specific ones?**
+The project's rules said all 8 were "non-negotiable from the start," but
+that directly contradicted the project's own build order, which lists PII
+detection and access control as later steps. We resolved it by splitting
+on actual buildability: these three don't depend on anything that doesn't
+exist yet, while access control is meaningless with no auth model built,
+and the Azure-specific ones (API gateway, Key Vault) don't apply to a
+system that only runs locally.
+
+**Why a `ContextVar` for the correlation ID instead of FastAPI's
+`request.state`?**
+`request.state` only works for code that has a direct reference to the
+`request` object — true for route handlers, not true for services and
+the repository, which are called several layers deep and intentionally
+never receive `request` as a parameter. A `ContextVar` is readable from
+anywhere in that call chain without threading it through every function
+signature.
+*Further reading: [Python's official `contextvars` documentation](https://docs.python.org/3/library/contextvars.html).*
+
+**Why does the audit log's repository only expose an insert method?**
+Because the whole value of an audit log depends on nobody being able to
+quietly edit or delete an entry after the fact — if it could be altered,
+it couldn't be trusted as evidence of what really happened. Not exposing
+update/delete methods in code is the first layer of that protection.
+
+**Is the audit log actually tamper-proof today?**
+Honestly, not fully. The application code can't alter it, but our local
+database connection is a superuser, which can bypass real database-level
+restrictions. True protection needs a separate, deliberately restricted
+database role — a known, deliberately deferred gap, not an oversight.
+
+**Why build a circuit breaker by hand instead of using a library?**
+Consistent with how the rest of the project was built — extraction,
+chunking, and the API calls themselves were all written by hand so the
+mechanism is fully understood, and a circuit breaker is simple enough
+that building it doesn't cost much.
+*Further reading: [Martin Fowler's "CircuitBreaker"](https://martinfowler.com/bliki/CircuitBreaker.html) — the article that popularized the pattern.*
+
+**If we ran two copies of this server, what breaks?**
+The circuit breaker's state lives in each process's own memory — nothing
+shares it across processes. So each server instance has to independently
+rack up its own 3 failures before its circuit opens, while a healthy-looking
+instance that hasn't personally seen those failures yet keeps calling the
+already-failing service. The fix would be moving that state into
+something shared across instances, like Redis.
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

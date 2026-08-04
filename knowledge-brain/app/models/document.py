@@ -67,3 +67,4 @@ class DocumentUploadResponse(BaseModel):
     id: uuid.UUID
     filename: str
     status: DocumentStatus
+    correlation_id: str

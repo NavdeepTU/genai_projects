@@ -183,3 +183,76 @@ commits existed yet.
 - Still no automated test suite — carried over from before, still open.
 - PII detection, ACL, APIM, and Key Vault remain intentionally deferred
   per ADR-007 — not forgotten, just not yet.
+
+---
+
+## Session: 2026-08-04 (continued) — ADR-007's three deferred items, finished
+
+### What we built
+- **Correlation IDs — finished.** Wired `correlation_id_middleware` into
+  `main.py`, added `correlation_id` to both `DocumentUploadResponse` and
+  `QueryResponse`, and switched both routes to build their response
+  explicitly rather than auto-converting from the ORM object (which has
+  no `correlation_id` attribute of its own). Verified live: an
+  auto-generated ID and a client-supplied `X-Correlation-ID` header both
+  correctly appear in the matching response body and header.
+- **Append-only audit log — built.** New `AuditLog` model and
+  `AuditRepository` (insert-only by design — no update/delete methods
+  exist in the code). Wired into both routes: uploads log
+  `document_upload`, queries log `query_made`. Verified live by querying
+  `audit_log` directly after both actions. Honest gap noted (and
+  documented in ADR-009): true database-level tamper-proofing isn't
+  possible yet, since our local Postgres role is a superuser and bypasses
+  permission restrictions — enforced at the code level only for now.
+- **Circuit breaker — built.** A hand-written `CircuitBreaker` class
+  (closed/open/half-open, rolling failure window, cooldown recovery),
+  wrapping both OpenAI call sites with two independent instances.
+  Verified the state machine directly with a standalone script (3
+  failures → opens → 4th call rejected without trying → recovers after
+  cooldown), then confirmed normal requests still work unaffected through
+  the live server. `query.py` now catches an open circuit and returns a
+  clean `503` instead of a raw crash; ingestion needed no new handling
+  since its existing failure handling already covers it.
+- Four new ADRs: ADR-008 (ContextVar), ADR-009 (audit logging placement
+  and enforcement), ADR-010 (custom circuit breaker, per-call-site
+  fallback handling).
+- All of ADR-007's "add now" list is complete — correlation IDs, audit
+  logging, and circuit breakers are done, verified, and documented.
+
+### What I struggled with
+- Initially explained *why* `ContextVar` is needed correctly in outline,
+  but the first two answers were vague/circular rather than specific —
+  took a "what would you literally have to change" reframing before it
+  fully landed.
+- Described the multi-server circuit breaker problem backwards at first —
+  assumed shared state would incorrectly link unrelated servers' failures
+  together, when the real issue is the opposite: there's currently *no*
+  sharing at all, so protection doesn't scale correctly across instances.
+  Corrected after seeing exactly where in the code state lives (a plain
+  per-process Python variable).
+- Slipped back into thinking of pgvector as a separate table/store at one
+  point (asked "how are the chunks table and pgvector linked"), even
+  after this was already cleared up earlier — worth watching for again.
+
+### Concepts to revisit
+- The distinction between "code enforces X" and "the database enforces
+  X" — this came up twice now (the audit log, and briefly the read-only
+  connection pool idea from a sibling project's CLAUDE.md) and is worth
+  being able to explain crisply: code-level checks can be bypassed by
+  anything that skips the code path; only a database-level permission
+  is enforced no matter what connects.
+- Multi-instance/shared-state problems in general — the circuit breaker
+  is the second time this session a "works great on one process, breaks
+  across many" gap showed up (the first being in-memory rate limiting
+  concerns implied by APIM). Worth a deeper look before Feature 10.
+
+### What's next
+- Continue the original build order: hybrid search is next if we stick
+  to the plan.
+- Still no automated test suite — carried over multiple sessions now,
+  the longest-standing open gap.
+- PII detection, ACL, APIM, and Key Vault remain intentionally deferred
+  per ADR-007.
+- Worth deciding, at some point: does the circuit breaker's per-process
+  limitation matter enough to fix now, or is it a "revisit once we
+  actually run more than one instance" item?

@@ -442,8 +442,19 @@ Structure it like this:
   introduce one.
 ```
 
+**Diagrams are part of this document, not optional.** Add a flowchart
+wherever it makes the system clearer than prose alone — a small diagram
+for a single feature's flow, and a larger connected diagram once
+multiple features interact. Use Mermaid diagrams (fenced code blocks
+tagged `mermaid` — GitHub renders these natively); a simple
+boxes-and-arrows text sketch is fine for something trivial. Diagrams
+don't need to exist upfront — add, redraw, or expand them as features
+are actually built, kept current by `/end-session` alongside the rest
+of this file.
+
 **Rules for this document:**
-- No code snippets — this is a reading document, not a code document
+- No code snippets — this is a reading document, not a code document.
+  Diagrams are the one exception — everything else stays prose.
 - No bullet point walls — write in short paragraphs
 - Every section must make sense to someone who has never seen the codebase
 - If a section becomes too long, it means the system is too complex — flag it
@@ -481,6 +492,17 @@ walked through, and the 10x-scale question and answer.
 - Add a "General concepts" section at the bottom for things worth knowing
   independent of any one feature (e.g. what RAG is, what a
   service/repository split is for).
+- Where a genuinely good resource exists, add a short "Further reading"
+  link under that Q&A or in "General concepts" — an official docs page, a
+  research paper, or a blog post that explains the concept in more depth.
+  Only link something verifiably authentic and authoritative: a
+  university's own page (a research group, course notes, an `.edu`
+  domain), a paper's official venue (arXiv, ACM, IEEE, or a named
+  conference/journal), or a well-known, widely-cited author in the field
+  — never an unverified blog or content-farm article. Prefer sources that
+  are actually readable in spare time over ones that are merely rigorous.
+  If nothing verifiable and good exists for a topic, skip the link rather
+  than force one in.
 
 ---
 

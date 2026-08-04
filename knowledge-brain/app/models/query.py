@@ -11,3 +11,4 @@ class QueryResponse(BaseModel):
     """The generated answer sent back to the user."""
 
     answer: str
+    correlation_id: str

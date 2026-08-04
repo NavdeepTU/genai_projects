@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.middleware import get_correlation_id
 from app.models.document import DocumentUploadResponse
+from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.services.ingestion_service import IngestionService
 
@@ -22,4 +24,20 @@ async def upload_document(
 
     content = await file.read()
     service = IngestionService(DocumentRepository(db))
-    return await service.ingest_document(file.filename, content)
+    document = await service.ingest_document(file.filename, content)
+
+    correlation_id = get_correlation_id()
+    await AuditRepository(db).log_action(
+        correlation_id=correlation_id,
+        action="document_upload",
+        resource_type="document",
+        resource_id=str(document.id),
+        extra_data={"filename": document.filename, "status": document.status.value},
+    )
+
+    return DocumentUploadResponse(
+        id=document.id,
+        filename=document.filename,
+        status=document.status,
+        correlation_id=correlation_id,
+    )

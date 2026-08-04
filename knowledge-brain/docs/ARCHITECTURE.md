@@ -11,6 +11,38 @@ engine that gives you answers instead of a list of links.
 Two things exist now: getting a document *into* the system, and asking a
 question *about* it. Nothing beyond plain vector search exists yet — no
 hybrid search, no reranking, no multi-step reasoning. That comes later.
+Every request, regardless of which of the two flows it's on, now also
+gets a correlation ID, an audit log entry, and circuit-breaker protection
+around its OpenAI calls.
+
+```mermaid
+flowchart TD
+    subgraph mw["Every request"]
+        REQ[Request arrives] --> CID[Correlation ID middleware<br/>generates or reuses an ID]
+    end
+
+    CID --> UP[POST /documents/upload]
+    CID --> Q[POST /query]
+
+    subgraph ingest["Getting a document in"]
+        UP --> EXTRACT[Extract text<br/>PDF / .txt]
+        EXTRACT --> CHUNK[Chunk text]
+        CHUNK --> EMBED["Embed chunks<br/>(OpenAI, via circuit breaker)"]
+        EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
+    end
+
+    subgraph retrieve["Asking a question"]
+        Q --> QEMBED[Embed the question]
+        QEMBED --> SEARCH[Find nearest chunks<br/>pgvector cosine similarity]
+        SEARCH --> GEN["Generate answer<br/>(OpenAI LLM, via circuit breaker)"]
+    end
+
+    SAVE --> AUDIT1[Audit log:<br/>document_upload]
+    GEN --> AUDIT2[Audit log:<br/>query_made]
+
+    AUDIT1 --> RESP1[Response +<br/>correlation ID]
+    AUDIT2 --> RESP2[Response +<br/>correlation ID]
+```
 
 **Getting a document in:** a user uploads a file → the API receives it →
 the file's raw text is pulled out → that text is cut into small
@@ -25,6 +57,11 @@ the handful of stored chunks whose vectors are closest in meaning → those
 chunks, plus the original question, are handed to an LLM → the LLM answers
 using only that retrieved text, and says it doesn't know rather than
 guessing if the answer isn't there.
+
+**What's new since the last update:** every request now carries a
+correlation ID from the moment it arrives, both OpenAI call sites
+(embedding and generation) are protected by a circuit breaker, and both
+user-facing actions write an entry to an append-only audit log.
 
 ## The main components
 
@@ -77,6 +114,38 @@ and their chunks, including each chunk's meaning-vector, in one place, and
 now also answers "which chunks are closest in meaning to this vector?"
 using pgvector's cosine similarity search.
 
+**Correlation ID middleware (`app/core/middleware.py`)** — stamps every
+incoming request with a unique ID (or reuses one a caller already sent),
+readable from anywhere in the code handling that request via
+`get_correlation_id()`, and echoes it back as a response header. Talks to:
+nothing directly — every route and response includes its value. If it
+disappeared, there'd be no way to trace one request's activity across
+logs.
+
+**Audit log (`app/models/audit_log.py`, `app/repositories/audit_repository.py`)**
+— an append-only record of every user-initiated, state-changing action
+(a document was uploaded, a question was asked). The repository
+deliberately exposes only an insert method — nothing in the codebase can
+update or delete an entry. Talks to: called directly from the API routes,
+right after each action succeeds.
+
+**Circuit breaker (`app/core/circuit_breaker.py`)** — wraps both OpenAI
+call sites (embedding and generation) and stops calling OpenAI for a
+cooldown period once it's failed repeatedly, instead of letting every
+request separately wait for a doomed call to time out. Two independent
+instances exist, one per call site, so a run of embedding failures
+doesn't affect generation's circuit.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: 3 failures within 60s
+    Open --> HalfOpen: cooldown period passes
+    HalfOpen --> Closed: trial call succeeds
+    HalfOpen --> Open: trial call fails
+    Closed --> Closed: call succeeds
+```
+
 ## Key decisions we made and why
 
 We run the pipeline synchronously (the user waits while their file is
@@ -99,6 +168,26 @@ rather than guess, because an LLM's default tendency is to always produce
 a confident-sounding answer — without that instruction, missing or
 irrelevant retrieved context would likely lead to a made-up answer instead
 of an honest "not found." See ADR-004.
+
+Rather than retrofitting every "enterprise requirement" from an expanded
+project scope all at once, we split them by whether they're actually
+buildable yet: correlation IDs, audit logging, and circuit breakers were
+added now since they're self-contained; PII detection, access control,
+and Azure-specific concerns (API gateway, Key Vault) were deferred, since
+they depend on work — an auth model, an actual cloud deployment — that
+doesn't exist yet. See ADR-007.
+
+The correlation ID is shared across a request using a `ContextVar` rather
+than FastAPI's `request.state`, specifically because services and the
+repository are called several layers deep and never receive the raw
+`request` object — a `ContextVar` is readable from anywhere in that call
+chain without threading it through every function signature. See ADR-008.
+
+The circuit breaker was built by hand rather than pulling in a library,
+consistent with how the rest of this project was built, and its state
+lives in each process's memory — meaning it does not yet work correctly
+across multiple server instances, since each one tracks failures
+independently. See ADR-010.
 
 ## How data moves through the system
 
@@ -138,6 +227,20 @@ closest chunks it can find, even if none are truly relevant), but the
 generation step's instructions mean the LLM says it doesn't know rather
 than forcing an answer out of unrelated context.
 
+**OpenAI itself starts failing repeatedly (outage, rate limit)** — after
+3 failures within 60 seconds, that call site's circuit breaker opens.
+Further ingestion attempts fail fast and the document is marked `failed`,
+same as any other embedding failure. Further query attempts get an
+immediate `503` with a clear "temporarily unavailable" message instead of
+hanging until a timeout. After a cooldown, one trial call is allowed
+through to check whether OpenAI has recovered.
+
+**The audit log's tamper-proofing is currently code-level only** — the
+repository has no update/delete methods, but the database connection
+itself is a superuser and could bypass a real database-level restriction.
+True enforcement needs a separate, deliberately restricted database role,
+which doesn't exist yet. See ADR-009.
+
 ## Glossary
 
 **Chunk** — a small piece of a larger document's text.
@@ -166,3 +269,21 @@ writing to the database, with no business logic in it.
 
 **Service** — the part of the code responsible for business logic — the
 actual sequence of steps a feature performs.
+
+**Correlation ID** — a unique ID assigned to one incoming request, included
+in every response and log line from that request, so its whole story can
+be traced even while many other requests are happening at once.
+
+**`ContextVar`** — a Python variable that's automatically kept separate
+per concurrent task, letting code anywhere in that task's call stack read
+the same value without it being passed explicitly as a parameter.
+
+**Circuit breaker** — a safeguard that stops calling a repeatedly-failing
+external service for a cooldown period, so requests fail fast instead of
+each one separately waiting for a doomed call to time out. Named after
+the same mechanism in an electrical panel.
+
+**Audit log** — a permanent, append-only record of significant
+user-initiated actions (who did what, when), kept for accountability —
+its value depends on nobody, including the application itself, being able
+to edit or delete an entry after it's written.

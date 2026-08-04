@@ -7,10 +7,16 @@ Close out the current working session on this project:
 1. Review everything built or changed this session (`git diff`, `git status`,
    and the conversation itself).
 2. Update `docs/ARCHITECTURE.md` to reflect the current state of the
-   system — not what was planned, what's actually there now.
+   system — not what was planned, what's actually there now. Add,
+   redraw, or expand Mermaid flowchart diagrams wherever they'd clarify
+   a single feature or how multiple features connect — see the
+   "Diagrams are part of this document" rule in CLAUDE.md.
 3. Update `docs/INTERVIEW_PREP.md` with a new section for any feature
    completed this session, following the "Interview Prep Document" rule
-   in CLAUDE.md.
+   in CLAUDE.md — including a verified "Further reading" link (a
+   university source, a paper's official venue, or a well-known author)
+   wherever one genuinely helps. Skip it rather than link something
+   unverified.
 4. Update `docs/pipeline-status.html`: mark newly completed steps as
    done, leave the rest pending, matching the page's existing visual
    format and style.
