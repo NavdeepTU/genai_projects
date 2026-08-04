@@ -12,10 +12,21 @@ for a company's private knowledge, with answers instead of links.
   "meaning vectors" (numbers that represent what text means)
 - Qdrant — a specialist database just for similarity search
 - Redis — a fast memory store for caching repeated queries
-- Kafka — a queue system for processing documents in the background
+- Azure Event Hubs (Kafka protocol) — a queue system for processing
+  documents in the background without making the user wait
 - Neo4j — a graph database for storing how documents relate to each other
 - LangGraph — for building the multi-step question-answering pipeline
 - React + Next.js — the frontend dashboard
+- Azure Container Apps — runs our backend services in the cloud
+- Azure Database for PostgreSQL Flexible Server — managed PostgreSQL
+- Azure Cache for Redis — managed Redis in the cloud
+- Azure Blob Storage — stores uploaded documents
+- Azure API Management — the gateway that all traffic passes through
+- Azure Key Vault + Managed Identity — stores secrets securely,
+  pods never handle credentials directly
+- Azure Static Web Apps — hosts the Next.js frontend
+- Azure Monitor + Application Insights — cloud-level monitoring
+- Terraform — defines all cloud infrastructure as code
 
 ## Build order (do not skip ahead)
 1. Document ingestion pipeline (upload → chunk → embed → store)
@@ -24,10 +35,14 @@ for a company's private knowledge, with answers instead of links.
 4. Reranking (sorting results by relevance)
 5. LangGraph query pipeline (multi-step reasoning)
 6. Neo4j document relationship graph
-7. Evaluation harness (measuring how good our answers are)
-8. MCP server (exposing the knowledge base as a tool)
-9. Frontend dashboard
-10. Auth, multi-tenancy, and production hardening
+7. PII detection layer in ingestion pipeline
+8. Document-level access control (who can see which documents)
+9. Evaluation harness (measuring how good our answers are)
+10. MCP server (exposing the knowledge base as a tool)
+11. API Gateway via Azure API Management
+12. Azure deployment via Terraform + GitHub Actions CI/CD
+13. Frontend dashboard (polished, production-quality UI)
+14. Auth, multi-tenancy, and production hardening
 
 ---
 
@@ -124,12 +139,9 @@ Help me write it based on my answer. Save it to `/docs/adr/ADR-XXX-feature-name.
 
 ## Feature Planning — Always Ask Me First
 
-At the start of every session, ask me:
-"What do you want to work on today? Here are the remaining features we haven't built yet: [list them]"
-
-Never pick the next feature yourself.
-Never implement something I didn't ask for.
-Never jump ahead.
+Never pick the next feature yourself. Never implement something I didn't
+ask for. Never jump ahead. Session startup — reviewing progress and
+deciding what to work on — is handled by the `/start-session` command.
 
 ---
 
@@ -161,9 +173,173 @@ Never jump ahead.
 - Python: FastAPI, async/await everywhere, Pydantic models for all request/response shapes
 - Never use raw dicts where a Pydantic model should exist
 - Every function must have a docstring explaining what it does and why
-- Every external call (DB, LLM, queue) must have error handling
-- No hardcoded secrets — use environment variables via pydantic-settings
+- Every external call (DB, LLM, queue, Azure service) must have error handling
+- No hardcoded secrets — all secrets come from Azure Key Vault via Managed Identity
 - Type hints on every function signature
+- Every API response includes a correlation_id field for tracing
+
+---
+
+## Cloud Platform — Azure (use this everywhere, never suggest AWS)
+
+We are deploying entirely on Microsoft Azure. Every infrastructure
+decision must use Azure-native services.
+
+**Service mapping:**
+- Backend API → Azure Container Apps (managed containers, no K8s
+  overhead needed for a single-service backend — good talking point)
+- PostgreSQL → Azure Database for PostgreSQL Flexible Server
+  (enable pgvector extension on first run)
+- Redis → Azure Cache for Redis
+- Kafka queue → Azure Event Hubs with Kafka protocol (the Kafka
+  SDK works without any code changes — drop-in compatible)
+- Document storage → Azure Blob Storage
+- Secrets → Azure Key Vault + Managed Identity (pods never
+  handle credentials directly — Azure injects them at runtime)
+- Frontend → Azure Static Web Apps (built-in CI/CD from GitHub)
+- CDN + WAF → Azure Front Door (sits in front of everything)
+- API Gateway → Azure API Management (APIM)
+- Monitoring → Azure Monitor + Application Insights alongside
+  Prometheus + Grafana inside containers
+- Container registry → Azure Container Registry (ACR) stores
+  all Docker images
+- Infrastructure as code → Terraform with AzureRM provider
+
+**Deployment pipeline:**
+Every change follows this path:
+test → build Docker image → push to ACR → deploy to Azure
+Container Apps → smoke test
+
+GitHub Actions handles this automatically on every push to main.
+Nothing is ever deployed manually through the Azure portal.
+
+**Cost controls:**
+Every Terraform resource must include these tags:
+- environment (dev / staging / prod)
+- project (knowledge-brain)
+- team (your name)
+- cost_centre (learning)
+
+This lets Azure Cost Management show exactly what each part
+of the system costs per month.
+
+---
+
+## Enterprise Requirements (non-negotiable for all features)
+
+These must be built in from the start — not added later.
+
+**1. API Gateway via Azure API Management**
+All external traffic goes through APIM. Never expose the
+FastAPI service directly to the internet. APIM handles:
+- Rate limiting per tenant (100 requests/minute by default)
+- API versioning (/v1/, /v2/)
+- Request/response logging
+- Auth token validation before traffic reaches the backend
+
+**2. Managed Identity for all secrets**
+Azure Container Apps pods use Managed Identity to fetch secrets
+from Key Vault at runtime. The application code never sees a
+raw password or API key. When I say "add a secret," always
+implement it this way — never via environment variables
+containing raw values.
+
+**3. Correlation IDs on every request**
+Every request entering the system gets a unique correlation_id
+at the APIM layer. It must propagate through every service call,
+every database query log, and every LLM call. Every log line
+must include: correlation_id, tenant_id, user_id, service_name,
+level, message. No plain text logs anywhere — all logs are JSON.
+
+**4. PII detection before ingestion**
+Before any document is chunked and embedded, run it through
+Azure AI Language's PII detection API. If PII is found:
+- Flag the document in the database with pii_detected = true
+- Route it to a human review queue before embedding
+- Never embed raw PII into the vector database
+This is a legal and compliance requirement in enterprises.
+
+**5. Document-level access control**
+Multi-tenancy (row-level security) is not enough. Within a
+tenant, individual users should only retrieve chunks from
+documents they have explicit access to. Implement a permission
+filter that intersects retrieved chunks with the user's
+document ACL (access control list) before returning results.
+Store document permissions in PostgreSQL, check them at
+retrieval time — not after.
+
+**6. Structured audit log**
+Every state-changing action (document upload, document delete,
+query made, permission changed) must be written to an
+append-only audit_log table in PostgreSQL. This table has no
+UPDATE or DELETE permissions — ever. Columns: id, timestamp,
+correlation_id, tenant_id, user_id, action, resource_type,
+resource_id, metadata (JSONB).
+
+**7. Resource tagging on all Terraform resources**
+See Cloud Platform section above. Every resource tagged.
+Non-negotiable for cost tracking.
+
+**8. Circuit breaker on all external calls**
+Any call to an external service (LLM API, Qdrant, Neo4j)
+must have a circuit breaker. If a service fails 3 times in
+60 seconds, mark it as degraded, return a graceful fallback
+response, and alert via Application Insights. Never let one
+failing external service take down the whole pipeline.
+
+---
+
+## Frontend Standards — This Must Look World-Class
+
+The frontend is not an afterthought. It is part of the portfolio
+and will be the first thing a recruiter or interviewer sees when
+they visit the live link. Build it to this standard:
+
+**Visual design principles:**
+- Clean, modern design — use Tailwind CSS with a consistent
+  design system (spacing, colors, typography defined once)
+- Dark mode support from day one — use CSS variables for all
+  colors, never hardcode hex values
+- Every page must be fully responsive — works perfectly on
+  mobile, tablet, and desktop
+- Use Shadcn/UI as the component library — gives professional
+  quality components without custom CSS overhead
+- Subtle animations and transitions — page loads, hover states,
+  and loading skeletons (never show a blank white flash)
+- Empty states must be designed — never show a blank page when
+  there is no data. Show a helpful illustration and message.
+
+**Specific pages to build for this project:**
+- Dashboard — shows total documents ingested, recent queries,
+  retrieval accuracy trend, and cost per query this month
+- Document library — drag and drop upload, processing status
+  per document (uploading → chunking → embedding → ready),
+  PII warning badge if flagged
+- Query interface — a clean chat-like interface showing the
+  question, the answer, the source documents cited with
+  highlighted relevant passages, and the confidence score
+- Analytics page — query volume over time, top questions asked,
+  retrieval accuracy trends, average response time
+- Admin panel — tenant management, user permissions, document
+  access control settings, audit log viewer
+
+**UX rules:**
+- Every action that takes more than 500ms must show a loading
+  state — spinner, skeleton, or progress indicator
+- Every error must show a human-readable message — never show
+  a raw error code or stack trace to the user
+- Form validation must happen inline as the user types —
+  not only on submit
+- Success states must be explicit — a green confirmation,
+  not just "nothing went wrong"
+- Keyboard navigation must work on all interactive elements
+
+**When building the frontend, always:**
+- Start with the mobile layout first, then expand to desktop
+- Show me the component structure before writing any JSX
+- Use TypeScript strictly — no `any` types anywhere
+- Every component that fetches data must handle loading,
+  error, and empty states explicitly
 
 ---
 
@@ -183,6 +359,12 @@ service-name/
 ├── tests/
 ├── docs/
 │   └── adr/          # Architecture Decision Records
+├── infra/            # All Terraform files live here
+│   ├── main.tf
+│   ├── variables.tf
+│   └── outputs.tf
+├── .github/
+│   └── workflows/    # GitHub Actions CI/CD pipelines
 ├── docker-compose.yml
 ├── Dockerfile
 └── README.md
@@ -192,22 +374,14 @@ Ask me: "Can you tell me why we separate repositories from services?" before we 
 
 ---
 
-## Session Start Ritual
-
-At the start of EVERY session, do this:
-1. Show me a summary of what we built last session (read from README or git log)
-2. Ask me to explain back to you what the last feature we built does
-3. If I can't explain it clearly, briefly re-explain it before moving on
-4. Then ask what I want to tackle today
-
----
-
 ## Interview Prep Built In
 
 After every major feature, ask me these questions as if you are an interviewer:
 - "Why did you choose [technology X] over [alternative Y]?"
 - "Walk me through what happens when [failure scenario]"
 - "How would you change this design if you had 10x the data?"
+- "How does your PII detection layer work and what happens if it misses something?"
+- "How does your document-level ACL interact with the vector retrieval step?"
 
 I should be able to answer from memory. If I can't, we revisit before moving on.
 
@@ -219,7 +393,9 @@ Maintain a living file at `docs/ARCHITECTURE.md` for the entire project.
 
 This is not a technical spec — it is a plain English guide that anyone (including future-me) can read to understand how the whole system works.
 
-**Update it after every major feature is completed.** It should always reflect the current state of the project, not what we planned to build.
+Updated automatically by `/end-session` at the close of each session —
+you shouldn't need to touch it manually mid-session. It should always
+reflect the current state of the project, not what we planned to build.
 
 Structure it like this:
 
@@ -231,10 +407,6 @@ Structure it like this:
 ## The big picture — how the pieces fit together
   Plain English description + a simple text diagram showing
   how data flows from one part of the system to another.
-  Example: User uploads a PDF → Ingestion service breaks it
-  into chunks → Each chunk gets converted to a vector →
-  Vectors are stored in the database → User asks a question
-  → We find the most relevant chunks → LLM generates answer
 
 ## The main components
   For each major part of the system:
@@ -246,18 +418,23 @@ Structure it like this:
 ## Key decisions we made and why
   Short summaries of the most important architectural choices.
   Link to the full ADR for each one.
-  Example: "We use Kafka instead of a simple HTTP call for
-  ingestion because documents can take 30 seconds to process
-  and we don't want the user to wait. See ADR-002."
 
 ## How data moves through the system
   Walk through the two or three most important user journeys
-  step by step in plain English. No code. Just: "Step 1 —
-  user does X. Step 2 — the system does Y because Z."
+  step by step in plain English. No code.
+
+## Enterprise and security decisions
+  How PII detection works, how ACL is enforced at retrieval
+  time, how Managed Identity keeps secrets out of the code,
+  how the audit log works and why it is append-only.
 
 ## What could go wrong and how we handle it
   For each major failure scenario, explain in plain English
   what happens and how the system recovers.
+
+## Azure infrastructure overview
+  What runs where in Azure, how Terraform provisions it,
+  how GitHub Actions deploys it. Plain English, no commands.
 
 ## Glossary
   Define every technical term used in this project in one
@@ -275,12 +452,35 @@ Structure it like this:
 
 ## Progress Tracker
 
-Maintain a `PROGRESS.md` file in the project root.
-After each session, update it with:
+Maintain a `docs/PROGRESS.md` file. Updated automatically by
+`/end-session` at the close of each session — each entry covers:
 - What we built
 - What I struggled with
 - What concepts I need to revisit
 - What's next
+
+---
+
+## Interview Prep Document
+
+Maintain a `docs/INTERVIEW_PREP.md` file — a study sheet for reviewing
+before an actual interview, separate from the ADRs and the architecture
+doc.
+
+Updated automatically by `/end-session` at the close of each session.
+Each new section covers the Q&A pairs from that feature's protocol Step
+6/interview-prep round: what it does in one sentence, why we chose what
+we chose over the alternatives, what happens on the failure scenarios we
+walked through, and the 10x-scale question and answer.
+
+**Rules for this document:**
+- Plain, simple language — no jargon without a plain-English explanation,
+  same communication rules as everywhere else in this file.
+- Written as answers meant to be said back naturally in an interview, not
+  recited word-for-word.
+- Add a "General concepts" section at the bottom for things worth knowing
+  independent of any one feature (e.g. what RAG is, what a
+  service/repository split is for).
 
 ---
 
@@ -290,13 +490,13 @@ After each session, update it with:
 
 **Ask, don't tell, what's next.** Don't announce the next step yourself. Ask: "What do you think is the best next thing to do?" If my answer is reasonable, confirm it. If you see a better option, say so and why — but only after I've answered.
 
-**Commit and push every 2–3 work hours.** Track elapsed working time. After 2–3 hours of effort, commit the changes and push to the remote. If no remote is set up yet, ask me for the repository URL and set it before pushing.
+**Never touch external tools yourself.** For anything outside our own code — Docker, Kubernetes, Azure portal, Terraform, Grafana, any cloud or observability tool — don't run the commands or make the change yourself. Give me the exact steps and commands, and I'll run them myself to get hands-on practice. Coding in this repo is not affected by this rule.
 
-**Never touch external tools yourself.** For anything outside our own code — Docker, Kubernetes, Azure or any cloud platform, Grafana, any observability/dashboard tool — don't run the commands or make the change yourself. Give me the exact steps and commands, and I'll run them myself to get hands-on practice. This applies to setup, changes, and debugging on these tools. Coding in this repo is not affected by this rule.
+**Summarize changes, don't narrate files.** When a feature is done, give a short technical summary of what changed — written like an answer you'd give in an interview — and explain how this piece fits into the overall architecture.
 
-**Summarize changes, don't narrate files.** When a feature is done, don't list out which files hold which code or walk through it section by section. Give a short, technical summary of what changed — written like an answer you'd give in an interview — and explain how this piece fits into the overall architecture. The goal is that I understand where it sits in the bigger picture, not a line-by-line account of the code.
+**Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands.
 
-**Actually update PROGRESS.md and actually commit — don't just plan to.** These have been skipped before: PROGRESS.md has stayed empty and code has gone long stretches without a commit or push. Don't treat these as reminders to note for later. At the end of every session, or every 2–3 work hours (whichever comes first), write the update into PROGRESS.md yourself, then commit and push. Before ending a session, check `git status` and `git log` to confirm both actually happened — don't assume.
+**Remind me of enterprise requirements.** If I suggest building a feature without a correlation ID, without going through APIM, or without Key Vault — stop me and remind me of the requirement before writing any code.
 
 ---
 

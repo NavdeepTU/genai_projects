@@ -9,27 +9,49 @@ on demand.
 
 ## The core technologies we will use and why
 - FastAPI + Python — our web server
-- LangGraph — for the multi-step pipeline (understand → plan → query → explain)
-- PostgreSQL — the database being queried
-- Neo4j — stores the database schema as a graph so agents understand
-  how tables connect to each other
-- Redis — caches repeated queries
-- MCP — exposes the query engine as a tool other systems can call
-- Terraform + EKS — infrastructure and Kubernetes deployment
-- Prometheus + Grafana + OpenTelemetry — full observability stack
-- React + Next.js — the user-facing query interface
+- LangGraph — for the multi-step pipeline (understand → plan
+  → query → validate → explain)
+- PostgreSQL — the database being queried by users
+- Neo4j — stores the database schema as a graph so agents
+  understand how tables connect to each other before generating
+  any SQL
+- Redis — caches repeated queries so identical questions don't
+  hit the LLM or database a second time
+- MCP server — exposes the query engine as a tool that other
+  AI systems can call
+- AKS (Azure Kubernetes Service) — runs all services in the
+  cloud with independent scaling
+- Azure Database for PostgreSQL Flexible Server — managed DB
+- Azure Cache for Redis — managed Redis
+- Azure Key Vault + Managed Identity — secrets, never hardcoded
+- Azure API Management — API gateway for all external traffic
+- Azure Container Registry — stores all Docker images
+- Azure Static Web Apps — hosts the Next.js frontend
+- Azure Front Door — CDN, WAF, and global routing
+- Azure Monitor + Application Insights — alongside Prometheus
+  + Grafana for full observability
+- Terraform with AzureRM provider — all infrastructure as code
+- GitHub Actions — CI/CD pipeline including the SQL eval suite
+- React + Next.js + TypeScript — the user-facing query interface
 
 ## Build order (do not skip ahead)
-1. Schema graph in Neo4j (map the database structure)
+1. Schema graph in Neo4j (map the database structure as a graph)
 2. Basic NL to SQL agent (plain English → SQL → result)
-3. SQL validation and safety layer (no destructive queries)
-4. LangGraph pipeline (classify → select tables → generate → validate → explain)
-5. Result formatting and chart generation
-6. Caching repeated queries with Redis
-7. MCP server exposing the query engine
-8. Terraform + EKS deployment
-9. Full observability (Prometheus + Grafana + OTEL traces)
-10. Frontend dashboard + auth
+3. SQL validation and safety layer (no destructive queries allowed)
+4. Role-based query permissions (who can query which tables)
+5. LangGraph pipeline (classify → select tables → generate →
+   validate → explain)
+6. Result formatting and chart generation
+7. Event-driven cache invalidation (Redis + cache busting
+   when underlying data changes)
+8. MCP server exposing the query engine
+9. Hallucination eval suite (LLM answer matches SQL result)
+10. Terraform + AKS deployment
+11. Full observability (Prometheus + Grafana + OTEL traces +
+    Application Insights)
+12. GitHub Actions CI/CD with eval suite on every push
+13. Frontend dashboard (polished, production-quality UI)
+14. Auth + Azure Front Door + production hardening
 
 ---
 
@@ -126,12 +148,9 @@ Help me write it based on my answer. Save it to `/docs/adr/ADR-XXX-feature-name.
 
 ## Feature Planning — Always Ask Me First
 
-At the start of every session, ask me:
-"What do you want to work on today? Here are the remaining features we haven't built yet: [list them]"
-
-Never pick the next feature yourself.
-Never implement something I didn't ask for.
-Never jump ahead.
+Never pick the next feature yourself. Never implement something I didn't
+ask for. Never jump ahead. Session startup — reviewing progress and
+deciding what to work on — is handled by the `/start-session` command.
 
 ---
 
@@ -163,9 +182,220 @@ Never jump ahead.
 - Python: FastAPI, async/await everywhere, Pydantic models for all request/response shapes
 - Never use raw dicts where a Pydantic model should exist
 - Every function must have a docstring explaining what it does and why
-- Every external call (DB, LLM, queue) must have error handling
-- No hardcoded secrets — use environment variables via pydantic-settings
+- Every external call (DB, LLM, Neo4j, Redis, Azure service) must have error handling
+- No hardcoded secrets — all secrets from Azure Key Vault via Managed Identity
 - Type hints on every function signature
+- Every API response includes a correlation_id field for tracing
+- The database connection pool for query execution is read-only — enforce this at
+  the connection level, not just in application logic
+
+---
+
+## Cloud Platform — Azure (use this everywhere, never suggest AWS)
+
+We are deploying on Azure. This is the most infra-heavy of
+the three projects — it has the most complete Terraform setup
+and the fullest observability stack. Use this as the project
+where every infrastructure concept is done properly.
+
+**Service mapping:**
+- All backend services → AKS (Azure Kubernetes Service)
+- PostgreSQL (the database users query) → Azure Database for
+  PostgreSQL Flexible Server — read-only connection pool for
+  query execution, separate admin connection for schema reads
+- Redis → Azure Cache for Redis
+- Secrets → Azure Key Vault + Managed Identity
+- Container registry → Azure Container Registry (ACR)
+- API Gateway → Azure API Management (APIM)
+- Frontend → Azure Static Web Apps
+- CDN + WAF + global routing → Azure Front Door (sits in front
+  of everything — important for security story in interviews)
+- Monitoring → Azure Monitor + Application Insights +
+  Prometheus + Grafana (Prometheus and Grafana run as pods
+  inside AKS)
+- Infrastructure → Terraform with AzureRM provider (most
+  complete Terraform setup across all three projects — covers
+  AKS cluster, ACR, Key Vault, PostgreSQL, Redis, APIM,
+  Front Door, Application Insights, and all networking)
+
+**Terraform covers in full:**
+- AKS cluster with node pools and autoscaling
+- Azure Container Registry
+- Azure Database for PostgreSQL Flexible Server
+- Azure Cache for Redis
+- Azure Key Vault with access policies per Managed Identity
+- Azure API Management instance and policies
+- Azure Front Door profile with WAF policy
+- Application Insights workspace
+- Virtual Network + subnets for AKS
+- All resource tags on every resource
+
+**Deployment pipeline:**
+test → SQL eval suite runs → build Docker images → push to
+ACR → apply Kubernetes manifests → smoke test staging →
+promote to prod
+
+The SQL eval suite runs on every push to main. If the eval
+suite drops below the accuracy threshold, the deployment
+is blocked automatically. This is a genuinely impressive
+CI/CD story for interviews.
+
+**Cost controls:**
+Every Terraform resource must include:
+- environment (dev / staging / prod)
+- project (ai-data-analyst)
+- team (your name)
+- cost_centre (learning)
+
+---
+
+## Enterprise Requirements (non-negotiable for all features)
+
+**1. API Gateway via Azure API Management**
+All external traffic goes through APIM. APIM handles rate
+limiting per user, per tenant, API versioning, and JWT
+validation before any request reaches the backend. Never
+expose a backend service directly to the internet.
+
+**2. Managed Identity for all secrets**
+Every AKS pod uses Managed Identity. No raw credentials in
+environment variables. Database passwords, Redis connection
+strings, LLM API keys — all come from Key Vault at runtime.
+
+**3. Read-only database connection pool**
+The connection pool used for executing user-generated SQL
+is read-only at the PostgreSQL role level — not just a flag
+in application code. Even if the SQL validation layer is
+bypassed somehow, a read-only connection physically cannot
+execute INSERT, UPDATE, DELETE, or DROP. This is the real
+security boundary. Be able to explain this in an interview.
+
+**4. Role-based query permissions**
+Not every user should query every table. A marketing analyst
+must not be able to run queries against HR salary data.
+Implement a permission layer that checks the user's role
+against the Neo4j schema graph — each table node has an
+allowed_roles property. Before including any table in SQL
+generation, verify the requesting user's role is in that
+list. If not, that table is invisible to them — not just
+blocked, invisible. The LLM never even knows it exists.
+
+**5. SQL validation pipeline — three layers**
+Every generated SQL passes through three validation steps
+before execution:
+- Syntax check: is this valid PostgreSQL?
+- Safety check: does it contain any write operations?
+  (INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER — all blocked)
+- Permission check: does the user have access to all tables
+  referenced in the query?
+All three must pass. Any failure returns a plain English
+error to the user — never the raw SQL or the error detail.
+
+**6. Event-driven cache invalidation**
+Redis caches query results. When an underlying table is
+updated, all cached queries that touched that table must
+be invalidated immediately — stale data in a business
+analytics context is a serious problem. Implement this
+as an event: table_updated event fires → cache invalidation
+worker finds all cached queries touching that table →
+deletes them from Redis. Store the table-to-cache-key
+mapping in Redis as a secondary index.
+
+**7. Hallucination eval suite in CI/CD**
+Build a labeled test set of 50+ question/answer pairs where
+the correct answer is known. For each pair, run the full
+pipeline and verify: (a) the SQL returns the right result,
+and (b) the natural language explanation matches the SQL
+result. If the LLM says "revenue was approximately 50" but
+the SQL returned 42 — that is a hallucination, and it is
+caught. This eval runs on every CI/CD push. Deployment is
+blocked if accuracy drops below threshold.
+
+**8. Correlation IDs on every request**
+Assigned at APIM entry. Propagates through every pipeline
+step, every LLM call, every database query, every cache
+hit or miss. Every log line must be JSON with: correlation_id,
+user_id, tenant_id, service_name, level, message.
+
+**9. Circuit breaker on LLM calls**
+If the LLM API fails or times out, the circuit breaker
+opens and returns a graceful message to the user: "The
+query engine is temporarily unavailable, please try again
+in a moment." Never let LLM timeouts cascade into 500
+errors that reach the user. Alert via Application Insights
+when the circuit opens.
+
+**10. Resource tagging on all Terraform resources**
+See Cloud Platform section. Every resource tagged. This
+project has the most Terraform resources — double check
+every resource block before applying.
+
+---
+
+## Frontend Standards — This Must Look World-Class
+
+This is the most visible project — a data analytics interface
+that non-technical business users interact with. The UI
+must feel like a premium product, not a demo.
+
+**Visual design principles:**
+- Clean, data-focused design — think Linear or Retool aesthetic
+- Use Tailwind CSS with a consistent design system
+- Dark mode from day one — CSS variables for all colors
+- Fully responsive — works on mobile, tablet, desktop
+- Shadcn/UI as the component library
+- Charts via Recharts or Chart.js — clean, minimal,
+  professional-looking, not default chart.js grey
+- Loading skeletons for every data-loading state
+- Empty states designed with illustration and guidance
+- The query interface is the hero of the product — it must
+  feel fast, smart, and delightful to use
+
+**Specific pages to build for this project:**
+- Query interface — the main page. A clean, large input for
+  the natural language question. Below it: the generated SQL
+  shown in a syntax-highlighted code block (collapsible),
+  the result as a formatted table, an auto-generated chart
+  of the result, and a plain English explanation of the
+  answer. The user should feel like they are talking to a
+  smart analyst, not a query tool.
+- Query history — all past queries with their questions,
+  results, and whether the answer was marked as helpful by
+  the user. Searchable and filterable.
+- Schema explorer — a visual view of the database schema
+  powered by the Neo4j graph. Shows tables, columns, and
+  relationships. Non-technical users can browse what data
+  exists before asking questions.
+- Analytics dashboard — queries per day, most asked questions,
+  cache hit rate, average query latency, cost per query trend
+- Admin panel — user management, role assignments (who can
+  query which tables), API key management, audit log viewer
+
+**UX rules specific to a query interface:**
+- The question input must feel like a search bar — large,
+  centered, with suggested example questions shown below it
+  on first load
+- Query results must appear progressively — first show the
+  SQL, then the table, then the chart, then the explanation.
+  Do not wait for all of them before showing anything.
+- The chart type must be automatically chosen based on the
+  data shape — bar chart for comparisons, line chart for
+  trends, single number card for aggregates
+- Every query result must have a "Was this helpful?" thumbs
+  up / thumbs down — this feeds back into the eval suite
+- The generated SQL is shown but collapsed by default —
+  power users can expand it, non-technical users ignore it
+- Keyboard shortcut: Cmd+Enter submits the query
+
+**When building the frontend, always:**
+- Start with the query interface page first — it is the
+  most important and most complex
+- Show me the component structure before writing any JSX
+- Use TypeScript strictly — no `any` types anywhere
+- Every data-fetching component handles loading, error,
+  and empty states explicitly
+- Charts must be responsive — they resize cleanly on
+  any screen width
 
 ---
 
@@ -183,8 +413,20 @@ service-name/
 │   ├── repositories/ # All DB queries live here — never in services
 │   └── workers/      # Background jobs, queue consumers
 ├── tests/
+├── evals/            # Hallucination eval suite and labeled test set
 ├── docs/
 │   └── adr/          # Architecture Decision Records
+├── infra/            # All Terraform + Kubernetes manifests
+│   ├── terraform/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── aks.tf
+│   │   ├── database.tf
+│   │   ├── networking.tf
+│   │   └── outputs.tf
+│   └── k8s/          # Kubernetes deployment YAML files
+├── .github/
+│   └── workflows/    # GitHub Actions — CI/CD + eval suite
 ├── docker-compose.yml
 ├── Dockerfile
 └── README.md
@@ -194,22 +436,22 @@ Ask me: "Can you tell me why we separate repositories from services?" before we 
 
 ---
 
-## Session Start Ritual
-
-At the start of EVERY session, do this:
-1. Show me a summary of what we built last session (read from README or git log)
-2. Ask me to explain back to you what the last feature we built does
-3. If I can't explain it clearly, briefly re-explain it before moving on
-4. Then ask what I want to tackle today
-
----
-
 ## Interview Prep Built In
 
 After every major feature, ask me these questions as if you are an interviewer:
 - "Why did you choose [technology X] over [alternative Y]?"
 - "Walk me through what happens when [failure scenario]"
 - "How would you change this design if you had 10x the data?"
+- "How does your read-only connection pool actually enforce safety —
+  what happens if someone bypasses the application layer?"
+- "How does role-based table visibility work — walk me through
+  what happens when a marketing user asks about salary data?"
+- "What is event-driven cache invalidation and why is it harder
+  than it sounds?"
+- "Your eval suite blocks deployments — what happens when a
+  legitimate model improvement drops accuracy on old test cases?"
+- "How does Azure Front Door improve the security posture
+  compared to exposing AKS directly?"
 
 I should be able to answer from memory. If I can't, we revisit before moving on.
 
@@ -219,9 +461,8 @@ I should be able to answer from memory. If I can't, we revisit before moving on.
 
 Maintain a living file at `docs/ARCHITECTURE.md` for the entire project.
 
-This is not a technical spec — it is a plain English guide that anyone (including future-me) can read to understand how the whole system works.
-
-**Update it after every major feature is completed.** It should always reflect the current state of the project, not what we planned to build.
+This is a plain English guide — not a technical spec. Updated
+automatically by `/end-session` at the close of each session.
 
 Structure it like this:
 
@@ -231,54 +472,52 @@ Structure it like this:
 ## What this system does (2–3 sentences, no jargon)
 
 ## The big picture — how the pieces fit together
-  Plain English description + a simple text diagram showing
-  how data flows from one part of the system to another.
-  Example: User uploads a PDF → Ingestion service breaks it
-  into chunks → Each chunk gets converted to a vector →
-  Vectors are stored in the database → User asks a question
-  → We find the most relevant chunks → LLM generates answer
+  Plain English + text diagram: User types question →
+  LangGraph pipeline → Neo4j schema graph consulted →
+  SQL generated → validated → executed → result →
+  chart generated → explanation written → user sees answer.
 
 ## The main components
-  For each major part of the system:
-  - What is it called
-  - What is its one job (one sentence)
-  - What does it talk to and why
-  - What would break if it disappeared
+  For each service: what it does, what it talks to,
+  what breaks if it disappears.
 
 ## Key decisions we made and why
-  Short summaries of the most important architectural choices.
-  Link to the full ADR for each one.
-  Example: "We use Kafka instead of a simple HTTP call for
-  ingestion because documents can take 30 seconds to process
-  and we don't want the user to wait. See ADR-002."
+  Link to ADRs for: why Neo4j for schema, why read-only
+  connection pool at the DB role level, why event-driven
+  cache invalidation, why eval suite blocks CI/CD.
 
-## How data moves through the system
-  Walk through the two or three most important user journeys
-  step by step in plain English. No code. Just: "Step 1 —
-  user does X. Step 2 — the system does Y because Z."
+## How a query runs end to end
+  Step by step in plain English. No code.
+
+## Security and permission model
+  How role-based table visibility works. How the three-layer
+  SQL validation pipeline works. Why the read-only connection
+  is the real safety boundary. How Azure Front Door and APIM
+  protect the system before any code runs.
+
+## The eval suite
+  What it tests, how it catches hallucinations, why it runs
+  in CI/CD, what happens when it fails.
 
 ## What could go wrong and how we handle it
-  For each major failure scenario, explain in plain English
-  what happens and how the system recovers.
+  LLM timeout, cache staleness, bad SQL that passes
+  validation, Neo4j schema graph out of sync.
+
+## Azure infrastructure overview
+  What Terraform provisions, how AKS is structured, how
+  Front Door + APIM + AKS + Static Web Apps fit together.
+  Plain English, no commands or code.
 
 ## Glossary
-  Define every technical term used in this project in one
-  plain English sentence. Add a new term every time we
-  introduce one.
+  Every technical term defined in one plain English sentence.
 ```
-
-**Rules for this document:**
-- No code snippets — this is a reading document, not a code document
-- No bullet point walls — write in short paragraphs
-- Every section must make sense to someone who has never seen the codebase
-- If a section becomes too long, it means the system is too complex — flag it
 
 ---
 
 ## Progress Tracker
 
-Maintain a `PROGRESS.md` file in the project root.
-After each session, update it with:
+Maintain a `docs/PROGRESS.md` file. Updated automatically by
+`/end-session` at the close of each session — each entry covers:
 - What we built
 - What I struggled with
 - What concepts I need to revisit
@@ -286,13 +525,46 @@ After each session, update it with:
 
 ---
 
+## Interview Prep Document
+
+Maintain a `docs/INTERVIEW_PREP.md` file — a study sheet for reviewing
+before an actual interview, separate from the ADRs and the architecture
+doc.
+
+Updated automatically by `/end-session` at the close of each session.
+Each new section covers the Q&A pairs from that feature's protocol Step
+6/interview-prep round: what it does in one sentence, why we chose what
+we chose over the alternatives, what happens on the failure scenarios we
+walked through, and the 10x-scale question and answer. Include the
+project-specific interview questions listed under "Interview Prep Built
+In" too, once they've actually been answered.
+
+**Rules for this document:**
+- Plain, simple language — no jargon without a plain-English explanation,
+  same communication rules as everywhere else in this file.
+- Written as answers meant to be said back naturally in an interview, not
+  recited word-for-word.
+- Add a "General concepts" section at the bottom for things worth knowing
+  independent of any one feature (e.g. why a read-only connection pool is
+  a real security boundary, what event-driven cache invalidation means).
+
+---
+
 ## Additional Working Rules
 
-**Keep updates short.** When explaining a change or what you just built, keep it to 5–10 lines max. If a task is too big to explain briefly, break it into a smaller task instead. Then move to the next task.
+**Keep updates short.** 5–10 lines max per explanation. Break into smaller tasks if needed.
 
-**Ask, don't tell, what's next.** Don't announce the next step yourself. Ask: "What do you think is the best next thing to do?" If my answer is reasonable, confirm it. If you see a better option, say so and why — but only after I've answered.
+**Ask, don't tell, what's next.** Always ask me first. Confirm if reasonable. Suggest alternatives only after I've answered.
 
-**Commit and push every 2–3 work hours.** Track elapsed working time. After 2–3 hours of effort, commit the changes and push to the remote. If no remote is set up yet, ask me for the repository URL and set it before pushing.
+**Never touch external tools yourself.** For Docker, Kubernetes, Azure portal, Terraform, Grafana — give me the exact commands, I'll run them myself. Coding in this repo is not affected.
+
+**Summarize changes, don't narrate files.** Short technical summary written like an interview answer.
+
+**Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands.
+
+**Remind me of enterprise requirements.** If I try to build the database connection without making it read-only, or skip the SQL validation layers, or skip the eval suite in CI/CD — stop me and remind me before any code is written.
+
+**The eval suite is part of the product.** It is not a nice-to-have. Every time we add a feature that touches the SQL pipeline, ask: "Do we need to add new eval cases for this?" The answer is almost always yes.
 
 ---
 

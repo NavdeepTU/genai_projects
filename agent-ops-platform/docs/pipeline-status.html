@@ -1,0 +1,262 @@
+<title>Agent Ops Platform — Build Status</title>
+<style>
+  :root {
+    --bg: #F4F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EDF0F3;
+    --ink: #1B222B;
+    --ink-muted: #5C6773;
+    --border: #D8DEE4;
+    --accent: #2C4A6E;
+    --accent-soft: #DCE6EF;
+    --done: #2F8F5B;
+    --done-soft: #E3F3EA;
+    --pending: #7A8492;
+    --pending-soft: #ECEEF1;
+    --shadow: 0 1px 2px rgba(27,34,43,0.06), 0 8px 24px -12px rgba(27,34,43,0.12);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151A;
+      --surface: #1A1F26;
+      --surface-2: #20262E;
+      --ink: #E7EAEE;
+      --ink-muted: #9AA5B2;
+      --border: #2B323C;
+      --accent: #7CA0C7;
+      --accent-soft: #23334A;
+      --done: #4FBE86;
+      --done-soft: #16301F;
+      --pending: #838D9B;
+      --pending-soft: #262B33;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151A;
+    --surface: #1A1F26;
+    --surface-2: #20262E;
+    --ink: #E7EAEE;
+    --ink-muted: #9AA5B2;
+    --border: #2B323C;
+    --accent: #7CA0C7;
+    --accent-soft: #23334A;
+    --done: #4FBE86;
+    --done-soft: #16301F;
+    --pending: #838D9B;
+    --pending-soft: #262B33;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EDF0F3;
+    --ink: #1B222B;
+    --ink-muted: #5C6773;
+    --border: #D8DEE4;
+    --accent: #2C4A6E;
+    --accent-soft: #DCE6EF;
+    --done: #2F8F5B;
+    --done-soft: #E3F3EA;
+    --pending: #7A8492;
+    --pending-soft: #ECEEF1;
+    --shadow: 0 1px 2px rgba(27,34,43,0.06), 0 8px 24px -12px rgba(27,34,43,0.12);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    padding: 2.5rem 1.5rem 4rem;
+    display: flex;
+    justify-content: center;
+  }
+
+  .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  .page {
+    width: 100%;
+    max-width: 960px;
+    display: flex;
+    flex-direction: column;
+    gap: 2.25rem;
+  }
+
+  header.top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.25rem;
+  }
+
+  .eyebrow {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.5rem;
+  }
+
+  h1 {
+    font-size: 1.7rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .legend {
+    display: flex;
+    gap: 1.1rem;
+    font-size: 0.82rem;
+    color: var(--ink-muted);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    flex: none;
+  }
+  .dot.done { background: var(--done); }
+  .dot.pending {
+    background: transparent;
+    border: 1.5px dashed var(--pending);
+  }
+
+  section.block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+
+  .block-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+  }
+
+  .block-title h2 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 0;
+  }
+
+  .block-title .count {
+    font-size: 0.78rem;
+    color: var(--ink-muted);
+  }
+
+  .note-box {
+    background: var(--surface-2);
+    border: 1px dashed var(--pending);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.85rem;
+    color: var(--ink-muted);
+  }
+
+  .note-box strong { color: var(--ink); }
+
+  footer.roadmap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  footer.roadmap h2 {
+    font-size: 0.82rem;
+    font-weight: 700;
+    margin: 0;
+    color: var(--ink-muted);
+    letter-spacing: 0.02em;
+  }
+
+  .roadmap-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.5rem 1.5rem;
+  }
+
+  .roadmap-list li {
+    font-size: 0.85rem;
+    color: var(--ink-muted);
+    display: flex;
+    gap: 0.55rem;
+    align-items: baseline;
+  }
+
+  .roadmap-list .n {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--border);
+    flex: none;
+  }
+</style>
+
+<div class="page">
+
+  <header class="top">
+    <div>
+      <p class="eyebrow">Agent Ops Platform · 0 of 14 build steps complete</p>
+      <h1>Build status</h1>
+    </div>
+    <div class="legend">
+      <span class="legend-item"><span class="dot done"></span>Built</span>
+      <span class="legend-item"><span class="dot pending"></span>Not started</span>
+    </div>
+  </header>
+
+  <section class="block">
+    <div class="note-box">
+      <strong>Nothing built yet.</strong> This is a fresh project — scaffolding
+      exists (empty <span class="mono">app/</span> folders, Dockerfile,
+      docker-compose.yml) but no code has been written. This page will fill in
+      with completed pipeline steps as features land, same format as the
+      other two projects.
+    </div>
+  </section>
+
+  <footer class="roadmap">
+    <h2>Not started · full build order</h2>
+    <ul class="roadmap-list">
+      <li><span class="n mono">01</span>Single agent with tool calling</li>
+      <li><span class="n mono">02</span>LangGraph supervisor + worker graph</li>
+      <li><span class="n mono">03</span>Workflow state persistence + checkpointing</li>
+      <li><span class="n mono">04</span>Human-in-the-loop review queue</li>
+      <li><span class="n mono">05</span>Custom MCP server</li>
+      <li><span class="n mono">06</span>Neo4j agent memory graph</li>
+      <li><span class="n mono">07</span>Agent timeout + circuit breaker</li>
+      <li><span class="n mono">08</span>Cost and token tracking per agent</li>
+      <li><span class="n mono">09</span>Append-only audit trail</li>
+      <li><span class="n mono">10</span>OpenTelemetry + Grafana dashboard</li>
+      <li><span class="n mono">11</span>AKS deployment via Terraform + CI/CD</li>
+      <li><span class="n mono">12</span>Evaluation suite</li>
+      <li><span class="n mono">13</span>Frontend dashboard</li>
+      <li><span class="n mono">14</span>Auth + role-based access + hardening</li>
+    </ul>
+  </footer>
+
+</div>
