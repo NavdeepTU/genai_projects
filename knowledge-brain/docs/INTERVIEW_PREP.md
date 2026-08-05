@@ -343,6 +343,81 @@ failure rates to catch. Nothing in this project watches that yet.
 
 ---
 
+## Feature 4: Reranking
+
+**What does reranking do, in one sentence?**
+It takes hybrid search's candidate chunks — now a wider pool of 20,
+instead of the final 5 — and uses a model that looks at the question and
+each chunk *together* to pick the 5 that actually answer it best, instead
+of trusting vector/keyword search's own ranking as final.
+
+**Why isn't hybrid search's own ranking good enough on its own?**
+Vector and keyword search both score the question and a chunk
+*separately* — an embedding compares two independently-computed numbers,
+never the actual texts side by side. That's fast enough to check against
+every row in the database, but approximate. A reranker (specifically, a
+cross-encoder) processes the actual question and one actual chunk
+together in a single pass, which is far more accurate — but far too slow
+to run against everything, only against a short list hybrid search has
+already narrowed down.
+*Further reading: [Sentence Transformers' official "Retrieve & Re-Rank" documentation](https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html), which lays out exactly this two-stage pattern.*
+
+**Why does hybrid search now fetch 20 candidates instead of 5?**
+Because reranking needs something to actually choose between. If hybrid
+search only ever produced the final 5, reranking would still technically
+run — Voyage would still score and could still reorder those same 5 — but
+it could never promote a chunk that hybrid search's own ranking happened
+to place 8th over one it ranked 3rd, since anything outside the top 5
+would already be gone. Fetching a wider pool is what gives reranking room
+to actually change *which* chunks reach the LLM, not just their order.
+
+**Why Voyage AI specifically, over a local model or reusing OpenAI?**
+Three options existed: a local open-source cross-encoder, Voyage's hosted
+Rerank API, or asking OpenAI directly via a prompt to rank the
+candidates. OpenAI would have been the easiest to wire in — same client,
+same settings pattern already used twice — but the goal was specifically
+to use a model actually trained for relevance scoring, not repurpose a
+general chat model for a task it wasn't trained for. Voyage over a local
+model, specifically to avoid pulling a heavy new ML dependency (PyTorch,
+downloaded weights) into a project where every AI capability so far goes
+through a hosted API, not local inference. Its free tier (200 million
+tokens) also made cost a non-factor, confirmed by checking current
+pricing directly rather than assuming.
+
+**What happens if Voyage itself fails?**
+Its own independent circuit breaker opens after 3 failures in 60 seconds,
+same mechanism as the two OpenAI ones. Unlike an OpenAI failure, this
+doesn't fail the request — `retrieval_service.py` catches it and falls
+back to hybrid search's own Reciprocal Rank Fusion order instead. This
+makes reranking the one external AI dependency in this system where
+failure degrades *quality*, not *availability* — verified for real by
+forcing the circuit breaker open and confirming the request still
+succeeded.
+
+**A real mistake happened while wiring this up — what, and how was it
+caught?**
+A real Voyage API key briefly ended up in `.env.example` — the *template*
+file meant to be committed to git with placeholder values — instead of
+`.env`, which is git-ignored. Caught by checking `git status` and
+`git log` before anything got pushed: the change was still unstaged and
+uncommitted, so nothing ever reached git history. Fixed immediately, and
+the exposed key was rotated anyway, since it had already appeared in
+conversation transcript text — cheap insurance for something free to
+redo. The habit worth keeping: `.env.example` only ever gets
+placeholder-shaped values; real secrets only ever go in `.env`.
+
+**If this had to run at real scale, what's the actual cost, and what's
+the honest trade-off?**
+At an estimated ~13,000 tokens per query (a question plus 20 candidate
+chunks), the 200-million-token free tier covers well over 15,000 queries
+before any billing starts, and stays cheap after that. The honest
+trade-off isn't cost, though — it's that this system now depends on
+*three* independent external AI vendors (two OpenAI call sites plus
+Voyage) for one query to fully succeed, each with its own credentials to
+manage and its own circuit breaker to reason about independently.
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

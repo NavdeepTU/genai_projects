@@ -405,3 +405,73 @@ commits existed yet.
   were throwaway, not permanent; still the longest-standing open gap.
 - PII detection, ACL, APIM, and Key Vault remain intentionally deferred
   per ADR-007.
+
+---
+
+## Session: 2026-08-05 (continued) — Test suite (started, paused), Feature 4: Reranking
+
+### What we built
+- **Started the automated test suite, then deliberately paused it.**
+  Added `pytest`/`pytest-asyncio`, fixed the same "no module named app"
+  issue `create_tables.py` has via `pythonpath = ["."]` in
+  `pyproject.toml`. Wrote and verified `tests/test_chunking.py` (5 tests)
+  and `tests/test_extraction.py` (4 tests, faking `pypdf.PdfReader` since
+  testing a third-party library's own parsing isn't our job). Agreed on a
+  real-database/faked-OpenAI testing strategy — proven correct in the
+  same conversation, since last session's real bugs were only catchable
+  against a real database. Paused by explicit choice to move to
+  reranking; remaining work (a test database fixture, the ingestion
+  integration test, and tests for hybrid search, the ADR-012 fallback,
+  the circuit breaker, and the audit log) is tracked in memory
+  (`test-suite-progress.md`), not forgotten.
+- **Built reranking (Feature 4).** Compared three options — a local
+  Hugging Face cross-encoder, Voyage AI's hosted Rerank API, and
+  prompt-based reranking via OpenAI — and chose Voyage specifically to
+  use a model actually trained for relevance scoring, without pulling a
+  heavy new ML dependency into a project that otherwise only talks to
+  hosted AI APIs. Both searches (and RRF's own merge) now fetch a wider
+  pool of 20 candidates instead of 5, and a new
+  `app/services/reranking.py` narrows that pool to the final 5 using
+  Voyage's `rerank-2.5-lite` model, wrapped in its own circuit breaker.
+  If Voyage fails, `retrieval_service.py` falls back to hybrid search's
+  own RRF order rather than failing the request — verified for real by
+  forcing the circuit breaker open. This also fixed a previously-deferred
+  code-review finding as a side effect: RRF used to be capped at
+  `retrieval_top_k` before merging, so it could never reward a chunk both
+  searches ranked just outside that cutoff.
+- Documented the decision in
+  [`ADR-013`](adr/ADR-013-reranking-with-voyage-ai.md), including the
+  secret-handling mistake below, honestly, as part of the record.
+
+### What I struggled with
+- Understood the core trade-off (narrow tests localize failures) well on
+  the first try. Needed one correction on reranking: initially thought
+  reranking's role was to hand the LLM each chunk's "priority" to weigh
+  during generation — the LLM never sees scores at all; reranking only
+  decides *which* chunks reach the LLM in the first place.
+- A real incident: pasted the real Voyage API key into `.env.example`
+  (the tracked template file) instead of `.env` (git-ignored). Caught
+  immediately — confirmed via `git status`/`git log` that nothing had
+  been committed or pushed — fixed in place, and rotated the key anyway
+  since it had already appeared in conversation text. Worth remembering
+  going forward: `.env.example` only ever gets placeholder values.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly (instead of
+  `app.services.extraction.PdfReader`, where the name is actually looked
+  up) wouldn't have worked — asked, not yet answered back.
+- Why the session-expiry bug from last session was direction-dependent —
+  carried over from last session, still not revisited.
+
+### What's next
+- Resume the paused test suite: a dedicated test database, the ingestion
+  integration test, then hybrid search, the ADR-012 fallback, the circuit
+  breaker, and the audit log (see `test-suite-progress.md` in memory for
+  the full list).
+- Four code-review-sourced fixes and the earlier performance items
+  remain deferred, tracked in memory
+  (`code-review-followups.md`, `future-optimizations.md`).
+- LangGraph multi-step query pipeline is next in the build order after
+  reranking, if we stick to the plan.
+- PII detection, ACL, APIM, and Key Vault remain intentionally deferred
+  per ADR-007.

@@ -24,12 +24,17 @@ class Settings(BaseSettings):
     # Answer generation
     generation_model: str = "gpt-4o-mini"
 
+    # Reranking
+    voyage_api_key: str
+    reranking_model: str = "rerank-2.5-lite"
+
     # Chunking
     chunk_size: int = 500
     chunk_overlap: int = 50
 
     # Retrieval
     retrieval_top_k: int = 5
+    retrieval_candidate_pool: int = 20
 
 
 @lru_cache

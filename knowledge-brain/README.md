@@ -19,14 +19,18 @@ and why it was made that way.
   a vector search (meaning) and a keyword search (exact terms, via
   Postgres full-text search) run and get merged with Reciprocal Rank
   Fusion → an LLM answers using only that retrieved text.
+- **Reranking** — hybrid search's top 20 candidates get re-scored by
+  Voyage AI's reranker, which looks at the question and each chunk
+  together instead of separately, before the best 5 reach the LLM. Falls
+  back to hybrid search's own ranking if Voyage is unavailable.
 - **Correlation IDs, an append-only audit log, and circuit breakers**
-  around both OpenAI calls — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
+  around every external AI call (OpenAI and Voyage) — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
   for why these three were prioritized over other pending requirements.
 
-**Not built yet:** reranking, a LangGraph multi-step query pipeline, a
-Neo4j document-relationship graph, PII detection, document access
-control, an evaluation harness, an MCP server, the frontend, auth, and
-Azure deployment. See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** a LangGraph multi-step query pipeline, a Neo4j
+document-relationship graph, PII detection, document access control, an
+evaluation harness, an MCP server, the frontend, auth, and Azure
+deployment. See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - No automated test suite yet (`tests/` is empty).
@@ -64,6 +68,8 @@ reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
   for why not a dedicated vector DB, yet)
 - **OpenAI** — `text-embedding-3-small` for embeddings,
   `gpt-4o-mini` for answer generation
+- **Voyage AI** — `rerank-2.5-lite` for reranking hybrid search's results
+  before generation (see [`ADR-013`](docs/adr/ADR-013-reranking-with-voyage-ai.md))
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
 - **Docker** — runs Postgres locally, isolated from anything else on
   the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
@@ -83,7 +89,8 @@ at a time, not upfront.
    ```
    docker exec knowledge-brain-postgres psql -U knowledge_brain -d knowledge_brain -c "CREATE EXTENSION IF NOT EXISTS vector;"
    ```
-3. **Copy the environment file** and add your own OpenAI API key:
+3. **Copy the environment file** and add your own OpenAI and Voyage AI
+   API keys:
    ```
    cp .env.example .env
    ```

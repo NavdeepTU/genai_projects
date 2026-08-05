@@ -313,7 +313,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 2 of 10 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 4 of 10 features complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -510,10 +510,41 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> correlation IDs confirmed matching in both response body and header, including reusing a client-supplied ID; both user actions confirmed landing in <code>audit_log</code> with correct data; circuit breaker confirmed opening after 3 simulated failures, rejecting the next call without attempting it, and auto-recovering after the cooldown.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 4 — Reranking <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Wider candidate pool</span>
+        <span class="path mono">both searches + RRF now fetch 20, not 5</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Rerank via Voyage AI</span>
+        <span class="path mono">app/services/reranking.py · rerank-2.5-lite</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Top 5 to generation</span>
+        <span class="path mono">retrieval_service.py · falls back to RRF order if Voyage is down</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> a real question against a real document correctly prioritized the chunk containing an exact error code over unrelated chunks. Separately verified the fallback path by forcing Voyage's circuit breaker open — the request still succeeded, using hybrid search's own ranking instead. See ADR-013.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">04</span>Reranking</li>
       <li><span class="n mono">05</span>LangGraph query pipeline</li>
       <li><span class="n mono">06</span>Neo4j relationship graph</li>
       <li><span class="n mono">07</span>Evaluation harness</li>
