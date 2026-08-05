@@ -317,3 +317,91 @@ commits existed yet.
   the longest-standing open gap.
 - PII detection, ACL, APIM, and Key Vault remain intentionally deferred
   per ADR-007.
+
+---
+
+## Session: 2026-08-05 — Documentation bar retrofit, code review, and hybrid search hardening
+
+### What we built
+- **Documentation Bar retrofit.** `CLAUDE.md` gained a new "Documentation
+  Bar — Big Tech Interview Standard" section requiring `ARCHITECTURE.md`,
+  `INTERVIEW_PREP.md`, and every ADR to show trade-offs, concrete
+  scale/failure numbers, ownership-level (cost/operability/on-call)
+  reasoning, and precision over vagueness. Applied it retroactively to
+  all 11 existing ADRs (each gained a new "Scale, cost, and on-call
+  reality" section) and threaded the same rigor into `ARCHITECTURE.md`
+  and `INTERVIEW_PREP.md`'s existing sections. `README.md` was
+  deliberately left alone — the new standard names only the three doc
+  types above, and README's own job is quick external orientation, not
+  interview-depth study material.
+- **Ran `/code-review` on hybrid search.** A background review agent
+  returned findings; each concrete one was re-verified directly against
+  the live dev database (checked actual indexes with `\d chunks`,
+  confirmed a claimed double `to_tsvector` computation with `EXPLAIN
+  VERBOSE`, and disproved one claimed bug by just running the query it
+  said would fail). Six findings survived verification. Two more
+  suggestions (generalizing a two-argument function, deduplicating ~5
+  lines across two methods) were deliberately dropped — both would have
+  meant designing for hypothetical future need, which `CLAUDE.md`
+  explicitly says not to do.
+- **Fixed the most serious finding: a failure in either half of hybrid
+  search took down the whole request**, even when the other half had
+  good results. Fix: catch each search's failure independently, roll
+  back the shared session so the other search can still run, and only
+  raise (`RetrievalUnavailableError`, a new `503` in `app/api/query.py`)
+  if *both* fail. Chose "proceed with what succeeded" over retrying, to
+  avoid retry-storming an already-struggling database, and because
+  Reciprocal Rank Fusion already treats a single-search result as fully
+  legitimate.
+- **Found and fixed a second bug the first fix introduced, only by
+  testing it.** The `rollback()` needed to recover from one search's
+  failure was expiring the *other*, already-successful search's fetched
+  chunks (`Session.rollback()` invalidates every tracked object, not just
+  the failed query's). Fixed by detaching each search's results from the
+  session (`session.expunge()`) right after fetching them. Verified with
+  a throwaway script that force-fails each search independently — this
+  bug only showed up when the *first*-run search (vector) succeeded and
+  the *second* (keyword) failed, not the reverse, since only already-
+  loaded objects are vulnerable to being expired.
+- Documented the decision and the subtlety in
+  [`ADR-012`](adr/ADR-012-hybrid-search-partial-failure.md).
+- Four remaining code-review findings (missing structured/correlation_id
+  logging on the keyword-search error path, `to_tsvector` computed twice
+  per row, hybrid search's RRF candidates truncated to `top_k` before
+  merging — capping its own upside, `RRF_K` hardcoded instead of living
+  in `Settings`) were deliberately deferred, tracked in a new memory file
+  kept separate from the existing performance-optimization list, since
+  the user wanted code-review-sourced fixes tracked apart from
+  performance items.
+
+### What I struggled with
+- Skipped explaining back why the session-expiry bug only hit one
+  direction (vector-succeeds-then-keyword-fails) and not the other — will
+  revisit next session.
+- Initially misread what "skip that call" meant in a walkthrough question
+  about the rollback fix — worth double-checking my own phrasing is
+  unambiguous before asking a check-back question.
+
+### Concepts to revisit
+- Why the session-expiry bug is direction-dependent (only the *first*
+  search's results are at risk, since only already-loaded objects can be
+  expired by a later rollback).
+- SQLAlchemy's object expiration model in general — `expire_on_commit`
+  only governs behavior after `commit()`, not `rollback()`, which always
+  expires tracked objects unconditionally. Worth understanding this
+  distinction cold, not just the one bug it caused here.
+
+### What's next
+- Four deferred code-review fixes tracked in memory
+  (`code-review-followups.md`, kept separate from
+  `future-optimizations.md`): structured logging on keyword-search
+  errors, double `to_tsvector` computation, RRF candidate truncation
+  before merge, and `RRF_K` moved into `Settings`.
+- Performance items from last session remain deferred to the same future
+  optimization pass: parallelizing hybrid search's two queries, HNSW
+  index, GIN index.
+- Reranking is still next in the build order if we stick to the plan.
+- Still no automated test suite — this session's verification scripts
+  were throwaway, not permanent; still the longest-standing open gap.
+- PII detection, ACL, APIM, and Key Vault remain intentionally deferred
+  per ADR-007.

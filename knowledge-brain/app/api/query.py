@@ -7,7 +7,7 @@ from app.core.middleware import get_correlation_id
 from app.models.query import QueryRequest, QueryResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
-from app.services.retrieval_service import RetrievalService
+from app.services.retrieval_service import RetrievalService, RetrievalUnavailableError
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -26,6 +26,11 @@ async def query(
         raise HTTPException(
             status_code=503,
             detail="The query engine is temporarily unavailable. Please try again in a moment.",
+        ) from None
+    except RetrievalUnavailableError:
+        raise HTTPException(
+            status_code=503,
+            detail="Search is temporarily unavailable. Please try again in a moment.",
         ) from None
 
     correlation_id = get_correlation_id()

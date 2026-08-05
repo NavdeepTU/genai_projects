@@ -48,3 +48,21 @@ in the call stack, with zero changes to existing function signatures.
   outside an HTTP request (e.g. once Kafka is introduced per ADR-001),
   those code paths will need their own way to set a correlation ID, since
   there's no incoming HTTP request to generate one from.
+
+## Scale, cost, and on-call reality
+There's one concrete, specific gotcha worth naming rather than leaving
+implicit: `ContextVar` is correctly isolated per `asyncio.Task`, which
+matches FastAPI's one-task-per-request model, so it's safe under normal
+concurrent load. But if any code ever spawns its own untracked task with
+`asyncio.create_task(...)` without explicitly copying the current context,
+that spawned task won't see the correlation ID — a real bug class, not a
+hypothetical one, and worth checking for the moment any background work is
+added inside a request's lifecycle.
+
+Cost is zero — this is a language-level feature, no infrastructure. The
+actual payoff is entirely operational: the first time there's a real
+production incident, being able to grep one correlation ID across every
+log line touched by one request — across ingestion, retrieval, and the
+audit log — is what turns "something is wrong somewhere" into "here's
+exactly what this one request did." That's the return on an otherwise
+invisible piece of plumbing.

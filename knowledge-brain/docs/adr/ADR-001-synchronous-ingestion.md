@@ -42,3 +42,28 @@ to an observed problem, not a guess at future scale.
 - Moving to Kafka later will require introducing a worker process and
   changing the upload endpoint to return immediately after saving the raw
   file, deferring the rest of the pipeline to that worker.
+
+## Scale, cost, and on-call reality
+The concrete failure mode isn't "OpenAI is slow" — it's connection pool
+exhaustion. SQLAlchemy's async engine defaults to `pool_size=5,
+max_overflow=10`, 15 connections total. A synchronous upload holds its
+connection for the *entire* pipeline duration — extraction, chunking, and
+the embedding call — not just the final save. At roughly 2-30 seconds per
+document depending on size, 16 concurrent uploads is enough to exhaust the
+pool; the 16th request doesn't fail cleanly, it queues silently waiting
+for a connection, so the visible symptom is rising latency, not a clear
+error. That's the actual number that would justify Kafka — not "we have a
+lot of documents," but "we regularly see 15+ uploads in flight at once."
+
+Cost-wise, this design is free at idle: no new process, no broker, riding
+entirely on the FastAPI server we're already running. Kafka's
+alternative means an always-on consumer process burning compute 24/7 even
+at zero traffic, plus a broker to keep healthy — a real recurring cost for
+capability this project doesn't need yet.
+
+The on-call story also differs in kind, not just degree. A stuck
+synchronous request shows up immediately as elevated request latency or a
+500 in APM — an obvious, well-understood signal. A queue-based failure
+(a stalled consumer, growing backlog) is invisible unless someone is
+specifically watching consumer lag — a harder failure mode to notice and
+a new monitoring surface this project doesn't currently have to own.

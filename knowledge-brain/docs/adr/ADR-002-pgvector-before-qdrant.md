@@ -39,3 +39,27 @@ bottleneck, not preemptively.
 - Vector search performance will eventually need to be re-evaluated as
   data grows; moving to Qdrant later will mean introducing a second
   datastore and keeping it in sync with Postgres.
+
+## Scale, cost, and on-call reality
+At 10 million chunks, each a 1536-dimension `float32` vector, the raw
+embedding data alone is roughly 10,000,000 × 1536 × 4 bytes ≈ 61 GB —
+before indexes, before the chunk text itself. Without a vector index (see
+ADR-006), `cosine_distance` at that size is a full sequential scan of that
+61 GB on every single query. That's the concrete point where "pgvector's
+performance becomes a bottleneck" stops being vague and becomes a specific,
+measurable trigger for adding an HNSW index, and eventually Qdrant.
+
+Ownership-wise, pgvector rides entirely on infrastructure already being
+paid for and operated — Azure Database for PostgreSQL Flexible Server
+already has monitoring, backups, and an on-call runbook by virtue of
+existing for the rest of the app's data. Qdrant would be a second stateful
+service: its own health checks, its own backup strategy, its own failure
+modes to learn — doubling the surface area of "things that can page
+someone" to solve a problem (large-scale vector search latency) that
+doesn't exist yet at this project's data volume. That operational cost,
+not raw query speed, is the real reason this is deferred rather than
+built defensively upfront.
+
+Cost concretely: an additional managed Qdrant instance is an added monthly
+line item with no current bottleneck to justify it. Revisit only once
+query latency, not developer preference, forces the question.

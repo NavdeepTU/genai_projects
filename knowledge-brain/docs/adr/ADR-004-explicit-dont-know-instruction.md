@@ -35,3 +35,22 @@ by an explicit rule.
 - This depends on the model reliably following instructions — if we later
   see it still guessing despite the instruction, we'd need to add an
   explicit relevance threshold on the retrieved chunks' distance scores.
+
+## Scale, cost, and on-call reality
+The real risk isn't cost, it's silence. LLMs don't follow instructions
+with 100% reliability — some non-zero fraction of the time, the model will
+still produce a confident-sounding wrong answer despite the instruction,
+and nothing in this codebase currently measures that rate. There's no
+automated evaluation harness yet (build-order step 9) to catch a
+hallucinated answer before a user sees it; today, the only backstop is a
+human noticing an answer looks wrong. That's an honest gap, not a solved
+problem — this ADR reduces hallucination risk, it doesn't eliminate it.
+
+Cost-wise this is free — it's a fixed string added to a prompt we're
+already sending, no extra API call, no added latency. Compare that to the
+deferred alternative (a code-level cosine-distance relevance threshold),
+which would need real tuning against labeled data before being
+trustworthy, and would need active monitoring afterward — set the
+threshold too aggressively and the system starts saying "I don't know" to
+questions it could have actually answered, which is its own quiet failure
+mode nobody would notice without dashboards tracking refusal rate.

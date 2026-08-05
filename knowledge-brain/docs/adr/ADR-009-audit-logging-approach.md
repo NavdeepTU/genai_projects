@@ -65,3 +65,23 @@ limitation rather than pretending to guarantee something it doesn't yet.
   connection or a bug elsewhere in the codebase that imports `AuditLog`
   directly and calls `session.delete(...)` on it — closing this gap
   requires the database role work described above.
+
+## Scale, cost, and on-call reality
+Two gaps worth naming precisely, not just "it's not perfect yet." First,
+the real enterprise fix for tamper-proofing isn't just revoking
+`UPDATE`/`DELETE` grants on a non-superuser role — production audit logs
+are commonly shipped to genuinely separate, write-once storage (e.g. Azure
+Blob Storage with an immutability policy, or a dedicated audit service),
+specifically because "a table in the same database as everything else,
+reachable by any role with enough privilege" isn't a real compliance
+boundary even with grants revoked. That's the actual target, not a
+restricted Postgres role as an end state.
+
+Second, this table has no retention or archival policy today. Every
+query and every upload writes a row, unindexed beyond its primary key, with
+no partitioning. At meaningful query volume this table grows unbounded —
+not a performance problem yet at this project's scale, but a known,
+un-actioned gap rather than something quietly assumed to be fine forever.
+Cost-wise, storage for audit rows is cheap in isolation, but an
+unbounded, unpartitioned table is the kind of thing that turns into a
+surprise migration project later if left unaddressed.

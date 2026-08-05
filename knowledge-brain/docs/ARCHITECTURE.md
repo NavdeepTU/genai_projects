@@ -33,10 +33,12 @@ flowchart TD
 
     subgraph retrieve["Asking a question (hybrid search)"]
         Q --> QEMBED[Embed the question]
-        QEMBED --> VEC[Vector search<br/>pgvector cosine similarity]
-        Q --> KW[Keyword search<br/>Postgres full-text search]
-        VEC --> RRF[Merge: Reciprocal<br/>Rank Fusion]
-        KW --> RRF
+        QEMBED --> VEC["Vector search<br/>(fails? use keyword results alone)"]
+        Q --> KW["Keyword search<br/>(fails? use vector results alone)"]
+        VEC --> BOTH{Both failed?}
+        KW --> BOTH
+        BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
+        BOTH -->|no| RRF[Merge: Reciprocal<br/>Rank Fusion]
         RRF --> GEN["Generate answer<br/>(OpenAI LLM, via circuit breaker)"]
     end
 
@@ -58,16 +60,19 @@ failed rather than left in limbo.
 meaning-vector, and two independent searches run one after another: a
 vector search (closest meaning) and a keyword search (Postgres full-text
 search, for exact terms vector search can miss — error codes, product
-IDs, rare proper nouns). The two ranked lists are merged into one using
-Reciprocal Rank Fusion, favoring chunks either search strongly agrees on.
-Those merged chunks, plus the original question, are handed to an LLM,
-which answers using only that retrieved text, and says it doesn't know
-rather than guessing if the answer isn't there.
+IDs, rare proper nouns). If one of the two searches fails, the system
+doesn't give up — it proceeds using whichever search actually succeeded,
+and only returns an error if *both* fail. The two ranked lists (or the
+one that's available) are merged into one using Reciprocal Rank Fusion,
+favoring chunks either search strongly agrees on. Those merged chunks,
+plus the original question, are handed to an LLM, which answers using
+only that retrieved text, and says it doesn't know rather than guessing
+if the answer isn't there.
 
-**What's new since the last update:** search is now hybrid — vector
-similarity and Postgres full-text keyword search both run, and their
-results are merged with Reciprocal Rank Fusion rather than trusting
-either search alone.
+**What's new since the last update:** hybrid search now degrades
+gracefully instead of failing outright when one of its two searches has a
+problem — see ADR-012 for why, and for a subtle session-handling bug the
+fix itself introduced and how it was caught.
 
 ## The main components
 
@@ -108,8 +113,11 @@ database queries.
 conductor for answering questions, mirroring the ingestion service's role.
 Embeds the question, asks the repository for both the closest chunks
 (vector) and the best keyword matches, merges them via hybrid search,
-then asks the generation service to write an answer. Talks to: embedding,
-the repository, hybrid search, and generation.
+then asks the generation service to write an answer. Each search's
+failure is handled independently — the service proceeds with whichever
+one succeeded and only raises `RetrievalUnavailableError` if both fail
+(see ADR-012). Talks to: embedding, the repository, hybrid search, and
+generation.
 
 **Hybrid search (`app/services/hybrid_search.py`)** — merges the vector
 search and keyword search result lists into one ranked list, using
@@ -167,7 +175,11 @@ stateDiagram-v2
 We run the pipeline synchronously (the user waits while their file is
 processed) rather than using a background queue like Kafka, deliberately
 starting simple and adding a queue later once we feel the pain of long
-processing times. See ADR-001.
+processing times. Concretely, that pain has a number: with the database
+connection pool's default size, roughly 15 concurrent uploads is enough
+to start exhausting it, since each upload holds its connection for the
+whole pipeline's duration — that's the actual threshold that would justify
+Kafka, not a vague sense of "too much traffic." See ADR-001.
 
 We chose Postgres + pgvector over a dedicated vector database (Qdrant) to
 start, since it keeps document metadata and search vectors in one place
@@ -203,7 +215,11 @@ The circuit breaker was built by hand rather than pulling in a library,
 consistent with how the rest of this project was built, and its state
 lives in each process's memory — meaning it does not yet work correctly
 across multiple server instances, since each one tracks failures
-independently. See ADR-010.
+independently. At real scale that's not just a missed optimization, it's
+a misleading on-call signal: dashboards would show inconsistent,
+partial error rates split oddly across replicas instead of one clean
+"OpenAI is down," which looks like a bug rather than the protection
+working as intended. See ADR-010.
 
 Keyword search uses Postgres's built-in full-text search rather than a
 dedicated search engine like Elasticsearch, for the same reason pgvector
@@ -236,8 +252,11 @@ LLM, which writes an answer grounded only in that retrieved text.
 **A scanned PDF with no real text** — some PDF pages are just a photograph
 of a page, with no actual character data underneath. Extracting text from
 a page like that returns nothing, so that page contributes no searchable
-content. Not handled yet — a future improvement would add OCR (a
-technology that reads text out of images) to cover this case.
+content. The document still gets marked "ready," since nothing in the
+pipeline actually errors — it just silently produces zero useful chunks,
+which is a worse failure mode than a visible one, since there's no signal
+telling anyone it happened. Not handled yet — a future improvement would
+add OCR (a technology that reads text out of images) to cover this case.
 
 **An embedding call fails partway through a large document** — because all
 of a document's chunks are sent to the embedding model in a single batch
@@ -249,7 +268,11 @@ need to be re-uploaded and reprocessed from scratch.
 similarity search still returns *something* (it always returns the
 closest chunks it can find, even if none are truly relevant), but the
 generation step's instructions mean the LLM says it doesn't know rather
-than forcing an answer out of unrelated context.
+than forcing an answer out of unrelated context. That instruction isn't
+perfectly reliable, though — there's no automated evaluation harness yet
+(build-order step 9) measuring how often the model still guesses despite
+being told not to, so today the only backstop against that is a human
+noticing an answer looks wrong. See ADR-004.
 
 **OpenAI itself starts failing repeatedly (outage, rate limit)** — after
 3 failures within 60 seconds, that call site's circuit breaker opens.
@@ -257,20 +280,28 @@ Further ingestion attempts fail fast and the document is marked `failed`,
 same as any other embedding failure. Further query attempts get an
 immediate `503` with a clear "temporarily unavailable" message instead of
 hanging until a timeout. After a cooldown, one trial call is allowed
-through to check whether OpenAI has recovered.
+through to check whether OpenAI has recovered. This only works cleanly
+as a single process today — run more than one server instance and each
+tracks its own failures independently, so one instance can report "down"
+while others keep serving successfully, a confusing, inconsistent signal
+rather than a clean one. See ADR-010.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
 itself is a superuser and could bypass a real database-level restriction.
-True enforcement needs a separate, deliberately restricted database role,
-which doesn't exist yet. See ADR-009.
+True enforcement needs either a separate, deliberately restricted database
+role, or (the more realistic enterprise fix) shipping audit entries to
+genuinely separate write-once storage, like Azure Blob Storage with an
+immutability policy — neither exists yet. See ADR-009.
 
 **Neither half of hybrid search has a real index yet** — both
 `cosine_distance` and `to_tsvector` are computed fresh, on every row, on
-every query. Fine at our current tiny scale, but at real scale this needs
-an HNSW index on the embedding column and a GIN index on a persisted
+every query. Fine at our current tiny scale, but at 10 million chunks
+(roughly 61 GB of raw embedding data alone, at 1536 dimensions per vector)
+an unindexed scan on every query becomes the dominant cost. The fix is an
+HNSW index on the embedding column and a GIN index on a persisted
 `tsvector` column — deliberately deferred, tracked as a future
-optimization rather than forgotten.
+optimization rather than forgotten. See ADR-002.
 
 **Keyword search can return fewer chunks than requested, even when vector
 search always returns exactly the requested count** — vector search
@@ -279,6 +310,18 @@ keyword search is a real filter and may find fewer matches, or none.
 Reciprocal Rank Fusion handles this naturally — a chunk found by only one
 search still gets included, just without the score boost a chunk found by
 both searches gets.
+
+**One of the two hybrid searches actually errors out (not just "found
+nothing," a real failure)** — the request no longer fails outright. The
+retrieval service catches each search's failure independently and
+proceeds using whichever one succeeded; only a failure of *both* searches
+returns a `503`. Getting this right required a second fix: rolling back
+the database session to recover from one search's failure was quietly
+invalidating the *other* search's already-fetched, successful results,
+since a rollback expires every object the session is still tracking —
+fixed by detaching each search's results from the session immediately
+after fetching them. Found by actually running a test that force-fails
+each search independently, not by reading the code. See ADR-012.
 
 ## Glossary
 

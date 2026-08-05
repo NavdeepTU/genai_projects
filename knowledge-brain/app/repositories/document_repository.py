@@ -97,3 +97,27 @@ class DocumentRepository:
             logger.exception("Failed to search for chunks by keyword")
             raise
         return list(result.scalars().all())
+
+    async def rollback(self) -> None:
+        """Clear an aborted transaction so later queries on this session can run.
+
+        Postgres refuses any further queries on a session after one fails,
+        until the transaction is explicitly rolled back — needed when the
+        caller wants to catch a failed search and try a different one on
+        the same session right after.
+        """
+        await self.session.rollback()
+
+    def detach(self, chunks: list[Chunk]) -> None:
+        """Detach already-fetched chunks from the session.
+
+        A rollback() (see above) invalidates every object still tracked
+        by the session, including ones from an *earlier*, successful
+        query — the next access to one of their columns would trigger a
+        surprise database round-trip to reload it, which isn't safe
+        outside an awaited call and raises instead. Detaching a chunk
+        right after fetching it keeps its already-loaded data usable
+        even if something else rolls the session back later.
+        """
+        for chunk in chunks:
+            self.session.expunge(chunk)

@@ -65,3 +65,27 @@ unavailable" message.
   the server resets it, and running multiple server instances means each
   has its own independent circuit state rather than a shared one. Worth
   revisiting once this runs as more than a single local process.
+
+## Scale, cost, and on-call reality
+The per-process state limitation isn't just a performance footnote — it
+produces a genuinely confusing on-call signal at real scale. On a
+multi-replica deployment, one instance could see 3 failures and open its
+circuit while three other replicas, having not personally observed those
+failures, keep calling OpenAI successfully. Dashboards would then show
+inconsistent, partial error rates split oddly across replicas rather than
+a clean "OpenAI is down" signal — which reads as a bug in the circuit
+breaker itself, not protection working correctly. That's arguably worse
+than having no circuit breaker at that scale, because it actively misleads
+whoever's debugging it. The real fix is moving the failure count into
+shared state (Redis, given this project's planned stack) so all replicas
+agree on the circuit's state.
+
+The specific numbers chosen — `failure_threshold=3`, `window_seconds=60`,
+`recovery_timeout=60` — were picked for a low-traffic dev environment,
+where waiting for many failures before protecting means many of this
+project's few real requests hit a doomed call firsthand. At production
+request volume, 3 failures in 60 seconds could trip on ordinary noise —
+three unlucky timeouts inside a burst of thousands of requests, not a real
+outage — so these thresholds would need retuning against real traffic
+statistics, not carried over as-is. Cost is negligible either way; this is
+in-process logic, not new infrastructure.

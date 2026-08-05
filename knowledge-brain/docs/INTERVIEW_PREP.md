@@ -66,11 +66,18 @@ technology that reads text out of images), which we haven't added.
 **If this had to handle 10x the documents — thousands of large PDFs a
 day — what breaks first?**
 Not really "the embedding model is slow" — it's that our synchronous
-design ties up a web server request for the *entire* time that slow call
-takes. At high volume, thousands of concurrent uploads would each hold a
-server worker hostage waiting on OpenAI, and we'd run out of available
-workers long before OpenAI itself became the bottleneck. This is exactly
-the scenario that would justify finally adding Kafka.
+design ties up a database connection for the *entire* time the pipeline
+runs. The connection pool defaults to 15 total connections, and each
+upload holds one for the whole 2-30 seconds a document takes to process.
+So somewhere around 15 concurrent uploads, new requests stop failing
+cleanly and start queueing silently, which shows up as rising latency, not
+a clear error — that's the concrete number that would justify finally
+adding Kafka, not a vague "too much traffic." It's also worth being honest
+that Kafka isn't free to run: it means an always-on consumer process
+burning compute even at zero load, and a new failure mode (a stalled
+consumer, growing backlog) that's invisible unless someone's specifically
+watching queue depth — a genuinely different on-call signal than "a
+request is slow."
 
 ---
 
@@ -125,11 +132,17 @@ we say so directly in the instructions we give it.
 happens to `/query`'s response time, and what's the actual fix?**
 Right now, finding the closest chunks means comparing the question against
 *every single row* — fine at tiny scale, painfully slow at millions of
-rows. The fix isn't a hash map (hash maps only do exact-key lookups, and
-there's no "exact match" in similarity search). The real fix is a vector
-index like HNSW, which pre-organizes the vectors into a searchable
-structure so a query only has to check a small fraction of all the rows,
-trading a tiny bit of accuracy for a big speed gain.
+rows. Concretely, 10 million chunks at 1536 dimensions each is around 61
+GB of raw embedding data alone, and every query would scan all of it. The
+fix isn't a hash map (hash maps only do exact-key lookups, and there's no
+"exact match" in similarity search). The real fix is a vector index like
+HNSW, which pre-organizes the vectors into a searchable structure so a
+query only has to check a small fraction of all the rows, trading a tiny
+bit of accuracy for a big speed gain. That's also the point where I'd
+actually consider moving to Qdrant instead of pgvector — not before, since
+pgvector already runs inside infrastructure we're already operating and
+monitoring, and standing up a second stateful service is a real ongoing
+cost, not just a technical upgrade.
 
 ---
 
@@ -171,8 +184,15 @@ update/delete methods in code is the first layer of that protection.
 **Is the audit log actually tamper-proof today?**
 Honestly, not fully. The application code can't alter it, but our local
 database connection is a superuser, which can bypass real database-level
-restrictions. True protection needs a separate, deliberately restricted
-database role — a known, deliberately deferred gap, not an oversight.
+restrictions. Even a properly restricted role is only a partial fix,
+though — the real enterprise answer is usually shipping audit entries to
+genuinely separate write-once storage, like blob storage with an
+immutability policy, precisely because "a table in the same database,
+reachable by anything with enough privilege" isn't a real compliance
+boundary. That's a known, deliberately deferred gap, not an oversight.
+There's also no retention or archival policy yet — the table just grows
+with every request, which is fine at this scale but would need a plan
+before it wasn't.
 
 **Why build a circuit breaker by hand instead of using a library?**
 Consistent with how the rest of the project was built — extraction,
@@ -241,6 +261,18 @@ only that one list, so it won't rank as high as a chunk both searches
 agreed on. Nothing gets excluded for appearing in only one list; RRF
 works over the union of both.
 
+**Hybrid search runs two queries per request now instead of one — what
+does that actually cost?**
+Concretely, it doubles database load per query, and since both queries
+currently run sequentially against the same connection, each request
+holds that connection from the pool for roughly twice as long as before.
+Using the same pool math as the ingestion side — about 15 total
+connections available — that means the point where concurrent queries
+start queueing for a connection happens at roughly half the traffic
+compared to before hybrid search existed. It's a real, halved number, not
+a free upgrade, even though it doesn't show up until there's real
+concurrent load.
+
 **At 10 million rows, what actually gets slow, and why?**
 Not "keyword search is inherently slower than vector search" — both
 sides currently compute their comparison fresh, on every row, on every
@@ -248,6 +280,66 @@ query, with no real index. For keyword search specifically, that means
 re-tokenizing and re-stemming every row's text from scratch on every
 query. The fix is a GIN index on a persisted `tsvector` column, the exact
 same pattern as the HNSW index needed on the vector side.
+
+---
+
+## Feature: Hybrid Search Hardening — Graceful Degradation on Partial Failure
+
+**What does this change do, in one sentence?**
+If one of hybrid search's two database queries fails, the system now
+answers using whichever one succeeded instead of failing the whole
+request — it only gives up if *both* fail.
+
+**Why not just retry the failed search instead?**
+Retrying sounds safer but often isn't. If a query failed because the
+database is genuinely under load, retrying immediately adds more load to
+an already-struggling system instead of relieving it — a "retry storm."
+Proceeding with the search that did succeed costs nothing extra and needs
+no new logic, since Reciprocal Rank Fusion already treats "found by only
+one search" as a completely normal case.
+
+**This came from a code review, not a feature request — how did that
+process work?**
+A background review agent went through the hybrid search code and
+returned findings. I didn't take them at face value — I re-verified the
+concrete ones myself against the running database (checked the actual
+index with `\d chunks`, confirmed a claimed double-computation with
+`EXPLAIN VERBOSE`, and actually executed a query that a different finding
+claimed would crash — it ran fine, so that one got dropped). Only
+findings that survived that verification became real work.
+
+**What's the subtlety with rolling back the database session, and why did
+fixing the first bug introduce a second one?**
+Both searches share one connection. If a query fails, Postgres refuses
+any further queries on that same connection until it's explicitly rolled
+back — so catching the failure isn't enough by itself; the *other* search
+would fail too without an explicit `rollback()`. But `rollback()` doesn't
+just reset the connection — it also expires every object the session is
+still holding onto, including the chunks the *other* search had already
+successfully fetched moments earlier. The next time the code reads one of
+those chunks' text, SQLAlchemy tries to quietly reload it from the
+database, which isn't allowed outside of an `await`, and crashes instead.
+The fix: detach each search's results from the session (`session.expunge()`)
+immediately after fetching them, so a later rollback has nothing left of
+theirs to invalidate.
+*Further reading: [SQLAlchemy's official docs on session state management and object expiration](https://docs.sqlalchemy.org/en/20/orm/session_state_management.html).*
+
+**How was this actually verified, not just reasoned about?**
+With a small script that force-fails each search independently (vector
+only, keyword only, then both) against the real repository and a real
+database connection, and checks the actual outcome. That script is what
+caught the session-expiry bug — reading the code after the first fix
+looked correct; running it didn't.
+
+**If we ran this at real production scale, what changes about how this
+failure would be noticed?**
+Before this change, a keyword-search-only problem (e.g. the missing index
+turning slow under real load) would fail *every single query* — loud, but
+overstates the actual damage. After this change, the same problem shows
+up as quietly degraded answer quality (RRF running on vector-only
+results) with an error log per failed search — a more accurate signal,
+but a much quieter one that needs someone actually watching per-search
+failure rates to catch. Nothing in this project watches that yet.
 
 ---
 

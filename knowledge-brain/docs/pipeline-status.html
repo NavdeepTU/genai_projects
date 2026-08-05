@@ -481,6 +481,7 @@
     </div>
 
     <p class="caveat"><strong>Verified end-to-end:</strong> a query for an exact error code embedded in a test document returned the correct answer; a purely conceptual question (no exact keywords) still returned a correct grounded answer, confirming no regression to plain vector search.</p>
+    <p class="caveat"><strong>Hardened:</strong> a code review (2026-08-05) found that a failure in either search used to take down the whole request, even when the other search had good results. Fixed with a per-search fallback — verified with a script that force-fails each search independently, including a follow-up bug the fix itself introduced (a session rollback quietly invalidating the other search's already-fetched results) caught the same way. See ADR-012.</p>
   </section>
 
   <section class="block">

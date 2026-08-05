@@ -71,3 +71,22 @@ scaffolding" reasoning behind every prior ADR.
   itself changes.
 - APIM and Key Vault remain moot until an actual Azure deployment is
   planned — revisit at that point.
+
+## Scale, cost, and on-call reality
+This ADR is a scoping decision, not a scale one, but it carries a real
+ownership question worth naming honestly: in a real company, deferring
+PII detection isn't a pure engineering call. Shipping a document-upload
+feature without PII detection is a risk-acceptance decision with actual
+legal exposure — the kind of thing that needs explicit sign-off from
+compliance or legal, not just an engineer's judgment that "auth doesn't
+exist yet so ACL can wait." On this project, that call is made
+unilaterally because it's a single-developer learning project with no
+real user data at stake; in a production system, the honest answer to "who
+approved deferring this" needs to be a name, not "the developer decided."
+
+The three items built now (correlation IDs, audit log, circuit breakers)
+were chosen partly *because* they're the cheapest to retrofit — none of
+them required designing around a system that doesn't exist yet (unlike
+ACL, which needs an auth model, or APIM, which needs an actual deployed
+gateway). That "retrofit cost" lens, not just "is it required," is what
+actually separated the two piles.

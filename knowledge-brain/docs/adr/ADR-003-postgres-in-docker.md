@@ -35,3 +35,24 @@ database version and setup with one command, with no manual install steps.
 - Data lives in a named Docker volume; deleting that volume (e.g. via
   `docker compose down -v`) wipes all local data, which is expected for a
   dev environment but worth remembering.
+
+## Scale, cost, and on-call reality
+This decision is scoped to local development only, and doesn't carry
+forward to production — the target there is Azure Database for PostgreSQL
+Flexible Server, which is neither a native install nor our own Docker
+container, so this ADR becomes moot the moment real deployment happens.
+
+The actual value here isn't performance, it's drift prevention. A native
+install's Postgres version can silently change underneath the project —
+a Homebrew upgrade, an OS update — with no record of when or why. Docker
+pins an exact version in `docker-compose.yml`; any change to it is a
+visible line in a diff and a git commit, not a silent surprise discovered
+during an on-call incident. That's a concrete debugging-time cost avoided,
+not a hypothetical one — the port-5432 collision that motivated this ADR
+in the first place cost real setup time before its cause was clear.
+
+Cost is zero either way locally — Docker Desktop is already a standard
+dev tool with no incremental spend. There is no equivalent "on-call"
+concern for a laptop-only database; the operational stakes only become
+real once Azure Database for PostgreSQL is the target, at which point
+this decision is superseded, not extended.

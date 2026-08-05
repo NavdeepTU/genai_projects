@@ -70,3 +70,25 @@ the rest of this project has been built.
 - Neither search result set is guaranteed to have `limit` chunks —
   keyword search is a real filter and can return fewer matches (or zero)
   even when vector search always returns exactly `limit`.
+
+## Scale, cost, and on-call reality
+Two queries per request instead of one doubles DB load per query, and
+because both queries currently share one `AsyncSession` run sequentially,
+each request holds its connection from the pool for roughly twice as long
+as before. Using the same pool math as ADR-001 (`pool_size=5,
+max_overflow=10`, 15 connections total), that means connection pool
+exhaustion under concurrent query load now happens at roughly half the
+concurrent request volume compared to single-search retrieval — a
+concrete, halved number worth knowing before assuming hybrid search is a
+free upgrade.
+
+Choosing Postgres full-text search over Elasticsearch also avoided a real
+operational cost, not just a "simpler for now" preference: Elasticsearch
+or OpenSearch would be a second stateful service needing its own cluster
+health monitoring, upgrade cadence, and backup strategy — on-call surface
+this project doesn't have to own today because search still lives inside
+the one Postgres instance already being operated for everything else.
+That trade reverses once keyword-search volume or data size genuinely
+outgrows what Postgres full-text search can serve — a threshold this
+project hasn't hit and isn't estimated, since no load testing has been
+done against realistic data volume yet.

@@ -1,10 +1,21 @@
+import logging
+
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core.config import get_settings
+from app.core.middleware import get_correlation_id
+from app.models.document import Chunk
 from app.repositories.document_repository import DocumentRepository
 from app.services.embedding import embed_chunks
 from app.services.generation import generate_answer
 from app.services.hybrid_search import reciprocal_rank_fusion
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+class RetrievalUnavailableError(Exception):
+    """Raised when both vector and keyword search fail for one request."""
 
 
 class RetrievalService:
@@ -25,13 +36,40 @@ class RetrievalService:
 
         # Run sequentially, not concurrently: both share one AsyncSession,
         # which isn't safe for two queries running at the same time.
-        vector_chunks = await self.repository.find_similar_chunks(
-            query_embedding, limit=settings.retrieval_top_k
-        )
-        keyword_chunks = await self.repository.find_by_keyword(
-            question, limit=settings.retrieval_top_k
-        )
+        vector_chunks, vector_failed = await self._find_similar_chunks_safely(query_embedding)
+        keyword_chunks, keyword_failed = await self._find_by_keyword_safely(question)
+
+        if vector_failed and keyword_failed:
+            raise RetrievalUnavailableError("Both vector and keyword search failed")
 
         chunks = reciprocal_rank_fusion(vector_chunks, keyword_chunks, limit=settings.retrieval_top_k)
         context_chunks = [chunk.text for chunk in chunks]
         return await generate_answer(question, context_chunks)
+
+    async def _find_similar_chunks_safely(self, query_embedding: list[float]) -> tuple[list[Chunk], bool]:
+        """Run vector search; on failure, roll back and report no results rather than raising."""
+        try:
+            chunks = await self.repository.find_similar_chunks(query_embedding, limit=settings.retrieval_top_k)
+            self.repository.detach(chunks)
+            return chunks, False
+        except SQLAlchemyError:
+            logger.error(
+                "Vector search failed, falling back to keyword search alone",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            await self.repository.rollback()
+            return [], True
+
+    async def _find_by_keyword_safely(self, question: str) -> tuple[list[Chunk], bool]:
+        """Run keyword search; on failure, roll back and report no results rather than raising."""
+        try:
+            chunks = await self.repository.find_by_keyword(question, limit=settings.retrieval_top_k)
+            self.repository.detach(chunks)
+            return chunks, False
+        except SQLAlchemyError:
+            logger.error(
+                "Keyword search failed, falling back to vector search alone",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            await self.repository.rollback()
+            return [], True

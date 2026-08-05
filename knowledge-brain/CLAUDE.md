@@ -387,6 +387,27 @@ I should be able to answer from memory. If I can't, we revisit before moving on.
 
 ---
 
+## Documentation Bar — Big Tech Interview Standard
+
+ARCHITECTURE.md, INTERVIEW_PREP.md, and every ADR must be written to the
+standard a senior engineer at Google, Microsoft, Amazon, or Meta would be
+held to in an actual interview loop — not just technically correct, but
+answering what these companies specifically probe for:
+- **Trade-offs, not just choices** — for every decision, what the
+  alternatives were and what we gave up to get this one.
+- **Scale and failure** — what breaks at 10x/100x load, how the system
+  degrades, what the actual failure mode is when a dependency goes down.
+- **Ownership-level reasoning** — cost, operability, on-call
+  implications, not just "does it work."
+- **Precision over vagueness** — concrete numbers, concrete scenarios,
+  concrete answers, never hand-wavy generalities.
+
+This is the bar the existing structure and rules for ADRs, the
+architecture doc, and the interview prep doc are held to — it doesn't
+replace them, it's what "done well" means for all three.
+
+---
+
 ## Architecture Document
 
 Maintain a living file at `docs/ARCHITECTURE.md` for the entire project.
