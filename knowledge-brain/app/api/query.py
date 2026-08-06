@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
+from neo4j import AsyncSession as Neo4jAsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
+from app.core.graph_database import get_graph_session
 from app.core.middleware import get_correlation_id
 from app.models.query import QueryRequest, QueryResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.graph_repository import GraphRepository
 from app.services.retrieval_service import RetrievalService, RetrievalUnavailableError
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -16,9 +19,10 @@ router = APIRouter(prefix="/query", tags=["query"])
 async def query(
     request: QueryRequest,
     db: AsyncSession = Depends(get_db),
+    graph_session: Neo4jAsyncSession = Depends(get_graph_session),
 ) -> QueryResponse:
     """Answer a question using retrieval-augmented generation."""
-    service = RetrievalService(DocumentRepository(db))
+    service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
     try:
         answer = await service.answer_question(request.question)

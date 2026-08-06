@@ -12,11 +12,15 @@ Two things exist now: getting a document *into* the system, and asking a
 question *about* it. The second of those is no longer a straight line —
 it's a LangGraph pipeline that can notice its own search results are
 weak, rewrite the question, and try once more before giving up and
-answering with whatever it has. Everything after that in the build
-order doesn't exist yet. Every request, regardless of which of the two
-flows it's on, also gets a correlation ID, an audit log entry, and
-circuit-breaker protection around its external AI calls (OpenAI and
-Voyage AI).
+answering with whatever it has. Both flows now also touch a second
+database: Neo4j, which remembers explicit references between documents
+(not similarity — actual "this mentions that") and lets a question's
+answer pull in context from a document that was never directly
+retrieved, only connected. Everything after that in the build order
+doesn't exist yet. Every request, regardless of which flow it's on,
+also gets a correlation ID, an audit log entry, and circuit-breaker
+protection around its external AI calls (OpenAI, Voyage AI, and now
+Neo4j).
 
 ```mermaid
 flowchart TD
@@ -32,6 +36,7 @@ flowchart TD
         EXTRACT --> CHUNK[Chunk text]
         CHUNK --> EMBED["Embed chunks<br/>(OpenAI, via circuit breaker)"]
         EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
+        SAVE --> BUILDREFS["Extract references & write to Neo4j<br/>(best-effort, via circuit breaker)"]
     end
 
     subgraph retrieve["Asking a question — LangGraph query pipeline"]
@@ -46,8 +51,12 @@ flowchart TD
         RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
         CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
         REWRITE --> QEMBED
-        CHECK -->|no| GEN["Generate answer: top 5<br/>(OpenAI LLM, via circuit breaker)"]
+        CHECK -->|no| GRAPHCTX["Fetch graph context: what do these<br/>chunks' documents reference? (one hop,<br/>via circuit breaker)"]
+        GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM, via circuit breaker)"]
     end
+
+    BUILDREFS -.writes.-> NEO4J[(Neo4j)]
+    GRAPHCTX -.reads.-> NEO4J
 
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
     GEN --> AUDIT2[Audit log:<br/>query_made]
@@ -61,7 +70,14 @@ the file's raw text is pulled out → that text is cut into small
 overlapping pieces → each piece is turned into a list of numbers that
 represents its meaning → those pieces and their numbers are saved in the
 database. If anything goes wrong along the way, the document is marked as
-failed rather than left in limbo.
+failed rather than left in limbo. If it succeeds, one more thing happens
+before the response goes out: an LLM reads the document's text looking
+for specific, named things it mentions (an error code, a ticket number),
+and for each one, checks whether any *other* already-stored document
+actually contains it — if so, that connection gets written to Neo4j as
+an explicit link between the two documents. This step is best-effort:
+if it fails, the upload still succeeds, it just won't have graph links
+yet.
 
 **Asking a question:** a user sends a question → it's turned into a
 meaning-vector, and two independent searches run one after another: a
@@ -83,22 +99,43 @@ to rephrase the question, and searches again from scratch with the new
 phrasing, once. If reranking itself is unavailable, or a second attempt
 still comes up weak, the pipeline moves on anyway rather than looping
 forever, and generates the best answer it can from whatever it found.
-Those final chunks, plus the *original* question (never the rewritten
-one — the rewrite is only a search tool, not a replacement for what the
-user actually asked), are handed to an LLM, which answers using only
-that retrieved text, and says it doesn't know rather than guessing if
-the answer isn't there.
+Once there are chunks worth using, one more step runs before
+generation: for the documents behind those final chunks, the system
+asks Neo4j what each one explicitly references — not what's similar to
+it, what it actually *names* — and pulls in one snippet from each
+referenced document, one hop only. Those final chunks, the graph
+snippets, plus the *original* question (never the rewritten one — the
+rewrite is only a search tool, not a replacement for what the user
+actually asked), are handed to an LLM, which answers using only that
+retrieved text, and says it doesn't know rather than guessing if the
+answer isn't there.
 
-**What's new since the last update:** the query pipeline (build-order
-step 5) is no longer a fixed sequence — it's a LangGraph graph that can
-loop back once if what it finds is weak. Getting the "weak" signal right
-took a real pivot: the original plan (retry when zero chunks come back)
-turned out to basically never fire with real data, since vector search
-always returns *something*, however irrelevant — live testing caught
-this before it shipped. The actual trigger is Voyage's own relevance
-score on the best chunk found, thresholded at 0.4 based on real
-measured scores (a true match scored 0.914; irrelevant questions scored
-~0.28–0.29 against the same data). See ADR-014.
+**What's new since the last update:** a Neo4j document relationship
+graph (build-order step 6). Unlike hybrid search or reranking, this
+isn't about finding text that reads similarly — it's about explicit,
+named connections between documents (a support note mentioning a
+specific ticket ID that another document actually defines) that
+similarity search structurally cannot see. An LLM extracts what a
+document explicitly mentions at upload time; the existing keyword
+search (no new lookup mechanism needed) resolves each mention to a
+real document if one exists; a `REFERENCES` edge gets written to Neo4j.
+At query time, the pipeline follows that edge one hop out from whatever
+was actually retrieved, pulling in extra context from documents that
+were never directly searched, only connected. Verified live: a question
+answerable only by combining two separate documents came back correct,
+citing a detail that existed solely in the graph-linked one. See
+ADR-015.
+
+The query pipeline (build-order step 5) is a LangGraph graph that can
+loop back once if what it finds is weak, rather than a fixed sequence.
+Getting the "weak" signal right took a real pivot: the original plan
+(retry when zero chunks come back) turned out to basically never fire
+with real data, since vector search always returns *something*, however
+irrelevant — live testing caught this before it shipped. The actual
+trigger is Voyage's own relevance score on the best chunk found,
+thresholded at 0.4 based on real measured scores (a true match scored
+0.914; irrelevant questions scored ~0.28–0.29 against the same data).
+See ADR-014.
 
 ## The main components
 
@@ -113,7 +150,26 @@ conductor. Knows the *order* the pipeline steps must run in (extract, then
 chunk, then embed, then save), and marks the document ready or failed at
 the end. Talks to: extraction, chunking, embedding, and the repository. If
 it disappeared, each individual step would still work, but nothing would
-tie them together.
+tie them together. Deliberately does *not* know about the relationship
+graph below — building references is a separate concern, run
+afterward, not folded into this service's own responsibility.
+
+**Document graph service (`app/services/document_graph_service.py`)**
+— runs once per document, right after ingestion succeeds. Reads what
+the document explicitly mentions (via reference extraction), checks
+whether any mention actually matches content already in another
+document (reusing `find_by_keyword`, no new lookup needed), and records
+a `REFERENCES` edge in Neo4j for each real match. Talks to: reference
+extraction, the repository, and the graph repository. Best-effort — if
+it fails, the document still uploads successfully, it just won't have
+graph links yet.
+
+**Reference extraction (`app/services/reference_extraction.py`)** — a
+single, narrow LLM call: given a document's text, return the specific
+named things it mentions (error codes, ticket numbers, policy names) —
+not general topics, only things specific enough to plausibly be their
+own document. Wrapped in its own circuit breaker
+(`openai_reference_extraction`). Talks to: OpenAI.
 
 **Extraction (`app/services/extraction.py`)** — pulls plain text out of a
 file's raw bytes. Different file types (PDF vs plain text) need different
@@ -136,16 +192,16 @@ asks the repository to save or update things, rather than writing its own
 database queries.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — still the
-conductor for answering questions, but its job changed shape this
-session: `answer_question` no longer runs a fixed sequence itself, it
-builds a small LangGraph graph (in `__init__`) and hands the question to
-it. The actual step logic lives in five methods on this class
-(`_retrieve_node`, `_rerank_node`, `_rewrite_node`, `_generate_node`,
-`_should_retry`), each a graph node, all of them reusing the exact same
-search/rerank helpers hardened in ADR-012 and ADR-013 — nothing about
-the existing partial-failure or reranker-fallback behavior changed to
-make this work. Talks to: embedding, the repository, hybrid search,
-reranking, query rewriting, and generation.
+conductor for answering questions. `answer_question` builds a small
+LangGraph graph (in `__init__`) and hands the question to it; the
+actual step logic lives in six methods on this class (`_retrieve_node`,
+`_rerank_node`, `_rewrite_node`, `_should_retry`, `_graph_context_node`,
+`_generate_node`), each a graph node, all reusing the exact same
+search/rerank/graph-lookup helpers hardened in ADR-012, ADR-013, and
+ADR-015 — nothing about the existing partial-failure or
+reranker-fallback behavior changed to add graph context on top. Talks
+to: embedding, the repository, hybrid search, reranking, query
+rewriting, the graph repository, and generation.
 
 **Query graph (`app/services/query_graph.py`)** — defines the shape of
 the data that flows between the retrieval service's graph nodes
@@ -189,6 +245,15 @@ and now answers both "which chunks are closest in meaning to this
 vector?" (pgvector cosine similarity) and "which chunks best match these
 keywords?" (Postgres's built-in full-text search) — no second database
 needed for either.
+
+**Graph database (Neo4j, running in Docker)** — stores one node per
+document and directed `REFERENCES` edges between them, answering a
+question neither pgvector nor full-text search can: "what does this
+document explicitly point at, regardless of how differently worded the
+two are." `app/core/graph_database.py` holds the driver/session setup
+(mirrors `database.py`), and `app/repositories/graph_repository.py` is
+the only place that writes Cypher (mirrors `document_repository.py`).
+Wrapped in its own circuit breaker (`neo4j`).
 
 **Correlation ID middleware (`app/core/middleware.py`)** — stamps every
 incoming request with a unique ID (or reuses one a caller already sent),
@@ -305,6 +370,17 @@ exact vendors already struggling, worsening the problem instead of
 fixing it, the same retry-storm reasoning ADR-012 already used once. See
 ADR-014.
 
+The document relationship graph tracks explicit references extracted
+from a document's own text, not topic similarity an LLM infers — the
+latter was considered and rejected specifically because it would
+substantially duplicate what vector search already does; the graph's
+whole reason to exist is answering a structurally different question
+similarity search can't. Traversal is deliberately capped at one hop
+(what a document directly references, never references-of-references),
+and the whole feature is best-effort, same as reranking: unreachable
+Neo4j degrades to "no extra context," never a failed upload or a failed
+query. See ADR-015.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address. The
@@ -313,7 +389,13 @@ the document immediately (marked "pending"), then extracts its text,
 splits that text into chunks, turns each chunk into a meaning-vector, and
 saves everything to the database. If every step succeeds, the document is
 marked "ready." If any step fails, the document is marked "failed" instead
-of being left stuck partway through.
+of being left stuck partway through. If it succeeds, one more thing
+happens: an LLM reads the document's own text for specific things it
+names — an error code, a ticket ID — and for each one, the existing
+keyword search checks whether any other stored document actually
+contains it. Real matches get written to Neo4j as an explicit link. This
+step can't fail the upload; if Neo4j or the extraction call is
+unavailable, the document is still "ready," it just has no graph links.
 
 **Asking a question:** a user sends a question to the query address. The
 question is turned into a meaning-vector using the same embedding model
@@ -325,10 +407,12 @@ AI's reranking model then looks at the actual question and each of those
 the question best, and reports how relevant the best one actually is.
 If that top score is weak and this is the first attempt, the pipeline
 loops back: an LLM rephrases the question, and the whole search runs
-again with the new phrasing — once, never more. Either way, once there
-are chunks worth using (or the one retry is used up), those chunks and
-the *original* question are sent to an LLM, which writes an answer
-grounded only in that retrieved text.
+again with the new phrasing — once, never more. Once there are chunks
+worth using, the system asks Neo4j what the documents behind those
+chunks explicitly reference — one hop only — and pulls in a snippet
+from each. Those chunks, the graph snippets, and the *original*
+question are sent to an LLM, which writes an answer grounded only in
+that retrieved text.
 
 ## What could go wrong and how we handle it
 
@@ -387,9 +471,20 @@ rather than a clean one. See ADR-010.
 the OpenAI ones. Unlike an OpenAI failure, this doesn't fail the request:
 `retrieval_service.py` catches it and falls back to hybrid search's own
 Reciprocal Rank Fusion order instead, so the user still gets an answer,
-just without reranking's improvement to which chunks were chosen. This is
-the one external AI dependency in the system today where a failure
-degrades quality rather than availability. See ADR-013.
+just without reranking's improvement to which chunks were chosen. See
+ADR-013.
+
+**Neo4j starts failing repeatedly, either during upload or during a
+query** — its own independent circuit breaker opens after 3 failures in
+60 seconds, same mechanism as the others. Neither case fails the
+request: an upload still succeeds without new graph links (the
+extraction LLM call and Neo4j write share one try/except in
+`documents.py`, catching only `CircuitOpenError`), and a query still
+answers using its retrieved chunks alone, without extra graph context.
+Reranking and Neo4j are now the two dependencies in this system where a
+failure degrades *quality*, not *availability* — everything else
+(OpenAI's embedding and generation calls) still fails the request
+outright today, just cleanly, as a `503`. See ADR-015.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
@@ -398,6 +493,19 @@ True enforcement needs either a separate, deliberately restricted database
 role, or (the more realistic enterprise fix) shipping audit entries to
 genuinely separate write-once storage, like Azure Blob Storage with an
 immutability policy — neither exists yet. See ADR-009.
+
+**Neo4j's document lookup has no index either, same class of gap** —
+`MATCH (d:Document {id: $document_id})` currently matches by scanning,
+not by an index. Fine at the current handful of documents, a full scan
+at real scale — same shape of deferred work as the two gaps below, just
+one more database added to the list, not a new kind of problem.
+
+**A referenced document's snippet is naive, not targeted** — the
+context pulled in from a referenced document is always just that
+document's *first* chunk, not the chunk most relevant to the actual
+question being asked. A more accurate version would rerun retrieval
+against just that document using the current question — not built,
+a known simplification made for this pass, not an oversight.
 
 **Neither half of hybrid search has a real index yet** — both
 `cosine_distance` and `to_tsvector` are computed fresh, on every row, on
@@ -511,6 +619,24 @@ time.
 "rerank the candidates"); an edge connects two nodes. A conditional edge
 picks which node runs next based on the current state, rather than
 always going to the same next step.
+
+**Graph database (Neo4j)** — a database built around nodes (things —
+here, one per document) and edges (relationships between things — here,
+`REFERENCES`), optimized for "what's connected to this, and how." Not
+to be confused with LangGraph above: LangGraph's "graph" is a pipeline
+of code steps, this one is actual stored data about how documents
+relate to each other — same word, two unrelated meanings, both used in
+this project.
+
+**Cypher** — Neo4j's query language, built specifically for describing
+and following relationships (`MATCH (a)-[:REFERENCES]->(b)`), the same
+role SQL plays for Postgres.
+
+**One-hop traversal** — following a relationship exactly one step out
+(what this document directly references) rather than chasing it
+further (what *those* documents reference, in turn). A deliberate scope
+limit here, not a technical ceiling — unbounded traversal means
+unbounded extra context and cost per query.
 
 **Relevance score** — a number a reranker assigns to how well a specific
 chunk actually answers a specific question, roughly 0 (unrelated) to 1

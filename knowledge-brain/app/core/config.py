@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
+    # Graph database
+    neo4j_uri: str
+    neo4j_user: str
+    neo4j_password: str
+
     # Embedding provider
     openai_api_key: str
     embedding_model: str = "text-embedding-3-small"

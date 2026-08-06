@@ -98,6 +98,26 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
+    async def get_first_chunk_text(self, document_id: uuid.UUID) -> str | None:
+        """Return a referenced document's first chunk as a representative snippet.
+
+        Used for graph context, not primary retrieval, so one chunk is
+        enough to give the LLM a sense of what the referenced document
+        is about, without pulling in its full text.
+        """
+        stmt = (
+            select(Chunk.text)
+            .where(Chunk.document_id == document_id)
+            .order_by(Chunk.chunk_index)
+            .limit(1)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to fetch first chunk for document %s", document_id)
+            raise
+        return result.scalar_one_or_none()
+
     async def rollback(self) -> None:
         """Clear an aborted transaction so later queries on this session can run.
 

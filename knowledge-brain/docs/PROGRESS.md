@@ -582,3 +582,110 @@ detection, ACL, the evaluation harness, the MCP server, API Management,
 Azure deployment, the frontend, and auth/multi-tenancy hardening. At
 3–4 hours/day, that's roughly 28–30 working days left, assuming no
 scope changes — a real estimate, not a target.
+
+---
+
+## Session: 2026-08-06 (continued) — Feature 6: Neo4j document relationship graph
+
+### What we built
+- **Neo4j document relationship graph, built and verified live.** Added
+  Neo4j to `docker-compose.yml`, `app/core/graph_database.py` (driver
+  setup, mirrors `database.py`), and `app/repositories/graph_repository.py`
+  (all Cypher access, own circuit breaker `neo4j`). The relationship
+  type was a real design decision, not assumed: rejected "topic
+  clusters an LLM infers" as the primary strategy, specifically because
+  it would substantially duplicate what vector search already does;
+  landed on explicit references extracted from a document's own text
+  instead, since that's the one thing similarity search structurally
+  can't do.
+- **Reference extraction + resolution, reusing existing infrastructure.**
+  New `app/services/reference_extraction.py` (an LLM call, own circuit
+  breaker `openai_reference_extraction`) pulls specific named mentions
+  out of a document's text. Resolving each mention to a real document
+  reuses `find_by_keyword` directly — no new search mechanism needed.
+  New `app/services/document_graph_service.py` orchestrates
+  extract → resolve → write (`MERGE`, not `CREATE`, so re-processing a
+  document is idempotent), filtering out self-references, since a
+  document's own text usually contains whatever it mentions.
+- **Wired into both existing pipelines.** `app/api/documents.py` runs
+  reference-building right after a document is marked `ready` —
+  best-effort: only `CircuitOpenError` is caught, so the upload still
+  succeeds if Neo4j or extraction is unavailable. `retrieval_service.py`
+  gained a sixth graph node, `_graph_context_node`, inserted between
+  "decided to generate" and actually generating: for the documents
+  behind the final reranked chunks, it asks Neo4j what each directly
+  references (one hop only) and pulls one representative snippet
+  (`document_repository.py`'s new `get_first_chunk_text`) from each.
+- **Verified live, meaningfully, not just that it runs.** Ingested two
+  real documents where one's text named a ticket ID the other actually
+  defined; confirmed the edge got written; then asked a question
+  answerable only by combining both documents, and the answer correctly
+  cited the detail that existed solely in the graph-linked document, not
+  the directly-retrieved one.
+- Documented the full decision, including the rejected topic-cluster
+  option and why, in [`ADR-015`](adr/ADR-015-neo4j-document-relationship-graph.md).
+
+### What I struggled with
+- Proposed topic-cluster/LLM-inferred linking as the primary strategy
+  before the alternative was discussed — a reasonable-sounding idea that
+  turned out to substantially overlap with existing vector search
+  capability. Landed cleanly on the sharper distinction (explicit
+  structural links vs. re-implemented similarity) once it was named.
+- Twice described `_graph_context_node`'s mechanics with real
+  imprecision: framed it as sending data *to* `retrieval_service`
+  rather than being *part of* it, and separately described the wrong
+  role of the `set` used to dedupe source documents (thought it was the
+  return value; it's only used going into the loop).
+- Missed, then repeated as true, a deliberately planted claim that a
+  failed *read-only* query wouldn't need a `rollback()` — a direct
+  extension of the ADR-012 lesson to genuinely new code, not just the
+  original bug site. Landed only after a second, differently-framed
+  explanation (the "jammed printer" analogy), and correctly reasoned
+  through the concrete consequence unprompted once it clicked: a failed
+  snippet lookup would cascade and break the *next* one in the same
+  loop, not because of a real problem with that document, but because
+  the session itself would still be stuck.
+- Caught a separate planted error cleanly, without help: correctly held
+  that Cypher's `->` arrow really does restrict relationship direction,
+  directly contradicting an authoritative-sounding false claim stated
+  moments earlier.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  carried over, still not answered back, several sessions running now.
+- Why the hybrid-search session-expiry bug was direction-dependent —
+  same, still carried over.
+
+### What's next
+- The pending explain-back question from this chunk (what
+  `_graph_context_node` does, in full) was deferred to next session by
+  explicit choice, to run `/end-session` first — pick that back up
+  before moving on to new work.
+- Neo4j's own index gap (`MATCH (d:Document {id: ...})` scans, doesn't
+  index) is now tracked alongside pgvector's HNSW and full-text's GIN
+  gaps — same shape of deferred work, one more entry on the list.
+- PII detection is next in the build order if we stick to the plan —
+  and per last session's pushback discussion, still the stronger
+  candidate over frontend/deployment, since ACL and PII are the two
+  items with concrete (not just build-order-says-so) reasons to do them
+  first: cost/security exposure if deployed without auth, and frontend
+  pages that need data (PII badges, ACL settings) that don't exist yet.
+- The test suite still hasn't grown since the ingestion tests — hybrid
+  search, ADR-012's fallback, the circuit breaker, the audit log, the
+  LangGraph retry logic, and now the graph feature are all still
+  untested beyond throwaway verification scripts.
+- Four code-review-sourced fixes and earlier performance items remain
+  deferred (`code-review-followups.md`, `future-optimizations.md`),
+  now joined by the Neo4j relevance-threshold-style item: the naive
+  "first chunk" snippet selection for referenced documents, a known
+  simplification worth revisiting once there's real document variety.
+
+**Estimated completion: ~21% of the total project, by weighted effort**
+— up from ~18% last session. 6 of 15 build-order items are done, but
+the estimate moves less than the step count suggests, since the two
+largest remaining chunks (the frontend and full Azure deployment)
+still haven't been touched. Rough remaining effort: ~93 hours across
+the test suite, PII detection, ACL, the evaluation harness, the MCP
+server, API Management, Azure deployment, the frontend, and
+auth/multi-tenancy hardening. At 3–4 hours/day, that's roughly 24–26
+working days left, assuming no scope changes.

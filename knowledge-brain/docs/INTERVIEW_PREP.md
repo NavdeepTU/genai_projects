@@ -499,6 +499,101 @@ already captured earlier.
 
 ---
 
+## Feature 6: Neo4j Document Relationship Graph
+
+**What does this feature do, in one sentence?**
+After a document uploads, an LLM finds specific things it explicitly
+mentions (an error code, a ticket ID), checks whether any other stored
+document actually contains that thing, and if so records the link in
+Neo4j — so a later query can pull in context from a document it never
+directly searched, only connected to.
+
+**Why does this need a graph database at all — what can't vector or
+keyword search already do here?**
+Both of those find text that reads *similarly*. This is a structurally
+different question: does one document *explicitly point at* another,
+regardless of how differently worded they are? A support ticket and the
+specific KB article it names by ID might use completely different
+vocabulary — low embedding similarity — but still need a direct link.
+Vector search can miss that connection entirely; a graph traversal
+follows it directly.
+
+**The first design instinct was linking documents by topic clusters an
+LLM infers — why wasn't that the final approach?**
+Because it would substantially duplicate something that already exists.
+"These two documents are about the same topic" is close to exactly what
+an embedding comparison already measures — building a second, more
+expensive system (an LLM call plus a whole separate database) to answer
+a question vector search can already answer on the fly isn't adding a
+new capability, it's re-implementing an old one. The graph's actual
+value is answering the question similarity search structurally can't:
+explicit, named references.
+
+**Why not link documents by shared authorship or ownership instead?**
+A real, practical reason, not a design preference: the `Document` model
+has no author/owner field today, and no upload flow captures it. That
+would be a separate change to ingestion before a graph could even use
+it — worth doing once there's an actual reason to capture that
+metadata, not assumed upfront.
+
+**Walk me through how a reference actually gets resolved into a graph
+edge.**
+Three steps. An LLM reads the document's text and returns specific,
+named things it mentions — not general topics, only things specific
+enough to plausibly be their own document. For each mention, the
+*existing* keyword search (`find_by_keyword`, already built for hybrid
+search) checks whether any other document actually contains it — no new
+search mechanism needed. If a match in a *different* document is found,
+a `REFERENCES` edge gets written to Neo4j using `MERGE`, not `CREATE`,
+so re-processing the same document doesn't create duplicate nodes.
+
+**Why only one hop — why not follow references-of-references too?**
+A deliberate scope limit, not a technical ceiling. Each hop out means
+more Neo4j lookups and more extra context per query; unbounded
+traversal means unbounded, unpredictable cost. One hop is small, known,
+and capped — a document's *direct* references are also the ones most
+likely to actually matter to the current question.
+
+**What happens if Neo4j itself is unreachable — during upload, and
+during a query?**
+Neither case fails the request, same philosophy as reranking (ADR-013).
+During upload, reference-building is wrapped in a `try/except` that
+only catches `CircuitOpenError` — the document still ends up `ready`,
+it just has no graph links yet. During a query, the graph-context node
+catches the same exception and the pipeline answers using its retrieved
+chunks alone. Reranking and Neo4j are now the two dependencies in this
+system where failure degrades *quality*, not *availability* — unlike an
+OpenAI failure, which still fails the request outright today, just
+cleanly, as a `503`.
+
+**A subtlety came up while building this — does a failed *read* still
+need a rollback?**
+Yes, and this is worth being precise about, since the instinctive answer
+is usually wrong. `rollback()` isn't about undoing *data* — it's about
+resetting a *transaction* Postgres has marked broken. Once *any* query
+in a transaction fails, whether it's a `SELECT` or a `write`, Postgres
+refuses to run anything else on that connection until it's rolled back.
+A failed read leaves the session just as stuck as a failed write would
+— skip the rollback here, and the *next* referenced document's snippet
+lookup in the same loop would fail too, not because it has a problem,
+but because the session itself is jammed.
+
+**If this had to run at real scale, what's the first thing that would
+actually get slow?**
+Two separate things, not one. `MATCH (d:Document {id: $document_id})`
+currently matches by scanning, not by an index — the same category of
+deferred work already tracked for pgvector (HNSW) and full-text search
+(GIN), just a third database added to that list. Less obviously: at
+*ingestion* time, every mention extracted from a document triggers its
+own `find_by_keyword` call, synchronously, during the same upload
+request that already holds a database connection for the whole
+pipeline (ADR-001) — a document with many distinct mentions makes that
+existing connection-hold problem worse, not the graph lookups
+themselves.
+*Further reading: [Neo4j's official Cypher Manual introduction](https://neo4j.com/docs/cypher-manual/current/introduction/).*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

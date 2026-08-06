@@ -28,14 +28,20 @@ and why it was made that way.
   threshold, an LLM rewrites the question and the whole search runs
   again once before generating an answer, instead of quietly answering
   from weak results.
+- **Neo4j document relationship graph** — after a document uploads, an
+  LLM finds specific things it explicitly mentions (an error code, a
+  ticket ID) and links it in Neo4j to any other document that actually
+  defines that thing. A query then pulls in one hop of that context
+  alongside its retrieved chunks — real connections, not just similar
+  wording. Best-effort, same as reranking: falls back to answering from
+  retrieved chunks alone if Neo4j is unavailable.
 - **Correlation IDs, an append-only audit log, and circuit breakers**
-  around every external AI call (OpenAI and Voyage) — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
-  for why these three were prioritized over other pending requirements.
+  around every external AI call (OpenAI, Voyage, and Neo4j) — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
+  for why the first three were prioritized over other pending requirements.
 
-**Not built yet:** a Neo4j document-relationship graph, PII detection,
-document access control, an evaluation harness, an MCP server, the
-frontend, auth, and Azure deployment. See `CLAUDE.md`'s build order for
-the full plan.
+**Not built yet:** PII detection, document access control, an
+evaluation harness, an MCP server, the frontend, auth, and Azure
+deployment. See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - No automated test suite yet (`tests/` is empty).
@@ -78,18 +84,21 @@ reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
 - **LangGraph** — the query pipeline itself: a graph with one conditional
   loop back to a rewritten search when retrieval comes back weak (see
   [`ADR-014`](docs/adr/ADR-014-langgraph-query-pipeline.md))
+- **Neo4j** — the document relationship graph: explicit `REFERENCES`
+  links between documents, extracted from content, not similarity (see
+  [`ADR-015`](docs/adr/ADR-015-neo4j-document-relationship-graph.md))
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
-- **Docker** — runs Postgres locally, isolated from anything else on
-  the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
+- **Docker** — runs Postgres and Neo4j locally, isolated from anything
+  else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
 
-The full planned stack (Kafka, Qdrant, Redis, Neo4j, Azure, Terraform, a
-Next.js frontend) is documented in `CLAUDE.md` — most of it
-isn't built yet, and is being added deliberately, one justified decision
-at a time, not upfront.
+The full planned stack (Kafka, Qdrant, Redis, Azure, Terraform, a
+Next.js frontend) is documented in `CLAUDE.md` — most of it isn't built
+yet, and is being added deliberately, one justified decision at a time,
+not upfront.
 
 ## Run it locally
 
-1. **Start Docker Desktop**, then start Postgres:
+1. **Start Docker Desktop**, then start Postgres and Neo4j:
    ```
    docker compose up -d
    ```
@@ -102,6 +111,9 @@ at a time, not upfront.
    ```
    cp .env.example .env
    ```
+   The `NEO4J_*` values already match `docker-compose.yml`'s defaults,
+   so they work as-is for local development — nothing else to fill in
+   there.
 4. **Install dependencies:**
    ```
    uv sync

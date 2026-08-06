@@ -313,7 +313,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 5 of 10 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 6 of 10 features complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -574,10 +574,41 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> a relevant question answers with no retry; an irrelevant question genuinely triggers a rewrite-and-retry now (the original "zero chunks" trigger was tested live and found to basically never fire). Separately verified: a reranker outage skips the retry entirely, and a rewrite-circuit outage mid-retry still terminates cleanly in exactly two attempts. See ADR-014.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 6 — Neo4j document relationship graph <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Extract references</span>
+        <span class="path mono">app/services/reference_extraction.py · LLM finds named mentions</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Resolve &amp; write</span>
+        <span class="path mono">document_graph_service.py · reuses find_by_keyword</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Graph context at query time</span>
+        <span class="path mono">retrieval_service.py · one hop, via circuit breaker</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> ingested two real documents where one named a ticket ID the other actually defined; confirmed the edge got written to Neo4j; then asked a question answerable only by combining both, and the answer correctly cited the detail that existed solely in the graph-linked document. See ADR-015.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">06</span>Neo4j relationship graph</li>
       <li><span class="n mono">07</span>Evaluation harness</li>
       <li><span class="n mono">08</span>MCP server</li>
       <li><span class="n mono">09</span>Frontend dashboard</li>

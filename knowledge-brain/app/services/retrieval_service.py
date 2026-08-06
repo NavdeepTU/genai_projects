@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -7,6 +8,7 @@ from app.core.config import get_settings
 from app.core.middleware import get_correlation_id
 from app.models.document import Chunk
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.graph_repository import GraphRepository
 from app.services.embedding import embed_chunks
 from app.services.generation import generate_answer
 from app.services.hybrid_search import reciprocal_rank_fusion
@@ -33,8 +35,9 @@ class RetrievalService:
     change based on what's actually found.
     """
 
-    def __init__(self, repository: DocumentRepository) -> None:
+    def __init__(self, repository: DocumentRepository, graph_repository: GraphRepository) -> None:
         self.repository = repository
+        self.graph_repository = graph_repository
         self._graph = build_query_graph(self)
 
     async def answer_question(self, question: str) -> str:
@@ -47,6 +50,7 @@ class RetrievalService:
             "top_relevance_score": 0.0,
             "reranker_unavailable": False,
             "retry_count": 0,
+            "graph_context": [],
             "answer": "",
         }
         result = await self._graph.ainvoke(initial_state)
@@ -106,9 +110,45 @@ class RetrievalService:
             new_question = state["question"]
         return {"question": new_question, "retry_count": state["retry_count"] + 1}
 
+    async def _graph_context_node(self, state: QueryState) -> dict:
+        """Graph node: pull in snippets from documents the reranked chunks' sources reference."""
+        document_ids = {str(chunk.document_id) for chunk in state["reranked_chunks"]}
+
+        snippets: list[str] = []
+        for document_id in document_ids:
+            referenced_ids, unavailable = await self._fetch_graph_context_safely(document_id)
+            if unavailable:
+                continue
+            for referenced_id in referenced_ids:
+                try:
+                    snippet = await self.repository.get_first_chunk_text(uuid.UUID(referenced_id))
+                except SQLAlchemyError:
+                    logger.error(
+                        "Failed to fetch snippet for referenced document %s",
+                        referenced_id,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    await self.repository.rollback()
+                    continue
+                if snippet:
+                    snippets.append(snippet)
+
+        return {"graph_context": snippets}
+
+    async def _fetch_graph_context_safely(self, document_id: str) -> tuple[list[str], bool]:
+        """Look up directly-referenced documents; on failure, report unavailable rather than raising."""
+        try:
+            return await self.graph_repository.get_referenced_documents(document_id), False
+        except CircuitOpenError:
+            logger.error(
+                "Graph lookup unavailable, answering without related-document context",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return [], True
+
     async def _generate_node(self, state: QueryState) -> dict:
         """Graph node: generate the final answer from the original question."""
-        context_chunks = [chunk.text for chunk in state["reranked_chunks"]]
+        context_chunks = [chunk.text for chunk in state["reranked_chunks"]] + state["graph_context"]
         answer = await generate_answer(state["original_question"], context_chunks)
         return {"answer": answer}
 
