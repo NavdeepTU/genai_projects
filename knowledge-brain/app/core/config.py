@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Retrieval
     retrieval_top_k: int = 5
     retrieval_candidate_pool: int = 20
+    retrieval_relevance_threshold: float = 0.4
 
 
 @lru_cache

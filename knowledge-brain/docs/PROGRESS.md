@@ -475,3 +475,110 @@ commits existed yet.
   reranking, if we stick to the plan.
 - PII detection, ACL, APIM, and Key Vault remain intentionally deferred
   per ADR-007.
+
+---
+
+## Session: 2026-08-06 — Test suite resumed, Feature 5: LangGraph query pipeline
+
+### What we built
+- **Test suite resumed and the paused work finished.** Added
+  `tests/conftest.py`: a dedicated test database (same host/credentials
+  as dev, different database name), a session-scoped fixture creating
+  every table once and dropping them all when the run ends, and a
+  `db_session` fixture that wipes every table after each test (a plain
+  `rollback()` isn't enough, since the repository commits on its own —
+  the data is already persisted by the time a test ends). Hit and fixed
+  a real async-testing gotcha: the test engine needed `NullPool`, since
+  pytest-asyncio gives each test function its own event loop, and a
+  pooled connection tied to one loop breaks under a different test's
+  loop. Wrote `tests/test_ingestion_service.py` (2 tests: success path,
+  failure path correctly marks a document `failed`) — all 11 tests
+  (chunking, extraction, ingestion) pass.
+- **Built the LangGraph query pipeline (Feature 5).** New
+  `app/services/query_rewriting.py` (an isolated LLM call with its own
+  circuit breaker) and `app/services/query_graph.py` (the `QueryState`
+  shape and the compiled graph). `RetrievalService.answer_question` now
+  builds and runs a graph instead of a fixed sequence; the actual step
+  logic moved into five methods on the class, all reusing the exact same
+  hardened search/rerank helpers from ADR-012/ADR-013 unchanged.
+- **The original architecture's retry trigger ("zero chunks returned")
+  was built, tested live, and found not to work** — vector search has no
+  relevance floor, so it always returns *something*, however irrelevant.
+  Pivoted to Voyage's own `relevance_score` on the best reranked chunk,
+  thresholded at `0.4` — a number picked empirically from real measured
+  scores (`0.914` for a true match, `~0.28–0.29` for two different
+  irrelevant questions against the same data), not guessed.
+- Made the retry skip entirely, not just decline, when reranking itself
+  is unavailable (as opposed to merely weak) — a real design refinement
+  contributed by explaining *why* during the session: rewriting the
+  question can't fix an unreachable vendor API.
+- Verified live and via targeted mocking: a relevant question (no
+  retry), an irrelevant question (retry actually fires now, unlike the
+  original empty-check version), a reranker-circuit-open case (retry
+  correctly skipped), and a rewrite-circuit-open case mid-retry (loop
+  terminates in exactly 2 attempts, still produces an answer). Found and
+  fixed a real testing mistake along the way: patching
+  `RetrievalService._rewrite_node` on the class after constructing the
+  service silently did nothing, since the graph captures a bound-method
+  reference at `__init__` time — fixed by patching the module-level
+  `rewrite_query` function instead.
+- Documented the full decision, including the failed first attempt, in
+  [`ADR-014`](adr/ADR-014-langgraph-query-pipeline.md).
+- `CLAUDE.md`'s build order gained a new item 15: LLM/RAG-specific
+  observability (tracing prompts, retrieved context, token cost, and
+  per-call latency — distinct from the general infra monitoring already
+  planned), candidates to evaluate being LangSmith and Langfuse.
+
+### What I struggled with
+- Initially proposed raising `MAX_RETRIES` to handle 10x traffic — a
+  reasonable-sounding instinct that's actually backwards, since more
+  retries under load means more calls to the exact vendors already
+  struggling. Corrected by tracing through the actual amplification and
+  connecting it back to ADR-012's already-established retry-storm
+  reasoning.
+- Repeated a deliberately planted false claim twice (that a
+  circuit-open reranking fallback assigns a relevance score of `1.0`)
+  before catching it on the third pass, once shown the literal code —
+  the real value is `0.0`, and the `reranker_unavailable` flag, not the
+  score, is what actually prevents the retry.
+- Gave real, independent insight once past that: correctly reasoned
+  that skipping the retry on a reranker outage isn't about cost or
+  "compounding degraded paths" (the reasoning initially offered) but
+  about the same circuit breaker very likely still being open a moment
+  later — a sharper answer than the one given.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly (instead of
+  `app.services.extraction.PdfReader`) wouldn't have worked — asked
+  multiple sessions ago, still not answered back.
+- Why the session-expiry bug from the hybrid-search hardening session
+  was direction-dependent — still carried over, still not revisited.
+
+### What's next
+- Neo4j document relationship graph is next in the build order if we
+  stick to the plan.
+- The test suite still has real gaps: hybrid search, the ADR-012
+  fallback, the circuit breaker's state transitions, the audit log's
+  insert-only behavior, and now the query graph's own retry logic —
+  today only verified with throwaway scripts, not permanent tests.
+- Re-tune `retrieval_relevance_threshold` (currently `0.4`) once there
+  are real, topically-varied documents — it was picked from only two
+  data points against a 4-chunk database (see `future-optimizations.md`
+  in memory).
+- Four code-review-sourced fixes and the earlier performance items
+  remain deferred (`code-review-followups.md`, `future-optimizations.md`).
+- PII detection, ACL, APIM, and Key Vault remain intentionally deferred
+  per ADR-007.
+
+**Estimated completion: ~18% of the total project, by weighted effort**
+— not a flat step count. 5 of 15 build-order items are done (plus the
+cross-cutting correlation ID/audit/circuit-breaker work), but the two
+largest remaining chunks — the polished production frontend (5 pages,
+Shadcn, responsive, dark mode) and full Azure deployment (Terraform for
+every service, GitHub Actions CI/CD) — haven't been started at all, and
+together likely outweigh everything built so far combined. Rough
+remaining effort: ~100 hours across the test suite, Neo4j, PII
+detection, ACL, the evaluation harness, the MCP server, API Management,
+Azure deployment, the frontend, and auth/multi-tenancy hardening. At
+3–4 hours/day, that's roughly 28–30 working days left, assuming no
+scope changes — a real estimate, not a target.

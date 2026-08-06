@@ -43,6 +43,11 @@ for a company's private knowledge, with answers instead of links.
 12. Azure deployment via Terraform + GitHub Actions CI/CD
 13. Frontend dashboard (polished, production-quality UI)
 14. Auth, multi-tenancy, and production hardening
+15. LLM/RAG-specific observability (tracing prompts, retrieved
+    context, token cost, and latency per LLM/reranker call — distinct
+    from the general infra monitoring above; candidates to evaluate
+    include LangSmith, which pairs naturally with LangGraph, and
+    Langfuse as an open-source alternative)
 
 ---
 
@@ -113,11 +118,17 @@ For each chunk:
    - What this block is doing
    - Why it's written this way and not another way
    - What would break if this line or block was removed or changed
-3. Then ask me: "Can you explain this back to me in your own words?"
+3. Then ask me to explain it back in my own words — but plant one small,
+   specific factual error somewhere in how you frame the question (state
+   it plainly, as if true, don't flag it as a test), based on something
+   you just explained above.
 4. Wait for my explanation
-5. If I explain it correctly: move on
-6. If my explanation is off or incomplete: re-explain that specific part differently, then ask again
-7. After I demonstrate understanding, ask: "What would you change here if [scenario — e.g. this needed to handle 10x load / this failed halfway through]?"
+5. Check my answer specifically for whether I caught and corrected the
+   planted error — not just whether I explained the general idea correctly
+6. If I catch it and correct it: confirm what was wrong and why, then move on
+7. If I miss it or repeat the false claim back as true: point out exactly
+   what was wrong and why, re-explain that part differently, then ask again
+8. After I demonstrate understanding, ask: "What would you change here if [scenario — e.g. this needed to handle 10x load / this failed halfway through]?"
 
 The goal is that I can look at any piece of code in this project and explain exactly what it does, why it's there, and what trade-offs it reflects — even though I didn't type it.
 
@@ -490,6 +501,18 @@ Maintain a `docs/PROGRESS.md` file. Updated automatically by
 - What I struggled with
 - What concepts I need to revisit
 - What's next
+- Percent of the project complete, percent remaining, and an
+  estimated number of days left to finish
+
+**How to estimate percent complete and time remaining:** Base it on
+the build order in this file — weight by real effort, not a flat step
+count (step 4's reranking is not the same size as step 9's evaluation
+harness). Give a one-line plain-English reason for the percentage, not
+just a number. For time remaining, estimate the realistic effort left
+in hours for the remaining steps, then convert to days assuming 3–4
+hours of focused work per day — state that assumption explicitly every
+time ("at 3–4 hours/day, roughly X working days left") so the number
+stays honest as scope changes.
 
 ---
 

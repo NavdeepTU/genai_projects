@@ -9,11 +9,14 @@ engine that gives you answers instead of a list of links.
 ## The big picture — how the pieces fit together
 
 Two things exist now: getting a document *into* the system, and asking a
-question *about* it. A LangGraph multi-step query pipeline, and
-everything after that in the build order, don't exist yet. Every
-request, regardless of which of the two flows it's on, now also gets a
-correlation ID, an audit log entry, and circuit-breaker protection around
-its external AI calls (OpenAI and, as of this session, Voyage AI).
+question *about* it. The second of those is no longer a straight line —
+it's a LangGraph pipeline that can notice its own search results are
+weak, rewrite the question, and try once more before giving up and
+answering with whatever it has. Everything after that in the build
+order doesn't exist yet. Every request, regardless of which of the two
+flows it's on, also gets a correlation ID, an audit log entry, and
+circuit-breaker protection around its external AI calls (OpenAI and
+Voyage AI).
 
 ```mermaid
 flowchart TD
@@ -31,16 +34,19 @@ flowchart TD
         EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
     end
 
-    subgraph retrieve["Asking a question (hybrid search + reranking)"]
+    subgraph retrieve["Asking a question — LangGraph query pipeline"]
         Q --> QEMBED[Embed the question]
         QEMBED --> VEC["Vector search: 20 candidates<br/>(fails? use keyword results alone)"]
-        Q --> KW["Keyword search: 20 candidates<br/>(fails? use vector results alone)"]
+        QEMBED --> KW["Keyword search: 20 candidates<br/>(fails? use vector results alone)"]
         VEC --> BOTH{Both failed?}
         KW --> BOTH
         BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
         BOTH -->|no| RRF["Merge: Reciprocal Rank Fusion<br/>(20 candidates)"]
-        RRF --> RERANK["Rerank via Voyage AI<br/>(fails? use RRF's own order)"]
-        RERANK --> GEN["Generate answer: top 5<br/>(OpenAI LLM, via circuit breaker)"]
+        RRF --> RERANK["Rerank via Voyage AI<br/>(fails? skip straight to generate)"]
+        RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
+        CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
+        REWRITE --> QEMBED
+        CHECK -->|no| GEN["Generate answer: top 5<br/>(OpenAI LLM, via circuit breaker)"]
     end
 
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
@@ -61,26 +67,38 @@ failed rather than left in limbo.
 meaning-vector, and two independent searches run one after another: a
 vector search (closest meaning) and a keyword search (Postgres full-text
 search, for exact terms vector search can miss — error codes, product
-IDs, rare proper nouns). Each now fetches a wider pool of 20 candidates,
-not just the final 5. If one of the two searches fails, the system
-doesn't give up — it proceeds using whichever search actually succeeded,
-and only returns an error if *both* fail. The two ranked lists (or the
-one that's available) are merged into one using Reciprocal Rank Fusion,
-favoring chunks either search strongly agrees on — over the full pool of
-20, not pre-truncated to 5. That merged pool is then reranked: Voyage
-AI's reranking model looks at the actual question and each candidate
-chunk *together* (unlike vector/keyword search, which score them
-separately), and picks the 5 that actually answer the question best. If
-reranking itself fails, the system falls back to hybrid search's own
-ranking rather than failing the request. Those final 5 chunks, plus the
-original question, are handed to an LLM, which answers using only that
-retrieved text, and says it doesn't know rather than guessing if the
-answer isn't there.
+IDs, rare proper nouns). Each fetches a wider pool of 20 candidates, not
+just the final 5. If one of the two searches fails, the system doesn't
+give up — it proceeds using whichever search actually succeeded, and
+only returns an error if *both* fail. The two ranked lists (or the one
+that's available) are merged into one using Reciprocal Rank Fusion,
+favoring chunks either search strongly agrees on. That merged pool is
+then reranked: Voyage AI's reranking model looks at the actual question
+and each candidate chunk *together* (unlike vector/keyword search, which
+score them separately), and picks the 5 that actually answer the
+question best — and now also reports *how* relevant the best one really
+is. If that top score is below a threshold (0.4) and this is the first
+attempt, the pipeline doesn't just accept weak results — it asks an LLM
+to rephrase the question, and searches again from scratch with the new
+phrasing, once. If reranking itself is unavailable, or a second attempt
+still comes up weak, the pipeline moves on anyway rather than looping
+forever, and generates the best answer it can from whatever it found.
+Those final chunks, plus the *original* question (never the rewritten
+one — the rewrite is only a search tool, not a replacement for what the
+user actually asked), are handed to an LLM, which answers using only
+that retrieved text, and says it doesn't know rather than guessing if
+the answer isn't there.
 
-**What's new since the last update:** reranking (build-order step 4) is
-now built — hybrid search fetches a wider candidate pool specifically so
-Voyage AI's reranker has real room to improve on RRF's own ordering, with
-a graceful fallback if reranking itself is unavailable. See ADR-013.
+**What's new since the last update:** the query pipeline (build-order
+step 5) is no longer a fixed sequence — it's a LangGraph graph that can
+loop back once if what it finds is weak. Getting the "weak" signal right
+took a real pivot: the original plan (retry when zero chunks come back)
+turned out to basically never fire with real data, since vector search
+always returns *something*, however irrelevant — live testing caught
+this before it shipped. The actual trigger is Voyage's own relevance
+score on the best chunk found, thresholded at 0.4 based on real
+measured scores (a true match scored 0.914; irrelevant questions scored
+~0.28–0.29 against the same data). See ADR-014.
 
 ## The main components
 
@@ -117,18 +135,33 @@ place in the codebase that talks directly to the database. Everything else
 asks the repository to save or update things, rather than writing its own
 database queries.
 
-**Retrieval service (`app/services/retrieval_service.py`)** — the
-conductor for answering questions, mirroring the ingestion service's role.
-Embeds the question, asks the repository for both the closest chunks
-(vector) and the best keyword matches — now a wider pool of 20 rather
-than the final 5 — merges them via hybrid search, reranks that pool down
-to the best 5, then asks the generation service to write an answer. Each
-search's failure is handled independently — the service proceeds with
-whichever one succeeded and only raises `RetrievalUnavailableError` if
-both fail (see ADR-012). Reranking's failure is handled the same way — it
-falls back to hybrid search's own ranking rather than failing the request
-(see ADR-013). Talks to: embedding, the repository, hybrid search,
-reranking, and generation.
+**Retrieval service (`app/services/retrieval_service.py`)** — still the
+conductor for answering questions, but its job changed shape this
+session: `answer_question` no longer runs a fixed sequence itself, it
+builds a small LangGraph graph (in `__init__`) and hands the question to
+it. The actual step logic lives in five methods on this class
+(`_retrieve_node`, `_rerank_node`, `_rewrite_node`, `_generate_node`,
+`_should_retry`), each a graph node, all of them reusing the exact same
+search/rerank helpers hardened in ADR-012 and ADR-013 — nothing about
+the existing partial-failure or reranker-fallback behavior changed to
+make this work. Talks to: embedding, the repository, hybrid search,
+reranking, query rewriting, and generation.
+
+**Query graph (`app/services/query_graph.py`)** — defines the shape of
+the data that flows between the retrieval service's graph nodes
+(`QueryState`: the question, its possibly-rewritten form, candidates,
+reranked chunks, a relevance score, retry count, the answer) and wires
+those nodes into a compiled LangGraph graph. Talks to: nothing directly
+— it only describes connections between methods the retrieval service
+already owns.
+
+**Query rewriting (`app/services/query_rewriting.py`)** — a single,
+narrowly-scoped LLM call: given a question that just returned weak
+search results, ask a model to rephrase it into something more likely to
+find real content. Wrapped in its own circuit breaker
+(`openai_query_rewrite`), kept separate from generation's, so a
+rewriting outage can't be mistaken for a generation outage. Talks to:
+OpenAI.
 
 **Hybrid search (`app/services/hybrid_search.py`)** — merges the vector
 search and keyword search result lists into one ranked list, using
@@ -258,6 +291,20 @@ succeeds, just using hybrid search's own ranking instead — unlike an
 OpenAI failure, which still fails the request today, just with a clean
 `503` instead of a crash. See ADR-013.
 
+The query pipeline detects "weak retrieval" using Voyage's own
+relevance score, not an empty-results check — the empty-results version
+was actually built first, per the original plan, and found not to work
+against live testing: vector search has no relevance floor, so it
+always returns *something*. The retry is also deliberately skipped, not
+just declined, when reranking itself is unavailable rather than merely
+weak — rewriting the question can't fix an unreachable API, and would
+likely just hit the same open circuit again a moment later. `MAX_RETRIES`
+is a hard cap of 1, and deliberately not something that gets raised
+under higher traffic — more retries under load means more calls to the
+exact vendors already struggling, worsening the problem instead of
+fixing it, the same retry-storm reasoning ADR-012 already used once. See
+ADR-014.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address. The
@@ -274,9 +321,14 @@ used for chunks, so the two are comparable. Postgres finds 20 candidate
 chunks by vector similarity and, separately, 20 by keyword match, and
 merges the two ranked lists into one with Reciprocal Rank Fusion. Voyage
 AI's reranking model then looks at the actual question and each of those
-20 candidates together, and narrows them down to the 5 that genuinely
-answer the question best. Those 5 chunks and the question are sent to an
-LLM, which writes an answer grounded only in that retrieved text.
+20 candidates together, narrows them down to the 5 that genuinely answer
+the question best, and reports how relevant the best one actually is.
+If that top score is weak and this is the first attempt, the pipeline
+loops back: an LLM rephrases the question, and the whole search runs
+again with the new phrasing — once, never more. Either way, once there
+are chunks worth using (or the one retry is used up), those chunks and
+the *original* question are sent to an LLM, which writes an answer
+grounded only in that retrieved text.
 
 ## What could go wrong and how we handle it
 
@@ -297,13 +349,26 @@ need to be re-uploaded and reprocessed from scratch.
 
 **No documents have been uploaded yet, or nothing relevant matches** — the
 similarity search still returns *something* (it always returns the
-closest chunks it can find, even if none are truly relevant), but the
-generation step's instructions mean the LLM says it doesn't know rather
-than forcing an answer out of unrelated context. That instruction isn't
-perfectly reliable, though — there's no automated evaluation harness yet
+closest chunks it can find, even if none are truly relevant). The query
+pipeline now notices this, using Voyage's own relevance score rather
+than trusting that "some chunks came back" means they're any good — if
+the best one scores below 0.4 and this is the first attempt, it rewrites
+the question and tries once more before giving up. Even after that,
+there's still no guarantee: the generation step's "say you don't know"
+instruction is what actually prevents a bad answer, and that instruction
+isn't perfectly reliable — there's no automated evaluation harness yet
 (build-order step 9) measuring how often the model still guesses despite
-being told not to, so today the only backstop against that is a human
-noticing an answer looks wrong. See ADR-004.
+being told not to, so today the only backstop is a human noticing an
+answer looks wrong. See ADR-004 and ADR-014.
+
+**The query pipeline's retry loop itself has a blind spot** — when it
+fires, it's invisible to anyone watching the system from outside: the
+user just gets an answer, with nothing in the API response indicating a
+retry happened. The only trace today is a correlation-tagged log line
+inside `_rewrite_node`. There's no metric yet for "how often does this
+retry fire," so an on-call engineer would have to know to grep logs for
+it specifically — acceptable at zero production traffic, not acceptable
+once this serves real users. See ADR-014.
 
 **OpenAI itself starts failing repeatedly (outage, rate limit)** — after
 3 failures within 60 seconds, that call site's circuit breaker opens.
@@ -434,3 +499,28 @@ text on every query.
 ranked lists into one, by scoring each item based on *where it ranked* in
 each list (not its raw score) and summing those scores — so items both
 lists agree are good naturally rise to the top.
+
+**LangGraph** — a framework for building a pipeline as a graph of steps
+("nodes") connected by "edges," instead of one fixed sequence of
+function calls. Its point is *conditional* edges: the next step can
+depend on what the current step actually found, which lets a pipeline
+branch or loop, not just run the same steps in the same order every
+time.
+
+**Node / edge (LangGraph)** — a node is one step in the pipeline (e.g.
+"rerank the candidates"); an edge connects two nodes. A conditional edge
+picks which node runs next based on the current state, rather than
+always going to the same next step.
+
+**Relevance score** — a number a reranker assigns to how well a specific
+chunk actually answers a specific question, roughly 0 (unrelated) to 1
+(a strong match) for Voyage's reranker specifically. Different from
+cosine similarity or `ts_rank`: those compare separately-computed
+representations, this compares the actual question and the actual chunk
+together.
+
+**Query rewriting** — asking an LLM to rephrase a question that just
+returned poor search results, so the *retrieval* step gets a better shot
+at finding real content on a second attempt. Distinct from the answer
+the user eventually sees, which is always generated from their
+*original* question, never the rewritten one.

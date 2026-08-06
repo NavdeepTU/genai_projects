@@ -418,6 +418,87 @@ manage and its own circuit breaker to reason about independently.
 
 ---
 
+## Feature 5: LangGraph Query Pipeline
+
+**What does this feature do, in one sentence?**
+It turns the query pipeline from a fixed sequence of steps into a graph
+that can notice its own retrieval results are weak, rewrite the
+question, and search again once before generating an answer.
+
+**The query pipeline was already five steps in a row before this — what
+does LangGraph actually add over what we had?**
+Being multi-step isn't the same as being able to make decisions.
+Before, step 2 always followed step 1 no matter what happened — a
+straight line. LangGraph adds *conditional* edges: after reranking, the
+pipeline can check what it actually found and branch — loop back and
+try again, or move on — instead of blindly continuing regardless of
+result quality.
+
+**The original plan was "retry if reranking returns zero chunks" — why
+isn't that in the final code?**
+Because it doesn't work, and that was only found by actually testing it
+live, not by reading the code. Vector search has no relevance floor —
+`find_similar_chunks` always returns the *closest* chunks by distance,
+however irrelevant, as long as the table isn't empty. Asking a
+completely unrelated question against the real database never
+triggered the retry, because "zero results" essentially never happens
+outside of an empty database.
+
+**So what actually decides when to retry?**
+Voyage's own `relevance_score` on the *best* reranked chunk — not "any"
+or "all" five chunks, just the top one, since generation only needs one
+genuinely relevant chunk to work from. If the best one scores below
+`0.4`, and this is the first attempt, the pipeline rewrites the question
+and searches again. The threshold itself came from real measurements
+against the dev database: a genuinely relevant match scored `0.914`;
+two different irrelevant questions both scored `~0.28–0.29` — a wide,
+clean gap, with `0.4` sitting comfortably inside it.
+
+**Why does the retry skip entirely — not just decline — when reranking
+itself is unavailable, rather than when it's just weak?**
+Those are different problems with different fixes. A weak score means
+reranking *worked* but found nothing good — rewriting the question is a
+real attempt to fix that. Reranking being *unavailable* means the tool
+that would even tell you whether to retry is down — rewriting the
+question and searching again can't fix an unreachable API, and would
+almost certainly just hit the same open circuit breaker a moment later,
+for no benefit.
+
+**Why is the final answer always generated from the *original* question,
+never the rewritten one?**
+The rewritten question is a search tool, not a replacement for what the
+user actually asked. If a rewrite broadens "Q4 revenue for Acme" into
+something more searchable, the answer still needs to address the
+specific thing asked — otherwise the system quietly answers an easier,
+different question than the one it was given.
+
+**If this had to handle 10x the traffic, would you raise `MAX_RETRIES`
+to catch more relevant chunks?**
+No — that's the wrong lever, and it's worth knowing why it's tempting
+but wrong. Every retry is a full extra round trip through embedding,
+both searches, and reranking again. At 10x traffic, both circuit
+breakers already trip more often just from call volume; raising the
+retry cap would send *more* load at the exact vendors already
+struggling, tripping their breakers even faster — the same retry-storm
+problem ADR-012 already reasoned its way out of once. The better lever
+is tuning the circuit breakers' own thresholds to scale with traffic,
+not retrying more.
+
+**A real testing mistake happened while verifying this — what, and what
+does it teach about testing LangGraph code specifically?**
+Patching `RetrievalService._rewrite_node` on the class, after
+constructing a `RetrievalService`, silently did nothing — the spy never
+fired even when the method genuinely ran. The graph is built once in
+`__init__` and captures a bound-method *reference* at that moment;
+patching the class afterward doesn't reach an already-built graph. The
+fix was patching the module-level `rewrite_query` function instead,
+which every node looks up fresh on each call. Worth remembering
+generally: patch what's actually looked up at call time, not something
+already captured earlier.
+*Further reading: [LangGraph's official `StateGraph` API reference](https://reference.langchain.com/python/langgraph/graph/state/StateGraph).*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

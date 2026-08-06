@@ -23,14 +23,19 @@ and why it was made that way.
   Voyage AI's reranker, which looks at the question and each chunk
   together instead of separately, before the best 5 reach the LLM. Falls
   back to hybrid search's own ranking if Voyage is unavailable.
+- **LangGraph query pipeline** — the query flow is now a graph, not a
+  fixed sequence: if the best reranked chunk scores below a relevance
+  threshold, an LLM rewrites the question and the whole search runs
+  again once before generating an answer, instead of quietly answering
+  from weak results.
 - **Correlation IDs, an append-only audit log, and circuit breakers**
   around every external AI call (OpenAI and Voyage) — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
   for why these three were prioritized over other pending requirements.
 
-**Not built yet:** a LangGraph multi-step query pipeline, a Neo4j
-document-relationship graph, PII detection, document access control, an
-evaluation harness, an MCP server, the frontend, auth, and Azure
-deployment. See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** a Neo4j document-relationship graph, PII detection,
+document access control, an evaluation harness, an MCP server, the
+frontend, auth, and Azure deployment. See `CLAUDE.md`'s build order for
+the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - No automated test suite yet (`tests/` is empty).
@@ -70,12 +75,15 @@ reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
   `gpt-4o-mini` for answer generation
 - **Voyage AI** — `rerank-2.5-lite` for reranking hybrid search's results
   before generation (see [`ADR-013`](docs/adr/ADR-013-reranking-with-voyage-ai.md))
+- **LangGraph** — the query pipeline itself: a graph with one conditional
+  loop back to a rewritten search when retrieval comes back weak (see
+  [`ADR-014`](docs/adr/ADR-014-langgraph-query-pipeline.md))
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
 - **Docker** — runs Postgres locally, isolated from anything else on
   the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
 
-The full planned stack (Kafka, Qdrant, Redis, Neo4j, LangGraph, Azure,
-Terraform, a Next.js frontend) is documented in `CLAUDE.md` — most of it
+The full planned stack (Kafka, Qdrant, Redis, Neo4j, Azure, Terraform, a
+Next.js frontend) is documented in `CLAUDE.md` — most of it
 isn't built yet, and is being added deliberately, one justified decision
 at a time, not upfront.
 

@@ -21,8 +21,10 @@ Close out the current working session on this project:
    done, leave the rest pending, matching the page's existing visual
    format and style.
 5. Append a new dated entry to `docs/PROGRESS.md`: what was built, what I
-   struggled with, what to revisit, what's next. Never rewrite past
-   entries — this file is a history log, not a current-state snapshot.
+   struggled with, what to revisit, what's next, and a completion
+   estimate — following the "Progress Tracker" rule in CLAUDE.md. Never
+   rewrite past entries — this file is a history log, not a
+   current-state snapshot.
 6. Write any new ADRs for significant decisions made this session, in
    `docs/adr/ADR-XXX-name.md`.
 7. Check `README.md` — update it only if something changed that a reader
