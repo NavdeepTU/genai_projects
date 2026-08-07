@@ -44,10 +44,16 @@ and why it was made that way.
   answer correctness (the last two via a separate LLM-as-judge call
   each). An offline, on-demand tool, not part of the running app — see
   [`ADR-016`](docs/adr/ADR-016-llm-judge-evaluation-harness.md).
+- **MCP server** — the same pipeline, exposed as two tools
+  (`ask_knowledge_base`, `upload_document`) other AI clients can call
+  directly over HTTP, mounted on this same app at `/mcp` and gated by a
+  shared API key. Reuses every service, circuit breaker, and the audit
+  log the REST routes already use — see
+  [`ADR-017`](docs/adr/ADR-017-mcp-server.md).
 
-**Not built yet:** PII detection, document access control, an MCP
-server, the frontend, auth, and Azure deployment. See `CLAUDE.md`'s
-build order for the full plan.
+**Not built yet:** PII detection, document access control, an API
+gateway, Azure deployment, the frontend, and full auth/multi-tenancy.
+See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - No automated test suite yet (`tests/` is empty).
@@ -93,6 +99,9 @@ reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
 - **Neo4j** — the document relationship graph: explicit `REFERENCES`
   links between documents, extracted from content, not similarity (see
   [`ADR-015`](docs/adr/ADR-015-neo4j-document-relationship-graph.md))
+- **MCP (Model Context Protocol)** — the official Python SDK, mounted
+  onto this same app so other AI clients can call the pipeline directly
+  (see [`ADR-017`](docs/adr/ADR-017-mcp-server.md))
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
@@ -118,8 +127,9 @@ not upfront.
    cp .env.example .env
    ```
    The `NEO4J_*` values already match `docker-compose.yml`'s defaults,
-   so they work as-is for local development — nothing else to fill in
-   there.
+   so they work as-is for local development. Set `MCP_API_KEY` to any
+   value of your choice — it's the shared secret MCP clients must send
+   back to use the `/mcp` endpoint.
 4. **Install dependencies:**
    ```
    uv sync
@@ -146,6 +156,12 @@ curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
 ```
+
+The same two actions are also reachable as MCP tools at
+`http://localhost:8000/mcp`, over the Streamable HTTP transport, for
+any MCP-compatible client (e.g. Claude Desktop) — every request must
+include the shared secret you set as `MCP_API_KEY` in an `X-API-Key`
+header.
 
 ### Running the evaluation harness
 

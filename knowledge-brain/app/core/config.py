@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     retrieval_candidate_pool: int = 20
     retrieval_relevance_threshold: float = 0.4
 
+    # MCP server
+    mcp_api_key: str
+
 
 @lru_cache
 def get_settings() -> Settings:

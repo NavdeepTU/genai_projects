@@ -110,8 +110,24 @@ actually asked), are handed to an LLM, which answers using only that
 retrieved text, and says it doesn't know rather than guessing if the
 answer isn't there.
 
-**What's new since the last update:** an evaluation harness (build-order
-step 9), living entirely outside the running app in `eval/`. It's the
+**What's new since the last update:** an MCP server (build-order step
+10), a second front door into the exact same pipeline. MCP (Model
+Context Protocol) is a standard way for an AI client — Claude Desktop,
+another agent — to discover and call a tool directly, instead of only
+being reachable through this project's own `/query` and `/documents`
+endpoints. It's mounted onto the same running app under `/mcp`,
+guarded by one shared secret checked in raw ASGI middleware (plain
+`scope`/`receive`/`send`, not Starlette's `BaseHTTPMiddleware`, which
+turned out to break MCP's long-lived streaming responses — found by
+live testing, not by reading the code). It exposes exactly two tools,
+`ask_knowledge_base` and `upload_document`, and neither one is new
+logic — both are thin wrappers around the same `RetrievalService` and
+`IngestionService` the REST routes already use, reusing every circuit
+breaker, the audit log, and correlation IDs without duplicating any of
+it. See ADR-017.
+
+An evaluation harness (build-order step 9) was added before that,
+living entirely outside the running app in `eval/`. It's the
 first thing in this project that actually measures answer quality
 systematically rather than by a human eyeballing one response — a fixed
 set of known-answer test questions run against dedicated fixture
@@ -327,6 +343,28 @@ flowchart LR
     CORRECT --> REPORT
 ```
 
+**MCP server (`app/mcp/server.py`, `app/mcp/auth.py`)** — a second
+front door onto the same pipeline, for AI clients rather than a human
+typing questions. `server.py` registers two tools, `ask_knowledge_base`
+and `upload_document`, each a thin wrapper that opens its own database
+(and, where needed, Neo4j) session and calls the exact same services
+`app/api/query.py` and `app/api/documents.py` already call — no
+business logic lives here. `auth.py`'s `ApiKeyMiddleware` runs first on
+every request to `/mcp`, rejecting anything that doesn't carry the
+correct shared secret before it can reach a tool at all. Talks to:
+`RetrievalService`, `IngestionService`, `DocumentGraphService`, the
+audit log — everything the REST routes already talk to. If it
+disappeared, the pipeline would still work exactly as before; only the
+MCP-specific entry point would be gone.
+
+```mermaid
+flowchart LR
+    CLIENT[MCP client<br/>e.g. Claude Desktop] -->|"POST /mcp<br/>header: X-API-Key"| GATE{ApiKeyMiddleware:<br/>key correct?}
+    GATE -->|no| REJECT[401 Unauthorized]
+    GATE -->|yes| TOOLS[MCP server:<br/>ask_knowledge_base / upload_document]
+    TOOLS --> SERVICES["Same RetrievalService /<br/>IngestionService the REST<br/>routes already use"]
+```
+
 ## Key decisions we made and why
 
 We run the pipeline synchronously (the user waits while their file is
@@ -431,6 +469,24 @@ correctness are judged by two separate LLM calls, not one combined
 call, specifically to avoid one response conflating two different
 judgments. See ADR-016.
 
+The MCP server is mounted onto the existing FastAPI app rather than
+run as its own standalone process, specifically to reuse the circuit
+breakers, audit logging, and correlation ID middleware already built —
+a separate process would need to duplicate all of that wiring instead.
+It's gated by a network-reachable HTTP transport rather than a
+local-only one, a deliberate choice to learn how this pattern works in
+a real enterprise deployment, which in turn meant pulling forward a
+minimal slice of build-order item 14 (one shared API key, checked with
+a constant-time comparison) rather than the full auth system, or
+building the full item early. A single shared secret was chosen over
+per-caller keys because there's exactly one real caller type today —
+distinguishing callers only matters once there's more than one kind to
+distinguish. The gate itself is raw ASGI middleware, not Starlette's
+more common `BaseHTTPMiddleware`, after live testing showed
+`BaseHTTPMiddleware` silently breaks MCP's long-lived streaming
+responses by running the wrapped app in a separate, buffered task. See
+ADR-017.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address. The
@@ -463,6 +519,18 @@ chunks explicitly reference — one hop only — and pulls in a snippet
 from each. Those chunks, the graph snippets, and the *original*
 question are sent to an LLM, which writes an answer grounded only in
 that retrieved text.
+
+**Asking a question or uploading a document via MCP:** an AI client
+sends a request to `/mcp` with a shared secret in a header instead of
+a human hitting `/query` or `/documents/upload` directly. The gate
+checks that secret first — wrong or missing, the request stops there
+with a 401, nothing else runs. Once past the gate, the request follows
+the exact same two journeys described above: `ask_knowledge_base` and
+`upload_document` are thin wrappers calling the same
+`RetrievalService` and `IngestionService`, so everything from that
+point on — the LangGraph retry loop, graph context, the audit log
+entry — behaves identically regardless of which door the request came
+through.
 
 ## What could go wrong and how we handle it
 
@@ -594,6 +662,15 @@ same way the system it's judging can be. A passing eval score is a
 strong signal, not a mathematical proof. It also only runs when someone
 remembers to run it — nothing wires it into CI yet, so it can't catch a
 regression on its own, only when manually invoked. See ADR-016.
+
+**The MCP server's shared secret leaks** — anyone holding it can call
+either tool, indistinguishable in the audit log from a legitimate
+caller beyond "held a valid key." There's no anomaly detection today
+watching call volume or timing, so a leak would look like normal
+traffic until someone noticed something odd by hand — a real, named
+gap, acceptable only because there's exactly one real caller type
+today. The fix (per-caller keys, plus volume-based alerting) waits on
+build-order item 14 actually existing. See ADR-017.
 
 ## Glossary
 
@@ -728,3 +805,34 @@ literally state.
 a handful of short documents with known, unambiguous facts) used
 specifically so a test's expected outcome is known in advance, as
 opposed to testing against real, unpredictable production data.
+
+**MCP (Model Context Protocol)** — a standard way for an AI client to
+discover and call tools an application exposes, without one-off
+integration code for every new client. A "tool" here is just a
+function with a name and description the client can call directly —
+`ask_knowledge_base` and `upload_document` in this project.
+
+**ASGI** — the standard interface Python web servers and frameworks
+(FastAPI, Starlette, Uvicorn) use to talk to each other: any
+compatible piece of code receives the same three things — `scope`
+(request metadata), `receive` (a way to read incoming data), and
+`send` (a way to write a response) — regardless of which framework
+wrote it, which is what lets one small custom class (like
+`ApiKeyMiddleware`) sit directly in front of a whole other framework's
+app.
+
+**Middleware** — code that runs on every request before (and
+sometimes after) whatever normally handles it, used for a check or
+action that applies broadly rather than to one specific route — an
+API key check or a correlation ID stamp, in this project.
+
+**Lifespan (ASGI)** — the startup/shutdown hook an ASGI app runs once,
+not per request — used here to start the MCP server's internal task
+group when the app boots, since mounting a sub-app doesn't
+automatically forward the outer app's own startup event into it.
+
+**Shared secret** — one fixed value both sides of a connection already
+know, checked on every request as a simple "are you allowed to be
+here" gate. Weaker than per-caller credentials (anyone holding it is
+indistinguishable from anyone else who has it) but simpler, and
+proportionate when there's only one real caller type to gate.

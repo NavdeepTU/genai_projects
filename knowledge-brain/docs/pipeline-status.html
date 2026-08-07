@@ -313,7 +313,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 7 of 10 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 8 of 16 features complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -638,12 +638,49 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> all 6 test cases passed on all three scored dimensions — retrieval, faithfulness, and correctness — against the real pipeline and real infrastructure. See ADR-016.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 8 — MCP server <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Two MCP tools</span>
+        <span class="path mono">app/mcp/server.py · ask_knowledge_base + upload_document, reuse existing services</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Shared-secret gate</span>
+        <span class="path mono">app/mcp/auth.py · raw ASGI middleware, constant-time comparison</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Mounted onto the app</span>
+        <span class="path mono">app/main.py · lifespan starts the session manager, mounted at /mcp</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> a missing or wrong key is rejected with a real 401; a correct key can list both tools, upload a document, and get back a grounded answer citing that same upload — through the real MCP protocol, not an in-process call. Two real bugs were found only by that live test, not by reading the code: a mounted sub-app never received FastAPI's startup event, so the MCP server's task group was never initialized; and Starlette's <code>BaseHTTPMiddleware</code> silently broke MCP's streaming responses, fixed by switching to raw ASGI middleware. See ADR-017.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">08</span>MCP server</li>
-      <li><span class="n mono">09</span>Frontend dashboard</li>
-      <li><span class="n mono">10</span>Auth &amp; multi-tenancy</li>
+      <li><span class="n mono">07</span>PII detection</li>
+      <li><span class="n mono">08</span>Document-level access control</li>
+      <li><span class="n mono">09</span>API gateway (Azure API Management)</li>
+      <li><span class="n mono">10</span>Azure deployment (Terraform + CI/CD)</li>
+      <li><span class="n mono">11</span>Frontend dashboard</li>
+      <li><span class="n mono">12</span>Auth &amp; multi-tenancy hardening</li>
+      <li><span class="n mono">13</span>LLM/RAG observability</li>
+      <li><span class="n mono">14</span>Real-time answer guardrails</li>
     </ul>
   </footer>
 

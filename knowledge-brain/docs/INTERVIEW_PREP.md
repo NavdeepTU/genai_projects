@@ -668,6 +668,101 @@ only catches a regression if someone remembers to run it.
 
 ---
 
+## Feature 8: MCP Server
+
+**What does this feature do, in one sentence?**
+It exposes the exact same retrieval and ingestion pipeline as two
+tools an AI client can call directly over a standard protocol, instead
+of only being reachable through this project's own `/query` and
+`/documents` REST endpoints.
+
+```mermaid
+flowchart LR
+    CLIENT[MCP client] -->|"X-API-Key header"| GATE{Correct key?}
+    GATE -->|no| REJECT[401]
+    GATE -->|yes| TOOLS[ask_knowledge_base /<br/>upload_document]
+    TOOLS --> SERVICES[Same services the<br/>REST routes already use]
+```
+
+**Why HTTP instead of a local-only server — isn't local safer?**
+Local is safer by default — nothing outside the machine can reach it.
+HTTP was chosen deliberately, to build and prove out the pattern
+you'd actually need in production: a real network-facing gate,
+accepting that exposure because a shared-secret check is the
+compensating control for it. That trade-off — safer-by-default versus
+actually-representative-of-production — is also what reopened the
+PII/ACL-ordering question from earlier sessions: a *local* server adds
+no new exposure, so it could skip ahead of PII/ACL; an HTTP one
+couldn't, without adding some form of gate first.
+
+**Why mount it onto the existing FastAPI app instead of running it as
+its own process?**
+Every tool call needs the same OpenAI/Voyage calls, the same circuit
+breakers, and the same database and Neo4j access the REST routes
+already have. A standalone process would mean either duplicating all
+of that wiring or reaching across processes for it. Mounting onto the
+existing app gets it all for free, including correlation IDs — that
+middleware wraps the *whole* app regardless of which mounted path a
+request eventually reaches, not just the routes that existed when it
+was registered.
+
+**Why one shared secret instead of a key per caller?**
+There's exactly one real caller type today, and distinguishing callers
+only matters once there's more than one kind to distinguish. Building
+per-caller keys now would be solving a multi-tenancy problem that
+doesn't exist yet — the same reasoning behind deferring full
+build-order item 14 rather than building it early.
+
+**Walk me through the two bugs live testing caught that code review
+wouldn't have.**
+First: mounting a sub-app with `app.mount()` doesn't forward FastAPI's
+startup event into it — only the outer app's own lifespan runs
+automatically. Without an explicit `lifespan` context manager entering
+`mcp.session_manager.run()`, the MCP server's internal task group was
+never initialized, and every request failed with `RuntimeError: Task
+group is not initialized`, even past a correct API key. Second:
+Starlette's `BaseHTTPMiddleware` runs whatever it wraps in a separate,
+buffered task — fine for an ordinary request/response, but it broke
+MCP's long-lived streaming responses outright ("SSE stream ended
+without a response"). Both were fixed only after actually running the
+real MCP protocol against the server, not by reading the code — the
+same discipline this project has relied on since the LangGraph
+retry-threshold and Voyage rate-limit discoveries.
+
+**What's the audit log bug you found while building this?**
+`documents.py`'s existing pattern writes the `document_upload` audit
+entry *after* the best-effort graph-linking step. Copying that pattern
+into the MCP tool at first meant an unexpected (non-`CircuitOpenError`)
+failure during graph-linking — a corrupted PDF `extract_text` can't
+parse, say — would leave a document successfully ingested in Postgres
+with no audit trail for its own upload at all. Fixed in the MCP tool
+by moving the audit log write to right after ingestion succeeds,
+before the graph-linking attempt. The identical gap still exists in
+`documents.py` itself, tracked for a later fix, not changed here.
+
+**What happens if the shared secret leaks, and how would you know?**
+Anyone holding it can make unlimited calls, logged but with no way to
+tell who made them apart from "held a valid key." Honestly — you
+probably wouldn't find out in real time. There's no anomaly detection
+watching call volume or timing today, so a leaked key looks like
+normal traffic until someone notices something odd by hand. That's a
+real, named gap, not a hidden one; the fix is exactly what per-caller
+keys plus volume-based alerting would give you, which is why it's
+flagged as future work once real auth (item 14) exists, not solved now.
+
+**What would you change if this needed to handle 10x more concurrent
+MCP calls?**
+Every tool call opens its own database and Neo4j session by hand,
+since there's no FastAPI dependency injection outside of HTTP routes
+to hand one to it. At meaningfully higher concurrency, that competes
+for the exact same connection pool `/query` and `/documents/upload`
+already share — not a new ceiling MCP introduces, just one more source
+of load against an existing, unchanged limit that would need real
+sizing work before either the REST routes or MCP could handle it.
+*Further reading: [the Model Context Protocol's official documentation](https://modelcontextprotocol.io), including the specification for the Streamable HTTP transport this feature uses.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**
@@ -689,3 +784,17 @@ up, usually because it lacks real information and defaults to guessing.
 We guard against it by grounding every answer in retrieved text, and by
 explicitly instructing the model to admit when it doesn't know rather
 than guess.
+
+**What's the difference between middleware and a route handler?**
+A route handler deals with one specific endpoint's job — answer a
+query, save an upload. Middleware runs on *every* request headed
+anywhere, before (and sometimes after) whatever route eventually
+handles it, for checks or actions that apply broadly rather than to
+one specific job — this project uses it for stamping a correlation ID
+on every request, and for the MCP server's API key check. The two
+middlewares in this project are written at different levels for a
+reason: `correlation_id_middleware` uses FastAPI's higher-level
+`request`/`call_next` style, while the MCP gate is written as raw ASGI
+(`scope`/`receive`/`send`) because the higher-level style turned out
+to break the MCP server's streaming responses — a good example of
+"the simpler abstraction isn't always the correct one."

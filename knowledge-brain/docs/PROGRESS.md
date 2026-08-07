@@ -795,3 +795,112 @@ Management, Azure deployment, the frontend, and auth/multi-tenancy
 hardening — the frontend and Azure deployment remain the two largest
 untouched chunks. At 3–4 hours/day, that's roughly 24–25 working days
 left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-07 (continued) — Feature 8: MCP server
+
+### What we built
+- **MCP server, build-order item 10.** Exposes the pipeline as two
+  tools other AI clients can call directly: `ask_knowledge_base` and
+  `upload_document`. New files: `app/mcp/auth.py` (`ApiKeyMiddleware`),
+  `app/mcp/server.py` (the two tools), one new setting (`mcp_api_key`),
+  and `main.py` wiring (a `lifespan` context manager plus the `/mcp`
+  mount). New dependency: the official `mcp` Python SDK.
+- **A real scope decision, made explicitly, not defaulted into:** chose
+  a network-reachable HTTP server over a local-only one, specifically
+  to learn how this pattern works in a real enterprise deployment. That
+  choice reopened the PII/ACL-ordering question from earlier sessions —
+  resolved by pulling forward a *minimal* slice of build-order item 14
+  (one shared API key, checked with a constant-time comparison) rather
+  than building full auth, and rather than reverting to local.
+- **Zero changes needed to `IngestionService`, `DocumentGraphService`,
+  or `RetrievalService`** to support the new entry point — confirmed
+  live as a direct consequence of those services never having imported
+  anything FastAPI-specific in the first place.
+- **Found and fixed two real bugs, live, not by reading the code:**
+  (1) `app.mount()` doesn't forward FastAPI's startup event into a
+  mounted sub-app, so the MCP session manager's task group was never
+  initialized — every request failed with `RuntimeError: Task group is
+  not initialized` even past a correct API key. Fixed with an explicit
+  `lifespan` context manager entering `mcp.session_manager.run()`.
+  (2) Starlette's `BaseHTTPMiddleware` runs the wrapped app in a
+  separate, buffered task, which silently breaks MCP's long-lived
+  streaming responses — the real key still failed with "SSE stream
+  ended without a response." Fixed by writing the API key gate as raw
+  ASGI middleware instead.
+- **Found and fixed a real correctness gap** in the new `upload_document`
+  tool: its audit log write, copied from `documents.py`'s existing
+  pattern, sat *after* the best-effort graph-linking step — so an
+  unexpected (non-`CircuitOpenError`) failure there would leave a
+  successfully ingested document with no audit trail at all. Fixed here
+  by moving the audit log write to right after ingestion succeeds. The
+  identical gap still exists in `documents.py` itself — tracked in
+  `code-review-followups.md`, not fixed this session, per explicit
+  instruction to fix only the new code.
+- **Verified fully live**, through the real MCP protocol, not an
+  in-process call: a throwaway client script confirmed a missing key
+  and a wrong key both get rejected with a real 401, and a request with
+  the correct key can list both tools, upload a test document, and get
+  back a grounded answer citing content from that same upload.
+- Documented in [`ADR-017`](adr/ADR-017-mcp-server.md).
+
+### What I struggled with
+- Missed the planted claim that a missing required setting would "fail
+  safe" quietly at request time — the real behavior is a loud failure
+  at app startup, before any request is ever served. Caught cleanly
+  once shown the "restaurant that never opens its doors" analogy.
+- Missed the planted claim about a race condition in correlation ID
+  handling across concurrent requests — `ContextVar` gives every
+  request its own isolated copy, no shared state to race over. Caught
+  cleanly once shown the "private notebook page" analogy.
+- Missed the planted claim about middleware registration order
+  affecting which routes get a correlation ID — first asked to skip
+  the question outright, which was correctly declined per this
+  project's own rule ("never move to the next chunk until I've
+  demonstrated understanding"); answered correctly once the question
+  was simplified to a plain yes/no.
+- The connect-the-dots question on *why* the existing services could be
+  reused completely unchanged initially got a circular answer ("because
+  we routed MCP through the same path") before landing on the real
+  reason: those services never depended on FastAPI to begin with.
+- Correctly caught, on the first attempt, that a narrow
+  `except CircuitOpenError` would *not* also catch an unrelated error
+  like a corrupted PDF — a genuinely sharp catch, no correction needed.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  unanswered, now several sessions running.
+- How a leaked `MCP_API_KEY` would actually be detected — correctly
+  named today as a real, currently-unsolved gap (no anomaly detection
+  exists yet), not a misunderstanding to correct, but worth returning
+  to once build-order item 14 exists for real.
+
+### What's next
+- **Explicitly deferred by request**, not forgotten: automated tests
+  for the MCP server. Everything so far was verified with a throwaway
+  script, not a permanent test.
+- The `documents.py` audit-log-ordering gap (same shape as the one just
+  fixed in the MCP tool) is tracked in `code-review-followups.md`,
+  still not fixed.
+- The circuit breaker consecutive-failures bug remains deferred,
+  unchanged from last session.
+- PII detection (item 7) and ACL (item 8) remain the next items in
+  build order if followed strictly — skipped again this session in
+  favor of MCP, for a reasoned trade-off (a minimal auth slice was
+  enough to make HTTP exposure acceptable) rather than an oversight.
+- The test suite still hasn't grown beyond ingestion tests — now also
+  missing MCP coverage on top of hybrid search, the circuit breaker,
+  the audit log, LangGraph retries, and the graph feature.
+
+**Estimated completion: ~32% of the total project, by weighted effort**
+— up from ~27% last session. 8 of 16 build-order items are done. The
+jump is larger than a flat 1-of-16 share because MCP reused nearly
+everything already built rather than adding a new dependency surface —
+but the frontend and Azure deployment remain the two largest untouched
+chunks, so the percentage still moves conservatively. Rough remaining
+effort: ~80 hours across the test suite, PII detection, ACL, real
+auth/multi-tenancy (item 14 — only a small slice of it exists so far),
+API Management, Azure deployment, the frontend, and guardrails (item
+16). At 3–4 hours/day, that's roughly 20–27 working days left, assuming
+no scope changes.
