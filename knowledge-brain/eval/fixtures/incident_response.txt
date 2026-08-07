@@ -1,0 +1,4 @@
+When a P1 incident occurs, the on-call engineer must acknowledge the
+page within 15 minutes and post an update in the #incidents Slack
+channel every 30 minutes until resolved. A postmortem document is
+required within 48 hours of resolution.

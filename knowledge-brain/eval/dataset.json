@@ -1,0 +1,38 @@
+[
+  {
+    "id": "vacation-days",
+    "question": "How many paid vacation days do employees get per year?",
+    "reference_answer": "Employees are entitled to 20 days of paid vacation per year.",
+    "source_fixture": "vacation_policy.txt"
+  },
+  {
+    "id": "vacation-rollover",
+    "question": "How many unused vacation days can roll over to the next year?",
+    "reference_answer": "Up to a maximum of 5 unused vacation days can roll over to the next year.",
+    "source_fixture": "vacation_policy.txt"
+  },
+  {
+    "id": "incident-ack-time",
+    "question": "How quickly must the on-call engineer acknowledge a P1 incident page?",
+    "reference_answer": "The on-call engineer must acknowledge the page within 15 minutes.",
+    "source_fixture": "incident_response.txt"
+  },
+  {
+    "id": "incident-postmortem",
+    "question": "How soon after a P1 incident is resolved is a postmortem required?",
+    "reference_answer": "A postmortem document is required within 48 hours of resolution.",
+    "source_fixture": "incident_response.txt"
+  },
+  {
+    "id": "expense-meal-limit",
+    "question": "What is the daily meal expense limit while traveling for business?",
+    "reference_answer": "Employees can expense meals up to $50 per day while traveling for business.",
+    "source_fixture": "expense_policy.txt"
+  },
+  {
+    "id": "expense-receipt-threshold",
+    "question": "Above what amount does an expense require a receipt?",
+    "reference_answer": "All expenses over $25 require a receipt.",
+    "source_fixture": "expense_policy.txt"
+  }
+]

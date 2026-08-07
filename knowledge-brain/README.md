@@ -38,10 +38,16 @@ and why it was made that way.
 - **Correlation IDs, an append-only audit log, and circuit breakers**
   around every external AI call (OpenAI, Voyage, and Neo4j) — see [`docs/adr/ADR-007`](docs/adr/ADR-007-enterprise-requirements-retrofit-scope.md)
   for why the first three were prioritized over other pending requirements.
+- **Evaluation harness** — a fixed set of known-answer test questions,
+  run through the real pipeline against a small dedicated set of
+  fixture documents, scored on retrieval correctness, faithfulness, and
+  answer correctness (the last two via a separate LLM-as-judge call
+  each). An offline, on-demand tool, not part of the running app — see
+  [`ADR-016`](docs/adr/ADR-016-llm-judge-evaluation-harness.md).
 
-**Not built yet:** PII detection, document access control, an
-evaluation harness, an MCP server, the frontend, auth, and Azure
-deployment. See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** PII detection, document access control, an MCP
+server, the frontend, auth, and Azure deployment. See `CLAUDE.md`'s
+build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - No automated test suite yet (`tests/` is empty).
@@ -140,6 +146,18 @@ curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
 ```
+
+### Running the evaluation harness
+
+```
+PYTHONPATH=. uv run python eval/run_eval.py
+```
+
+Ingests its own small set of fixture documents the first time it runs
+(skipped on later runs), then reports retrieval, faithfulness, and
+correctness scores for a fixed set of known-answer test questions.
+Paced to stay under Voyage's free-tier rate limit, so a full run takes
+a couple of minutes, not seconds.
 
 ## Project documentation
 

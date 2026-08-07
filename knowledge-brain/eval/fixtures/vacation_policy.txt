@@ -1,0 +1,4 @@
+Employees at Acme Corp are entitled to 20 days of paid vacation per
+year. Vacation requests must be submitted at least two weeks in
+advance through the HR portal. Unused vacation days can roll over to
+the next year, up to a maximum of 5 days.

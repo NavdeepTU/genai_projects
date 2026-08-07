@@ -313,7 +313,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 6 of 10 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 7 of 10 features complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -606,10 +606,41 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> ingested two real documents where one named a ticket ID the other actually defined; confirmed the edge got written to Neo4j; then asked a question answerable only by combining both, and the answer correctly cited the detail that existed solely in the graph-linked document. See ADR-015.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 7 — Evaluation harness <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">3 of 3 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Fixtures + dataset</span>
+        <span class="path mono">eval/fixtures/ · eval/dataset.json</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Run real pipeline</span>
+        <span class="path mono">eval/run_eval.py · reuses ingestion + retrieval</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">LLM-as-judge scoring</span>
+        <span class="path mono">eval/judge.py · faithfulness + correctness</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> all 6 test cases passed on all three scored dimensions — retrieval, faithfulness, and correctness — against the real pipeline and real infrastructure. See ADR-016.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">07</span>Evaluation harness</li>
       <li><span class="n mono">08</span>MCP server</li>
       <li><span class="n mono">09</span>Frontend dashboard</li>
       <li><span class="n mono">10</span>Auth &amp; multi-tenancy</li>

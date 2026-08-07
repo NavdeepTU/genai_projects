@@ -98,6 +98,25 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
+    async def get_document_by_filename(self, filename: str) -> Document | None:
+        """Return the most recently uploaded ready document with this filename, if any.
+
+        Used by the evaluation harness to avoid re-ingesting its fixture
+        documents on every run — not part of the normal upload flow.
+        """
+        stmt = (
+            select(Document)
+            .where(Document.filename == filename, Document.status == DocumentStatus.READY)
+            .order_by(Document.uploaded_at.desc())
+            .limit(1)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to look up document by filename %s", filename)
+            raise
+        return result.scalar_one_or_none()
+
     async def get_first_chunk_text(self, document_id: uuid.UUID) -> str | None:
         """Return a referenced document's first chunk as a representative snippet.
 

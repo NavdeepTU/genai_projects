@@ -594,6 +594,80 @@ themselves.
 
 ---
 
+## Feature 7: Evaluation Harness
+
+**What does this feature do, in one sentence?**
+It runs a fixed set of known-answer test questions through the real
+pipeline and scores each one on three things — was the right document
+retrieved, is the answer grounded in its context, and does it match the
+reference answer — instead of relying on a human reading one response
+and guessing whether it looks right.
+
+```mermaid
+flowchart LR
+    DS[Known question<br/>+ reference answer] --> RUN[Run through the<br/>real pipeline]
+    RUN --> CHUNKS{Right document<br/>retrieved?}
+    RUN --> ANSWER[Generated answer]
+    ANSWER --> FAITH[Judge: faithful?]
+    ANSWER --> CORRECT[Judge: correct?]
+```
+
+**Why does this need to exist — wasn't "read the answer and see if it
+looks right" good enough?**
+It was the only backstop for a while, but the pipeline has gotten
+genuinely complex — five external dependencies, a retry loop, a
+relevance threshold picked from just two data points, graph context
+pulled from a second database. There was no systematic way to know
+whether all of that was actually working *together*, only spot-checks.
+A regression in one piece could easily hide behind a good-looking
+answer on the one question someone happened to try by hand.
+
+**Is this the same as the "guardrails" idea that came up around the
+same time?**
+No, and mixing them up would lead to building the wrong shape of tool.
+Guardrails is a real-time safety gate on every *live* answer before a
+user sees it — moderation, prompt-injection defense. This is an
+offline, on-demand quality *measurement* tool, run manually, not on
+every request. They ended up as two separate build-order items (9 and
+16) specifically because conflating them was a real risk early in the
+conversation.
+
+**Why does the test corpus live in the same database as everything
+else, instead of a separate eval database like the test suite uses?**
+A genuinely separate database (the pytest pattern) was considered, but
+rejected as more isolation than the actual problem needed. The goal was
+a small, *known* set of documents with reproducible answers — not
+isolating an entire database connection. A handful of dedicated,
+purpose-written fixture documents, looked up by filename before
+ingesting so re-running eval never creates duplicates, gets the same
+reproducibility without a second database to stand up and maintain.
+
+**Why judge faithfulness and correctness with two separate LLM calls
+instead of one combined call?**
+They're checking genuinely different things — is the answer grounded
+in its context, versus does it match the reference facts — and
+combining them into one response risks the model conflating the two
+judgments. Two focused calls cost more than one combined call, but that
+was accepted as the smaller risk.
+
+**How is "was the right document retrieved" actually checked — string
+matching the answer?**
+No — by comparing the retrieved chunks' actual `document_id` against
+the fixture document's known ID, the same "check against real state,
+don't reimplement the logic as a string comparison" principle used
+throughout this project's test suite.
+
+**What's the honest limitation of this whole approach?**
+The judge is itself an LLM call, and can be wrong or inconsistent
+between runs, the same way the system it's judging can be. A passing
+eval score is a strong signal, not a mathematical proof — a real,
+known trade-off of using a model to grade a model, not something
+specific to how this was built. It's also not wired into CI yet, so it
+only catches a regression if someone remembers to run it.
+*Further reading: [Es et al., "RAGAs: Automated Evaluation of Retrieval Augmented Generation," EACL 2024](https://aclanthology.org/2024.eacl-demo.16/), the paper that formalized separately scoring faithfulness, answer relevance, and context relevance for RAG systems.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

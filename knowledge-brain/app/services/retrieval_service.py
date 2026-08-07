@@ -42,6 +42,17 @@ class RetrievalService:
 
     async def answer_question(self, question: str) -> str:
         """Run one question through the query graph and return the final answer."""
+        state = await self.run_query(question)
+        return state["answer"]
+
+    async def run_query(self, question: str) -> QueryState:
+        """Run one question through the query graph and return the full final state.
+
+        Exposed separately from answer_question so callers that need more
+        than just the answer text — like the evaluation harness, which
+        needs to see which chunks were actually used, not only what the
+        LLM said — don't have to reimplement the graph invocation.
+        """
         initial_state: QueryState = {
             "original_question": question,
             "question": question,
@@ -53,8 +64,7 @@ class RetrievalService:
             "graph_context": [],
             "answer": "",
         }
-        result = await self._graph.ainvoke(initial_state)
-        return result["answer"]
+        return await self._graph.ainvoke(initial_state)
 
     async def _retrieve_node(self, state: QueryState) -> dict:
         """Graph node: hybrid search for the current question, merged with RRF."""

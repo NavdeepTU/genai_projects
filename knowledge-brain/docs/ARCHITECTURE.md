@@ -110,8 +110,23 @@ actually asked), are handed to an LLM, which answers using only that
 retrieved text, and says it doesn't know rather than guessing if the
 answer isn't there.
 
-**What's new since the last update:** a Neo4j document relationship
-graph (build-order step 6). Unlike hybrid search or reranking, this
+**What's new since the last update:** an evaluation harness (build-order
+step 9), living entirely outside the running app in `eval/`. It's the
+first thing in this project that actually measures answer quality
+systematically rather than by a human eyeballing one response — a fixed
+set of known-answer test questions run against dedicated fixture
+documents through the real pipeline, scored on whether the right
+document was retrieved, whether the answer stayed grounded in its
+context, and whether it matched the reference answer, using a separate
+LLM call to judge each of the last two. Verified live: all 6 test cases
+passed on all three dimensions. Deliberately scoped as an offline,
+on-demand tool — not wired into CI yet, and not to be confused with a
+different, related idea (a real-time safety check on every live answer)
+that came up in the same conversation and was split out as its own
+future build-order item instead. See ADR-016.
+
+A Neo4j document relationship graph (build-order step 6) was also
+added. Unlike hybrid search or reranking, this
 isn't about finding text that reads similarly — it's about explicit,
 named connections between documents (a support note mentioning a
 specific ticket ID that another document actually defines) that
@@ -287,6 +302,31 @@ stateDiagram-v2
     Closed --> Closed: call succeeds
 ```
 
+**Evaluation harness (`eval/`)** — a separate, on-demand tool, not part
+of the running app: a fixed set of known-answer test questions
+(`eval/dataset.json`), run against a handful of small, dedicated
+fixture documents (`eval/fixtures/`) through the *real* pipeline, then
+scored on three separate things — was the right document actually
+retrieved, is the answer grounded in its context (`eval/judge.py`'s
+`judge_faithfulness`), and does it match the reference answer
+(`judge_correctness`). Talks to: the real ingestion and retrieval
+pipelines, plus its own OpenAI circuit breaker for the two judge calls.
+If it disappeared, the system would still work exactly the same —
+there'd just be no way to tell, other than manually reading answers,
+whether a change made retrieval or generation better or worse.
+
+```mermaid
+flowchart LR
+    DS[Known test question<br/>+ reference answer] --> RUN[Run through the<br/>real pipeline]
+    RUN --> CHUNKS{Right document<br/>actually retrieved?}
+    RUN --> ANSWER[Generated answer]
+    ANSWER --> FAITH[Judge: faithful to<br/>retrieved context?]
+    ANSWER --> CORRECT[Judge: matches<br/>reference answer?]
+    CHUNKS --> REPORT[Pass/fail report,<br/>all three dimensions]
+    FAITH --> REPORT
+    CORRECT --> REPORT
+```
+
 ## Key decisions we made and why
 
 We run the pipeline synchronously (the user waits while their file is
@@ -380,6 +420,16 @@ similarity search can't. Traversal is deliberately capped at one hop
 and the whole feature is best-effort, same as reranking: unreachable
 Neo4j degrades to "no extra context," never a failed upload or a failed
 query. See ADR-015.
+
+The evaluation harness's test documents live in the *same* database as
+everything else, not a separate one — a fully separate eval database
+(the same pattern the pytest test suite uses) was considered and
+rejected as more isolation than the problem actually needed; a handful
+of dedicated, idempotently-ingested fixture documents gets the same
+reproducibility without a second database to maintain. Faithfulness and
+correctness are judged by two separate LLM calls, not one combined
+call, specifically to avoid one response conflating two different
+judgments. See ADR-016.
 
 ## How data moves through the system
 
@@ -536,6 +586,15 @@ fixed by detaching each search's results from the session immediately
 after fetching them. Found by actually running a test that force-fails
 each search independently, not by reading the code. See ADR-012.
 
+**The evaluation harness's own judgment can be wrong** — a real, known
+limitation of LLM-as-judge generally, not specific to this
+implementation: the judge scoring faithfulness and correctness is
+itself an LLM call, and can be wrong or inconsistent between runs, the
+same way the system it's judging can be. A passing eval score is a
+strong signal, not a mathematical proof. It also only runs when someone
+remembers to run it — nothing wires it into CI yet, so it can't catch a
+regression on its own, only when manually invoked. See ADR-016.
+
 ## Glossary
 
 **Chunk** — a small piece of a larger document's text.
@@ -650,3 +709,22 @@ returned poor search results, so the *retrieval* step gets a better shot
 at finding real content on a second attempt. Distinct from the answer
 the user eventually sees, which is always generated from their
 *original* question, never the rewritten one.
+
+**LLM-as-judge** — using a separate LLM call to score something a
+different part of the system produced (here, whether an answer is
+faithful to its context, and whether it matches a reference answer),
+since open-ended text can't be checked with simple string matching.
+Comes with a real trade-off: the judge can itself be wrong, the same
+way the thing it's judging can be.
+
+**Faithfulness (evaluation)** — whether a generated answer only claims
+things its retrieved context actually supports, checked separately from
+whether the answer is *correct* — an answer can be faithful (grounded
+in the context) while still missing or misstating the actual point of
+the question, or correct while pulling in a detail the context didn't
+literally state.
+
+**Fixture** — a small, deliberately-written piece of test data (here,
+a handful of short documents with known, unambiguous facts) used
+specifically so a test's expected outcome is known in advance, as
+opposed to testing against real, unpredictable production data.

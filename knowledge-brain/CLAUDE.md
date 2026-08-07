@@ -48,6 +48,14 @@ for a company's private knowledge, with answers instead of links.
     from the general infra monitoring above; candidates to evaluate
     include LangSmith, which pairs naturally with LangGraph, and
     Langfuse as an open-source alternative)
+16. Real-time answer guardrails (a moderation/safety check run on
+    every generated answer before it reaches the user — toxic content,
+    policy violations, and a RAG-specific risk: prompt injection
+    smuggled in through *retrieved document text*, not just untrusted
+    user input. Distinct from PII detection, item 7, which scans
+    incoming documents at upload time, not outgoing answers, and from
+    the evaluation harness, item 9, which measures quality offline in
+    batch, not per live response)
 
 ---
 
@@ -533,6 +541,12 @@ walked through, and the 10x-scale question and answer.
   same communication rules as everywhere else in this file.
 - Written as answers meant to be said back naturally in an interview, not
   recited word-for-word.
+- Each feature's section must include a small flowchart of that
+  feature's own flow — not the whole system — placed after the text
+  explanation, so it reinforces what was just said rather than
+  repeating it. Use a Mermaid diagram (fenced code block tagged
+  `mermaid`, same convention as `docs/ARCHITECTURE.md`); a simple
+  boxes-and-arrows text sketch is fine if the feature is trivial.
 - Add a "General concepts" section at the bottom for things worth knowing
   independent of any one feature (e.g. what RAG is, what a
   service/repository split is for).

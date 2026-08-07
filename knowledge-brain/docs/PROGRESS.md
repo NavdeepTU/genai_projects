@@ -689,3 +689,109 @@ the test suite, PII detection, ACL, the evaluation harness, the MCP
 server, API Management, Azure deployment, the frontend, and
 auth/multi-tenancy hardening. At 3–4 hours/day, that's roughly 24–26
 working days left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-07 — New build-order item (guardrails), Feature 7: Evaluation harness
+
+### What we built
+- **Clarified and split a conflated feature request.** "Evaluate the
+  answer for ethics/security/guardrails before showing it to the user"
+  turned out to be two genuinely different things: a real-time safety
+  gate on every live answer (new build-order item 16, deliberately
+  placed last — no real exposure to protect against yet, since nothing
+  is deployed with real external users, but good, distinctive interview
+  material), and the already-planned offline evaluation harness (item
+  9, built this session). Conflating them would have meant building the
+  wrong shape of tool.
+- **Evaluation harness, built and verified live.** New top-level `eval/`
+  directory: `eval/fixtures/` (three small, purpose-written, topically
+  distinct documents), `eval/dataset.json` (six test cases), `eval/judge.py`
+  (two separate LLM-as-judge functions — faithfulness and correctness —
+  own circuit breaker `openai_eval_judge`, both fail closed: default to
+  `False`, not `True`, on a missing key or unparseable response), and
+  `eval/run_eval.py` (the runner). Two small, genuinely reusable
+  additions to existing files: `DocumentRepository.get_document_by_filename`
+  (idempotent fixture lookup) and `RetrievalService.run_query` (returns
+  the full pipeline state, not just the answer — `answer_question` is
+  now a thin wrapper around it).
+- **A real design correction mid-session:** initially misdescribed the
+  fixture-isolation approach as "a separate database," which isn't what
+  got built — it's dedicated fixture *documents* in the *same* database
+  as everything else, idempotently ingested. Caught and corrected before
+  writing the ADR, not after.
+- **Verified live, fully:** all 6 test cases passed on all three
+  dimensions — retrieval, faithfulness, correctness — against the real
+  pipeline, real Postgres, real Neo4j, real OpenAI, and real Voyage.
+  Also hit Voyage's real 3-requests-per-minute free-tier limit running
+  all 6 cases back to back — this time inside a permanent feature, not
+  a throwaway script, so it was actually fixed with a paced 20-second
+  delay between cases (skipped before the first, so a single-case run
+  isn't needlessly slowed).
+- Documented the decision, including the rejected "separate database"
+  framing and the honest LLM-as-judge limitation, in
+  [`ADR-016`](adr/ADR-016-llm-judge-evaluation-harness.md).
+- Also resolved an old, still-open loop from two sessions back: gave a
+  full, correct explanation of `_graph_context_node` and `build_references`,
+  including catching two separate planted errors cleanly (Cypher's `->`
+  really does restrict direction; `next()` correctly skips self-references
+  rather than giving up on the first match) after initially missing or
+  repeating a couple of others (the reranker-fallback score, and whether
+  a failed read-only query still needs a rollback).
+
+### What I struggled with
+- Needed two passes to land why a failed *read-only* query still needs
+  `rollback()` — reused a planted claim from ADR-012 almost verbatim
+  before catching it on the third attempt, once shown the literal code
+  and a "jammed printer" analogy instead of the same explanation
+  repeated.
+- Initially proposed raising `MAX_RETRIES` for 10x traffic — corrected
+  in the same exchange by tracing through the actual amplification.
+  Later, independently and correctly identified a real, separate gap
+  while discussing that same topic: the circuit breaker's own
+  `_record_success()` clears its failure count on *any* success, so it
+  effectively requires *consecutive* failures to trip, not "N failures
+  in a window" as its own docstring claims — a genuine, previously
+  unnoticed correctness bug, tracked in `code-review-followups.md`.
+- Conflated real-time guardrails with the offline evaluation harness at
+  first — resolved cleanly once the distinction (per-request gate vs.
+  batch quality report) was named directly.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  unanswered, now several sessions running.
+- The circuit breaker's consecutive-vs-windowed failure counting gap
+  (see above) — understood *that* it's wrong, not yet whether the fix
+  (track a rolling window of outcomes, not just clear on success) has
+  any subtleties of its own.
+
+### What's next
+- The circuit breaker correctness bug found this session is now tracked
+  in `code-review-followups.md` alongside the other deferred fixes —
+  worth prioritizing before this project ever runs under real
+  concurrent load, since it means the breaker may never trip for a
+  genuinely degraded (not fully down) vendor.
+- Real-time answer guardrails (build-order item 16) is deliberately
+  deferred to the end — tracked, not forgotten.
+- The evaluation harness isn't wired into CI yet — still a fully manual,
+  on-demand tool. Wiring it into GitHub Actions is natural future work,
+  likely alongside build-order item 12 (Azure deployment + CI/CD).
+- PII detection (item 7) is next in the build order if we stick to the
+  plan — deliberately skipped ahead of again this session (eval harness
+  before PII/ACL) for a reasoned, not arbitrary, reason: the retrieval
+  pipeline's growing complexity made systematic quality measurement
+  more urgent than a compliance feature with no live exposure yet.
+- The test suite still hasn't grown since the ingestion tests — hybrid
+  search, ADR-012's fallback, the circuit breaker, the audit log, the
+  LangGraph retry logic, and the graph feature remain untested beyond
+  throwaway verification scripts and the new eval harness (which is a
+  quality measure, not a correctness test suite).
+
+**Estimated completion: ~27% of the total project, by weighted effort**
+— up from ~21% last session. 7 of 15 build-order items are done (plus
+one new item added to the list, 16). Rough remaining effort: ~86 hours
+across the test suite, PII detection, ACL, the MCP server, API
+Management, Azure deployment, the frontend, and auth/multi-tenancy
+hardening — the frontend and Azure deployment remain the two largest
+untouched chunks. At 3–4 hours/day, that's roughly 24–25 working days
+left, assuming no scope changes.
