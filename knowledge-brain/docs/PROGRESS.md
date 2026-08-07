@@ -904,3 +904,47 @@ auth/multi-tenancy (item 14 — only a small slice of it exists so far),
 API Management, Azure deployment, the frontend, and guardrails (item
 16). At 3–4 hours/day, that's roughly 20–27 working days left, assuming
 no scope changes.
+
+---
+
+## Session: 2026-08-07 (continued) — Interview prep document: flowcharts added to earlier features
+
+### What we built
+- No new code and no new build-order item — a documentation-only pass.
+  `INTERVIEW_PREP.md`'s "each feature section needs its own flowchart"
+  rule was added mid-project and only applied going forward, so
+  Features 7 (evaluation harness) and 8 (MCP server) got one but
+  Features 1–6, plus the two unnumbered enterprise-requirement
+  sections (Correlation IDs/Audit Logging/Circuit Breakers, and Hybrid
+  Search Hardening), didn't. Retrofitted all eight of those older
+  sections with a Mermaid flowchart, placed in the same spot as
+  Features 7/8's — right after the one-sentence "what does this do"
+  answer, before the rest of the Q&A. No existing text changed, only
+  diagrams added.
+- Each flowchart is specific to that feature's own flow (e.g. the
+  ingestion one shows extract → chunk → embed-as-one-batch →
+  save-or-fail; the LangGraph one shows the relevance-score branch
+  back to question-rewrite), not a copy of the system-wide diagram
+  already in `ARCHITECTURE.md`.
+
+### What I struggled with
+Not applicable this session — no Step 4 code walkthrough happened, so
+no planted-error question was asked.
+
+### Concepts to revisit
+Unchanged from last session — see above.
+
+### What's next
+Unchanged from last session: PII detection (item 7) and ACL (item 8)
+remain the next build-order items if followed strictly; the MCP test
+suite, the `documents.py` audit-log-ordering gap, and the circuit
+breaker consecutive-failures bug are all still open.
+
+**Estimated completion: ~32% of the total project, by weighted effort**
+— unchanged from last session. This was a documentation-quality pass,
+not a build-order item, so it doesn't move the percentage. 8 of 16
+build-order items are done. Remaining effort is still roughly ~80
+hours across the test suite, PII detection, ACL, real auth/multi-
+tenancy (item 14), API Management, Azure deployment, the frontend, and
+guardrails (item 16). At 3–4 hours/day, that's still roughly 20–27
+working days left, assuming no scope changes.

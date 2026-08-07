@@ -13,6 +13,16 @@ It takes an uploaded file, pulls the text out of it, cuts that text into
 small pieces, turns each piece into a list of numbers representing its
 meaning, and saves everything to the database.
 
+```mermaid
+flowchart LR
+    UP[Upload file] --> EXT[Extract text]
+    EXT --> CHUNK[Split into chunks]
+    CHUNK --> EMB[Embed all chunks<br/>in one batch call]
+    EMB -->|success| SAVE[Save document + chunks<br/>to Postgres/pgvector]
+    SAVE --> READY[Status: ready]
+    EMB -->|failure| FAILED[Status: failed]
+```
+
 **Why did we process the file synchronously (the user waits) instead of
 using a background queue like Kafka?**
 Because it's simpler to build and reason about right now, and our
@@ -88,6 +98,14 @@ It takes a question, turns it into the same kind of meaning-vector as our
 stored chunks, finds the chunks whose meaning is closest to the question,
 and asks an LLM to answer using only those chunks.
 
+```mermaid
+flowchart LR
+    Q[Question] --> QEMB[Embed question]
+    QEMB --> SEARCH[Find closest chunks<br/>by cosine similarity]
+    SEARCH --> LLM[LLM: answer using<br/>only these chunks]
+    LLM --> ANS[Grounded answer,<br/>or "I don't know"]
+```
+
 **Why do we compare vectors instead of just comparing the question's raw
 text against each chunk's raw text?**
 Comparing raw text can only really catch matching keywords. Vectors
@@ -155,6 +173,16 @@ accountability. Circuit breakers stop hammering an external service
 (OpenAI) once it's clearly failing, instead of every request separately
 waiting for a doomed call to time out.
 
+```mermaid
+flowchart LR
+    REQ[Incoming request] --> CID[Middleware stamps a<br/>correlation ID ContextVar]
+    CID --> ROUTE[Route → service → repository]
+    ROUTE --> AUDIT[Insert-only<br/>audit log entry]
+    ROUTE --> CALL{Circuit breaker<br/>open?}
+    CALL -->|yes| SKIP[Fail fast,<br/>no call made]
+    CALL -->|no| OPENAI[Call OpenAI]
+```
+
 **Why did we only build these three "enterprise requirements" now, and
 defer PII detection, access control, and the Azure-specific ones?**
 The project's rules said all 8 were "non-negotiable from the start," but
@@ -218,6 +246,15 @@ It runs a vector (meaning-based) search and a keyword (exact-term) search
 at the same time, then merges the two ranked result lists into one, so
 the system catches both "conceptually similar" matches and "contains
 this exact word/code" matches.
+
+```mermaid
+flowchart LR
+    Q[Query] --> VEC[Vector search<br/>cosine similarity]
+    Q --> KW[Keyword search<br/>Postgres full-text]
+    VEC --> RRF[Reciprocal Rank Fusion<br/>merge by rank, not raw score]
+    KW --> RRF
+    RRF --> TOP[Top merged chunks]
+```
 
 **Why isn't vector search alone good enough?**
 Embedding models represent general meaning, not exact lexical identity —
@@ -290,6 +327,18 @@ If one of hybrid search's two database queries fails, the system now
 answers using whichever one succeeded instead of failing the whole
 request — it only gives up if *both* fail.
 
+```mermaid
+flowchart LR
+    Q[Query] --> VEC[Vector search]
+    Q --> KW[Keyword search]
+    VEC -->|fails| EXP[Rollback + expunge<br/>already-fetched results]
+    KW -->|fails| EXP
+    VEC -->|succeeds| CHECK{Did both fail?}
+    KW -->|succeeds| CHECK
+    CHECK -->|no, one succeeded| RRF[RRF on whichever<br/>results exist]
+    CHECK -->|yes, both failed| ERROR[Request fails]
+```
+
 **Why not just retry the failed search instead?**
 Retrying sounds safer but often isn't. If a query failed because the
 database is genuinely under load, retrying immediately adds more load to
@@ -350,6 +399,15 @@ It takes hybrid search's candidate chunks — now a wider pool of 20,
 instead of the final 5 — and uses a model that looks at the question and
 each chunk *together* to pick the 5 that actually answer it best, instead
 of trusting vector/keyword search's own ranking as final.
+
+```mermaid
+flowchart LR
+    HYBRID[Hybrid search:<br/>20 candidate chunks] --> BREAKER{Voyage circuit<br/>breaker open?}
+    BREAKER -->|no| SCORE[Cross-encoder scores<br/>question + chunk together]
+    SCORE --> TOP5[Top 5 chunks<br/>reranked]
+    BREAKER -->|yes| FALLBACK[Fall back to hybrid<br/>search's own RRF order]
+    FALLBACK --> TOP5
+```
 
 **Why isn't hybrid search's own ranking good enough on its own?**
 Vector and keyword search both score the question and a chunk
@@ -424,6 +482,15 @@ manage and its own circuit breaker to reason about independently.
 It turns the query pipeline from a fixed sequence of steps into a graph
 that can notice its own retrieval results are weak, rewrite the
 question, and search again once before generating an answer.
+
+```mermaid
+flowchart LR
+    Q[Original question] --> RET[Retrieve + rerank]
+    RET --> CHECK{Best rerank score < 0.4<br/>AND first attempt?}
+    CHECK -->|yes| REWRITE[LLM rewrites<br/>the question]
+    REWRITE --> RET
+    CHECK -->|no| GEN[Generate answer from the<br/>ORIGINAL question]
+```
 
 **The query pipeline was already five steps in a row before this — what
 does LangGraph actually add over what we had?**
@@ -507,6 +574,15 @@ mentions (an error code, a ticket ID), checks whether any other stored
 document actually contains that thing, and if so records the link in
 Neo4j — so a later query can pull in context from a document it never
 directly searched, only connected to.
+
+```mermaid
+flowchart LR
+    DOC[New document] --> LLM[LLM extracts named<br/>mentions, e.g. error code]
+    LLM --> KW[Existing keyword search:<br/>does another document<br/>contain it?]
+    KW -->|match found| EDGE[MERGE a REFERENCES<br/>edge in Neo4j]
+    KW -->|no match| SKIP[No edge written]
+    QUERY[Later query] -.->|one hop| EDGE
+```
 
 **Why does this need a graph database at all — what can't vector or
 keyword search already do here?**
