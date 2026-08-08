@@ -4,6 +4,7 @@ from app.repositories.document_repository import DocumentRepository
 from app.services.chunking import chunk_text
 from app.services.embedding import embed_chunks
 from app.services.extraction import extract_text
+from app.services.pii_detection import detect_pii
 
 settings = get_settings()
 
@@ -25,6 +26,11 @@ class IngestionService:
 
         try:
             text = extract_text(filename, content)
+
+            if await detect_pii(text):
+                await self.repository.flag_for_review(document.id)
+                return document
+
             chunk_texts = chunk_text(text, settings.chunk_size, settings.chunk_overlap)
             embeddings = await embed_chunks(chunk_texts)
 
@@ -34,8 +40,8 @@ class IngestionService:
             ]
             await self.repository.save_chunks(chunks)
             await self.repository.update_status(document.id, DocumentStatus.READY)
-        except Exception:
-            await self.repository.update_status(document.id, DocumentStatus.FAILED)
+        except Exception as exc:
+            await self.repository.mark_failed(document.id, reason=f"{type(exc).__name__}: {exc}")
             raise
 
         return document

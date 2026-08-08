@@ -55,6 +55,44 @@ class DocumentRepository:
             logger.exception("Failed to update status for document %s", document_id)
             raise
 
+    async def flag_for_review(self, document_id: uuid.UUID) -> None:
+        """Stop a document short of embedding: hold it for human review of PII found.
+
+        Sets both the status and the permanent pii_detected flag in one
+        update, since reaching this state always means both happened
+        together — unlike update_status, which only ever changes status.
+        """
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.status = DocumentStatus.PENDING_REVIEW
+        document.pii_detected = True
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to flag document %s for review", document_id)
+            raise
+
+    async def mark_failed(self, document_id: uuid.UUID, reason: str) -> None:
+        """Mark a document failed, recording why.
+
+        An extraction bug and an Azure outage should be distinguishable
+        later by reading the row, not both just collapse into "failed"
+        with no way to tell them apart.
+        """
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.status = DocumentStatus.FAILED
+        document.failure_reason = reason
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to mark document %s failed", document_id)
+            raise
+
     async def find_similar_chunks(self, query_embedding: list[float], limit: int = 5) -> list[Chunk]:
         """Return the chunks whose embeddings are closest to a query vector.
 

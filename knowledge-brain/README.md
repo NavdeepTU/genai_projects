@@ -50,13 +50,26 @@ and why it was made that way.
   shared API key. Reuses every service, circuit breaker, and the audit
   log the REST routes already use — see
   [`ADR-017`](docs/adr/ADR-017-mcp-server.md).
+- **PII detection** — before any document is chunked or embedded, its
+  text is checked by Azure AI Language against an explicit 14-category
+  allowlist (names, contact info, financial data, US and India
+  government IDs). Any match holds the document for human review
+  instead of embedding it — `pending_review`, never made searchable.
+  Runs inside the shared ingestion service, so it protects the REST
+  upload endpoint and the MCP tool automatically. Fails closed, not
+  open, if Azure itself is unavailable — see
+  [`ADR-018`](docs/adr/ADR-018-pii-detection.md).
 
-**Not built yet:** PII detection, document access control, an API
-gateway, Azure deployment, the frontend, and full auth/multi-tenancy.
-See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** document access control, an API gateway, Azure
+deployment, the frontend, and full auth/multi-tenancy. See
+`CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- No automated test suite yet (`tests/` is empty).
+- The automated test suite (`tests/`) covers ingestion end-to-end,
+  chunking, extraction, and PII detection's "flag and stop" branch —
+  it does not yet cover hybrid search, the circuit breaker, the audit
+  log, LangGraph's retry logic, the Neo4j graph feature, MCP, or PII
+  detection's own splitting/batching logic.
 - The audit log's "nobody can edit or delete an entry" guarantee is
   enforced at the code level only — the local database connection is a
   superuser and could bypass a real database-level restriction. See
@@ -102,6 +115,10 @@ reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
 - **MCP (Model Context Protocol)** — the official Python SDK, mounted
   onto this same app so other AI clients can call the pipeline directly
   (see [`ADR-017`](docs/adr/ADR-017-mcp-server.md))
+- **Azure AI Language** — PII detection at ingestion time, scoped to an
+  explicit category allowlist rather than its full default set (see
+  [`ADR-018`](docs/adr/ADR-018-pii-detection.md)) — this project's
+  first real Azure dependency
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
@@ -129,7 +146,12 @@ not upfront.
    The `NEO4J_*` values already match `docker-compose.yml`'s defaults,
    so they work as-is for local development. Set `MCP_API_KEY` to any
    value of your choice — it's the shared secret MCP clients must send
-   back to use the `/mcp` endpoint.
+   back to use the `/mcp` endpoint. `AZURE_LANGUAGE_ENDPOINT` and
+   `AZURE_LANGUAGE_KEY` need a real Azure AI Language resource (the
+   free `F0` tier is enough) — create one in the
+   [Azure Portal](https://portal.azure.com), search "Language service,"
+   and copy its endpoint and key from the resource's "Keys and
+   Endpoint" page.
 4. **Install dependencies:**
    ```
    uv sync

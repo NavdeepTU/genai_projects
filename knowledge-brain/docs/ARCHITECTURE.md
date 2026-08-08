@@ -33,7 +33,10 @@ flowchart TD
 
     subgraph ingest["Getting a document in"]
         UP --> EXTRACT[Extract text<br/>PDF / .txt]
-        EXTRACT --> CHUNK[Chunk text]
+        EXTRACT --> PIICHECK{"PII check<br/>(Azure AI Language, via circuit breaker)"}
+        PIICHECK -->|PII found| FLAG["Status: pending_review<br/>pii_detected = true — stop, never embedded"]
+        PIICHECK -->|Azure unavailable| FAILCLOSED["Status: failed<br/>(fail closed — not embedded unchecked)"]
+        PIICHECK -->|clean| CHUNK[Chunk text]
         CHUNK --> EMBED["Embed chunks<br/>(OpenAI, via circuit breaker)"]
         EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
         SAVE --> BUILDREFS["Extract references & write to Neo4j<br/>(best-effort, via circuit breaker)"]
@@ -65,19 +68,29 @@ flowchart TD
     AUDIT2 --> RESP2[Response +<br/>correlation ID]
 ```
 
-**Getting a document in:** a user uploads a file → the API receives it →
-the file's raw text is pulled out → that text is cut into small
-overlapping pieces → each piece is turned into a list of numbers that
-represents its meaning → those pieces and their numbers are saved in the
-database. If anything goes wrong along the way, the document is marked as
-failed rather than left in limbo. If it succeeds, one more thing happens
-before the response goes out: an LLM reads the document's text looking
-for specific, named things it mentions (an error code, a ticket number),
-and for each one, checks whether any *other* already-stored document
-actually contains it — if so, that connection gets written to Neo4j as
-an explicit link between the two documents. This step is best-effort:
-if it fails, the upload still succeeds, it just won't have graph links
-yet.
+**Getting a document in:** a user uploads a file — through the REST
+endpoint or through MCP, both funnel into the exact same pipeline —
+the file's raw text is pulled out, and before anything else happens,
+that text is checked for personal information (names, phone numbers,
+government IDs, that kind of thing) by Azure AI Language. If it finds
+any, the document stops right there: it's marked `pending_review` with
+`pii_detected = true`, and nothing about it is ever chunked or
+embedded — its raw text never reaches the vector index. If Azure
+itself is unavailable, the document fails closed the same way any
+other ingestion failure does, rather than skipping the check and
+embedding something unverified. Only once a document is confirmed
+clean does the rest of the pipeline run: that text is cut into small
+overlapping pieces, each piece is turned into a list of numbers that
+represents its meaning, and those pieces and their numbers are saved
+in the database. If anything else goes wrong along the way, the
+document is marked failed, with a recorded reason, rather than left in
+limbo. If it succeeds, one more thing happens before the response goes
+out: an LLM reads the document's text looking for specific, named
+things it mentions (an error code, a ticket number), and for each one,
+checks whether any *other* already-stored document actually contains
+it — if so, that connection gets written to Neo4j as an explicit link
+between the two documents. This step is best-effort: if it fails, the
+upload still succeeds, it just won't have graph links yet.
 
 **Asking a question:** a user sends a question → it's turned into a
 meaning-vector, and two independent searches run one after another: a
@@ -110,8 +123,24 @@ actually asked), are handed to an LLM, which answers using only that
 retrieved text, and says it doesn't know rather than guessing if the
 answer isn't there.
 
-**What's new since the last update:** an MCP server (build-order step
-10), a second front door into the exact same pipeline. MCP (Model
+**What's new since the last update:** PII (personal information)
+detection (build-order step 7), the first check that can stop a
+document from being ingested at all rather than just degrade quality.
+It runs inside `IngestionService` itself, not either API route, so it
+protects both the REST upload endpoint and MCP's `upload_document`
+automatically — neither file needed to change. Detection is scoped to
+an explicit, hand-picked list of 14 categories (names, contact info,
+financial data, US and India government IDs), not Azure's full
+173-category default set — live testing caught a real false-positive
+source first: Azure's `PersonType` category flagged ordinary words
+like "employee" as PII, which would have made nearly every real
+document trigger a review. Long documents get split on paragraph
+breaks and sent in batches, to stay under Azure's real 5,120-character
+synchronous request limit without cutting through the middle of a name
+the way a hard character cut could. See ADR-018.
+
+An MCP server (build-order step 10) was added before that, a second
+front door into the exact same pipeline. MCP (Model
 Context Protocol) is a standard way for an AI client — Claude Desktop,
 another agent — to discover and call a tool directly, instead of only
 being reachable through this project's own `/query` and `/documents`
@@ -177,13 +206,39 @@ service. If it disappeared, there'd be no way to get a file into the system
 at all.
 
 **Ingestion service (`app/services/ingestion_service.py`)** — the
-conductor. Knows the *order* the pipeline steps must run in (extract, then
-chunk, then embed, then save), and marks the document ready or failed at
-the end. Talks to: extraction, chunking, embedding, and the repository. If
-it disappeared, each individual step would still work, but nothing would
-tie them together. Deliberately does *not* know about the relationship
-graph below — building references is a separate concern, run
-afterward, not folded into this service's own responsibility.
+conductor. Knows the *order* the pipeline steps must run in (extract,
+check for PII, then chunk, then embed, then save), and marks the
+document ready, pending review, or failed at the end. Talks to:
+extraction, PII detection, chunking, embedding, and the repository. If
+it disappeared, each individual step would still work, but nothing
+would tie them together. Deliberately does *not* know about the
+relationship graph below — building references is a separate concern,
+run afterward, not folded into this service's own responsibility. This
+is also the one place both the REST upload route and MCP's
+`upload_document` tool both call — anything added here, like the PII
+check below, protects both automatically.
+
+**PII detection (`app/services/pii_detection.py`)** — a single
+function, `detect_pii`, that sends a document's text to Azure AI
+Language and returns which of an explicit 14-category allowlist it
+found, if any (not Azure's full default set — see below). Splits text
+longer than Azure's per-request character limit on paragraph breaks,
+not a hard cut, and batches pieces up to Azure's 5-document cap per
+request. Wrapped in its own circuit breaker (`azure_pii_detection`),
+independent from every other one in this project. Talks to: Azure AI
+Language. If it disappeared, ingestion would still run — but nothing
+would stop a document containing personal information from being
+embedded and made searchable.
+
+```mermaid
+flowchart LR
+    TEXT[Document text] --> SPLIT["Split into pieces<br/>(under 5,120 chars, on paragraph breaks)"]
+    SPLIT --> BATCH["Send in batches of 5<br/>(Azure's own cap)"]
+    BATCH --> AZURE["Azure AI Language<br/>(14-category allowlist only)"]
+    AZURE --> FOUND{Any category found?}
+    FOUND -->|yes| REVIEW["pending_review<br/>pii_detected = true, stop"]
+    FOUND -->|no| CONTINUE[Continue to chunking]
+```
 
 **Document graph service (`app/services/document_graph_service.py`)**
 — runs once per document, right after ingestion succeeds. Reads what
@@ -469,6 +524,24 @@ correctness are judged by two separate LLM calls, not one combined
 call, specifically to avoid one response conflating two different
 judgments. See ADR-016.
 
+PII detection runs inside `IngestionService`, not either API route,
+specifically so it protects both `/documents/upload` and MCP's
+`upload_document` without either file changing — the same reasoning
+that let MCP itself reuse the service layer unchanged. It fails
+closed, not open like reranking or Neo4j, when Azure's service is
+unavailable — a deliberate departure from this project's usual
+best-effort pattern, because this is a compliance gate, not a
+quality-of-answer feature: an unverified document must not be
+embedded, even at the cost of blocking uploads system-wide during an
+Azure outage. That trade-off was raised again, deliberately, after the
+feature shipped — a real availability concern worth reconsidering once
+this handles genuine production traffic, tracked rather than resolved.
+Detection is scoped to an explicit 14-category allowlist rather than
+Azure's full default set, after live testing — not code review — found
+Azure's `PersonType` category flagging ordinary words like "employee"
+as PII, which would have made nearly every real document trigger
+review. See ADR-018.
+
 The MCP server is mounted onto the existing FastAPI app rather than
 run as its own standalone process, specifically to reuse the circuit
 breakers, audit logging, and correlation ID middleware already built —
@@ -489,19 +562,29 @@ ADR-017.
 
 ## How data moves through the system
 
-**Uploading a document:** a user sends a file to the upload address. The
-system checks the file type is supported, creates a database record for
-the document immediately (marked "pending"), then extracts its text,
-splits that text into chunks, turns each chunk into a meaning-vector, and
-saves everything to the database. If every step succeeds, the document is
-marked "ready." If any step fails, the document is marked "failed" instead
-of being left stuck partway through. If it succeeds, one more thing
-happens: an LLM reads the document's own text for specific things it
-names — an error code, a ticket ID — and for each one, the existing
-keyword search checks whether any other stored document actually
-contains it. Real matches get written to Neo4j as an explicit link. This
-step can't fail the upload; if Neo4j or the extraction call is
-unavailable, the document is still "ready," it just has no graph links.
+**Uploading a document:** a user sends a file to the upload address —
+either the REST endpoint or MCP's `upload_document`, both reach the
+same code from here on. The system checks the file type is supported,
+creates a database record for the document immediately (marked
+"pending"), then extracts its text. Before anything else, that text is
+checked for personal information by Azure AI Language, scoped to a
+specific 14-category allowlist. If any is found, the document stops
+here: marked "pending review," `pii_detected` set permanently to true,
+and nothing further happens to it — no chunking, no embedding. If
+Azure itself can't be reached, the document fails closed the same way
+any other failure does, with the reason recorded, rather than skipping
+the check. Only a document confirmed clean continues: its text is
+split into chunks, each chunk becomes a meaning-vector, and everything
+is saved to the database. If every step succeeds, the document is
+marked "ready." If any step fails, the document is marked "failed"
+instead of being left stuck partway through. If it succeeds, one more
+thing happens: an LLM reads the document's own text for specific
+things it names — an error code, a ticket ID — and for each one, the
+existing keyword search checks whether any other stored document
+actually contains it. Real matches get written to Neo4j as an explicit
+link. This step can't fail the upload; if Neo4j or the extraction call
+is unavailable, the document is still "ready," it just has no graph
+links.
 
 **Asking a question:** a user sends a question to the query address. The
 question is turned into a meaning-vector using the same embedding model
@@ -662,6 +745,33 @@ same way the system it's judging can be. A passing eval score is a
 strong signal, not a mathematical proof. It also only runs when someone
 remembers to run it — nothing wires it into CI yet, so it can't catch a
 regression on its own, only when manually invoked. See ADR-016.
+
+**Azure AI Language itself goes down during PII detection** — after 3
+failures in 60 seconds, its own independent circuit breaker opens,
+same mechanism as every other external dependency. Unlike reranking or
+Neo4j, this *does* fail the request — deliberately, fail-closed, since
+an unverified document must not be embedded. The real cost: one
+vendor's outage now blocks every upload, system-wide, on both the REST
+and MCP paths — a genuine, larger blast radius than any other single
+dependency failure in this system today, accepted for a compliance
+gate but flagged, after the feature shipped, as worth reconsidering
+once this handles real production traffic rather than test uploads.
+See ADR-018.
+
+**A flagged document has nowhere to actually be reviewed** — `pending_review`
+and `pii_detected` exist correctly in the database, but there's no
+admin UI yet for a human to look at a flagged document and release or
+delete it. At any meaningful upload volume, this becomes a second,
+separate risk from the fail-closed one above: a growing backlog of
+documents nobody has looked at, with no alerting on queue size either.
+Frontend work, a future build-order item, not built here.
+
+**The PII allowlist only recognizes US and India identity formats** —
+a document containing, say, a French social security number or a UK
+national insurance number sails through undetected today. Not a bug —
+a deliberate scope decision, made explicit in ADR-018 rather than left
+implicit — but a real limit on how broadly this system could honestly
+claim compliance coverage without revisiting it.
 
 **The MCP server's shared secret leaks** — anyone holding it can call
 either tool, indistinguishable in the audit log from a legitimate
@@ -836,3 +946,29 @@ know, checked on every request as a simple "are you allowed to be
 here" gate. Weaker than per-caller credentials (anyone holding it is
 indistinguishable from anyone else who has it) but simpler, and
 proportionate when there's only one real caller type to gate.
+
+**PII (Personally Identifiable Information)** — information that could
+identify a specific individual — a name, phone number, email, or
+government ID number — distinct from confidential-but-not-personal
+data like a company's internal figures, and distinct from credentials
+(passwords, API keys), which are a different risk category this
+project has explicitly deferred.
+
+**Allowlist vs. blocklist** — an allowlist only permits what's
+explicitly named, rejecting everything else by default; a blocklist
+only rejects what's explicitly named, permitting everything else by
+default. This project's PII check uses an allowlist of 14 categories,
+chosen after a blocklist-style approach (Azure's full default set)
+proved too broad — an allowlist is also the only way to exclude
+`PersonType`, a category not even listed among Azure's own filterable
+options.
+
+**Fail closed vs. fail open** — what a system does when it can't
+complete a safety or quality check at all, not when the check runs and
+finds a problem. Fail closed blocks the action until the check
+succeeds (used here for PII detection, since an unembedded document is
+safer than an unverified one); fail open lets the action proceed
+anyway (used for reranking and Neo4j, where a missing enhancement
+still leaves a working answer). The same system can reasonably choose
+differently for different checks, depending on what's actually at risk
+if the check is silently skipped.

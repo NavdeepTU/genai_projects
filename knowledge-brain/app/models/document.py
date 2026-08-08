@@ -24,6 +24,7 @@ class DocumentStatus(str, Enum):
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
+    PENDING_REVIEW = "pending_review"
 
 
 class Document(Base):
@@ -39,6 +40,8 @@ class Document(Base):
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+    pii_detected: Mapped[bool] = mapped_column(default=False)
+    failure_reason: Mapped[str | None] = mapped_column(Text, default=None)
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"

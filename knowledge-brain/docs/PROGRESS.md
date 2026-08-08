@@ -948,3 +948,125 @@ hours across the test suite, PII detection, ACL, real auth/multi-
 tenancy (item 14), API Management, Azure deployment, the frontend, and
 guardrails (item 16). At 3–4 hours/day, that's still roughly 20–27
 working days left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-08 — Feature 9: PII detection
+
+### What we built
+- **PII detection, build-order item 7**, motivated by a concrete
+  reason rather than just "it's next": last session's MCP server made
+  `upload_document` a real, network-reachable way for someone else's
+  data to enter the system, turning this from a theoretical compliance
+  concern into an actual exposure. Runs inside `IngestionService`, not
+  either API route, so it protects `/documents/upload` and MCP's
+  `upload_document` automatically — verified live through both paths,
+  including a document containing an Indian PAN number uploaded
+  specifically through MCP.
+- **New Azure dependency, the first real one this project has needed** —
+  `app/services/pii_detection.py`, calling Azure AI Language via its
+  own dedicated circuit breaker (`azure_pii_detection`), independent
+  from every other one in this project.
+- **Two real things found only by live testing, not code review:**
+  (1) Azure's `PersonType` category flagged ordinary words like
+  "employee" as PII at 98% confidence — not even in Azure's own list
+  of categories that can be explicitly excluded by name. Fixed with an
+  explicit 14-category allowlist (names, contact info, financial data,
+  US and India government IDs) instead of Azure's full 173-category
+  default set. (2) Azure's real synchronous-request limit — 5,120
+  characters per document, 5 documents per request — verified against
+  Microsoft's own docs rather than assumed, and handled by splitting
+  long text on paragraph breaks (not a hard character cut) and
+  batching pieces.
+- **Schema changes, with two genuine gotchas caught before they broke
+  anything:** new `DocumentStatus.PENDING_REVIEW`, and `pii_detected`/
+  `failure_reason` columns on `Document`. Checking the live database
+  directly (not assuming) showed SQLAlchemy's native Postgres enum
+  stores the Python enum's *member names* (`PENDING`, `READY`), not
+  its lowercase `.value` strings — the `ALTER TYPE` command needed
+  `'PENDING_REVIEW'`, not `'pending_review'`. Separately, SQLAlchemy's
+  `default=` is Python-side only; the `pii_detected` column's
+  `ALTER TABLE` needed its own SQL-level `DEFAULT false` to apply to
+  rows that already existed, not just future ones — caught as a
+  planted-error explain-back the user missed on the first pass, then
+  correctly explained back once shown the "restaurant that never opens
+  its doors" framing.
+- **A mid-build scope addition, requested directly, not planned:**
+  `failure_reason`, recording *why* a document failed (an extraction
+  bug vs. an Azure outage previously both collapsed into the same
+  generic `failed` status with no way to tell them apart) — the user
+  asked for this the moment the ambiguity became visible during a
+  planted-error explain-back, and it was built immediately, not
+  deferred.
+- **Fail closed, not fail open, on an Azure outage** — a deliberate
+  departure from this project's usual best-effort pattern (reranking,
+  Neo4j), since this is a compliance gate: an unverified document must
+  not be embedded. Notably, this decision needed no new code — `CircuitOpenError`
+  already flows into the existing generic failure-handling path once
+  the check was placed inside the same `try` block as everything else.
+- **Real test coverage added, and a real gap found while adding it:**
+  the two existing ingestion tests didn't mock the new `detect_pii`
+  call at all, meaning they'd been silently hitting the real Azure API
+  on every run since it was wired in. Fixed alongside adding a new
+  test for the PII-found branch, which asserts `embed_chunks` was
+  never called — not just that zero chunks got saved — since calling
+  it at all would mean PII-containing text already left the system for
+  a third-party vendor, regardless of what happened to the result
+  afterward.
+- Documented in [`ADR-018`](adr/ADR-018-pii-detection.md).
+
+### What I struggled with
+- Missed two planted-error explain-backs this session: the
+  `default=`-doesn't-retroactively-apply-to-existing-rows claim (caught
+  on request for a simplified yes/no version), and a claim about
+  `documentstatus` naming (this one was caught correctly). Correctly
+  caught, without missing, the `except CircuitOpenError` specificity
+  question and the "circuit breaker records 3 failures for 3 unattempted
+  batches" claim.
+- Tried to skip an explain-back question outright once ("I would skip
+  this question") — correctly declined per this project's own rule,
+  resolved once simplified to a plain yes/no.
+- After the feature was fully built and verified, raised a genuine,
+  unprompted reconsideration of the fail-closed decision — not a
+  misunderstanding to correct, a real architectural pushback (one
+  vendor outage blocking all uploads is a real availability cost). Not
+  changed now; tracked to revisit once real traffic exists, alongside
+  a related but distinct gap surfaced in the same discussion: no admin
+  UI or alerting yet for a growing `PENDING_REVIEW` backlog.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  unanswered, many sessions running now.
+- Whether the fail-closed decision should change once this handles
+  real traffic — an open reconsideration, not a settled question,
+  tracked in memory (`deferred-design-decisions.md`).
+
+### What's next
+- ACL (build-order item 8) is next if the build order is followed
+  strictly — PII detection was this session's item 7.
+- The PII allowlist only covers US and India identity formats today —
+  a deliberate, named scope limit, not comprehensive coverage.
+- No automated tests yet for `_split_into_documents`'s paragraph
+  splitting logic, the category-filtering behavior itself, or the
+  fail-closed circuit-breaker-open path — only the "PII found, stop
+  before embedding" branch got a test this session, by explicit
+  request ("build one or two test cases... leave rest for future").
+- Still open, unchanged from before: the `documents.py`
+  audit-log-ordering gap, the circuit breaker consecutive-failures
+  bug, and MCP-specific automated tests.
+- `test-suite-progress.md` (memory) was found stale this session —
+  it described `conftest.py` and `test_ingestion_service.py` as "not
+  yet built," when both had actually been completed in an earlier
+  session. Corrected by checking the real file state directly rather
+  than trusting the memory.
+
+**Estimated completion: ~40% of the total project, by weighted effort**
+— up from ~32% last session. 9 of 16 build-order items are done. The
+jump reflects a genuinely substantial feature — a new external
+dependency, real schema changes, two live-testing-driven pivots, and
+test coverage — not just a checklist item. Rough remaining effort:
+~70 hours across the test suite, ACL, real auth/multi-tenancy (item
+14), API Management, Azure deployment, the frontend, and guardrails
+(item 16) — the frontend and Azure deployment remain the two largest
+untouched chunks. At 3–4 hours/day, that's roughly 18–24 working days
+left, assuming no scope changes.

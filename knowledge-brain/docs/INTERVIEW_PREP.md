@@ -839,6 +839,81 @@ sizing work before either the REST routes or MCP could handle it.
 
 ---
 
+## Feature 9: PII Detection
+
+**What does this feature do, in one sentence?**
+Before any uploaded document gets chunked or embedded, its text is
+checked by Azure AI Language for personal information — if any is
+found, the document is held for human review instead of being made
+searchable.
+
+```mermaid
+flowchart LR
+    UP[Upload: REST or MCP] --> EXTRACT[Extract text]
+    EXTRACT --> SPLIT["Split under Azure's<br/>character limit"]
+    SPLIT --> AZURE["Azure AI Language<br/>(14-category allowlist)"]
+    AZURE --> FOUND{PII found?}
+    FOUND -->|yes| REVIEW[pending_review, stop —<br/>never chunked or embedded]
+    FOUND -->|no| CHUNK[Continue: chunk, embed, save]
+```
+
+**Why does this check live inside `IngestionService` instead of the
+API routes?**
+Both the REST upload endpoint and MCP's `upload_document` tool already
+call the same `IngestionService.ingest_document` — that's the exact
+reason MCP needed zero changes to reuse it last feature. Putting the
+PII check there protects both entry points automatically; putting it
+in either route separately would mean two places to keep in sync, and
+the other one left unprotected if anyone forgot.
+
+**Walk me through what happens if Azure's PII service itself is down.**
+It fails closed, not open. Every other external dependency in this
+project that can fail gracefully (reranking, Neo4j) does — a missing
+enhancement still leaves a working answer. PII detection is different:
+it's a compliance gate, and an unverified document must not be
+embedded, so an Azure outage marks the document failed instead of
+letting it through unchecked. That's a real trade-off, not a free
+win — it means one vendor being down now blocks *every* upload,
+system-wide, on both entry points, a bigger blast radius than any
+other single dependency failure in this system today.
+
+**Why 14 hand-picked categories instead of just using Azure's default
+detection?**
+Live testing — not code review — caught the reason: Azure's
+`PersonType` category flagged the word "employee" in a completely
+unremarkable document at 98% confidence. It identifies a *role* being
+mentioned, not a specific person's information, and almost every real
+business document mentions roles somewhere — using Azure's full
+default set would have made nearly everything trigger review.
+`PersonType` isn't even in Azure's own list of categories that can be
+explicitly excluded by name, so an allowlist (only request specific
+categories) was the only way to leave it out — anything not asked for,
+including `PersonType`, simply never comes back.
+
+**How does a long document avoid hitting Azure's character limit?**
+Azure's synchronous PII endpoint caps each document at 5,120
+characters and 5 documents per request — verified against Microsoft's
+own docs, not assumed. Long text gets split on paragraph breaks, not a
+hard character cut, greedily filling each piece up to just under the
+limit; a single paragraph longer than the limit on its own falls back
+to a hard cut, but only for that one paragraph. Splitting on
+paragraphs instead of an arbitrary character count is deliberate — the
+whole reason PII detection sends a document as one big piece instead
+of tiny retrieval-sized chunks in the first place is to avoid severing
+a name or address across a boundary, and paragraph-aware splitting
+keeps most of that benefit even when a document is too long to send as
+a single request.
+
+**What's the honest scope limit of this feature?**
+It only recognizes identity formats for two countries — US and India.
+A French social security number or a UK national insurance number
+would sail through completely undetected today. That's not a bug, it
+was a deliberate scope decision, but it's a real limit worth being
+upfront about, not something to imply is broader than it actually is.
+*Further reading: [Azure AI Language's official data and rate limits documentation](https://learn.microsoft.com/en-us/azure/ai-services/language-service/concepts/data-limits), which specifies the exact per-document and per-request limits this feature's splitting logic is built around.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**
@@ -874,3 +949,14 @@ reason: `correlation_id_middleware` uses FastAPI's higher-level
 (`scope`/`receive`/`send`) because the higher-level style turned out
 to break the MCP server's streaming responses — a good example of
 "the simpler abstraction isn't always the correct one."
+
+**Fail closed vs. fail open — how do you decide which one a given
+check should use?**
+Ask what happens if the check is silently skipped. If skipping it just
+means a slightly worse answer — reranking down, Neo4j down — fail
+open: let the request through, degrade gracefully. If skipping it
+means something genuinely unsafe or non-compliant happens — PII
+detection down — fail closed: block the action rather than proceed
+unverified. It's not a project-wide rule, it's a per-check judgment
+call based on what's actually at risk, which is why this same project
+uses both: fail open for quality, fail closed for compliance.

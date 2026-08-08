@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # MCP server
     mcp_api_key: str
 
+    # PII detection
+    azure_language_endpoint: str
+    azure_language_key: str
+    pii_max_chars_per_document: int = 5000
+
 
 @lru_cache
 def get_settings() -> Settings:
