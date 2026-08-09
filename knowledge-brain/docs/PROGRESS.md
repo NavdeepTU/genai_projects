@@ -1199,3 +1199,73 @@ frontend, guardrails (item 16), and multi-agent federated retrieval
 untouched chunks, and item 17 is a genuinely large addition to the
 remaining pool, not a small one. At 3–4 hours/day, that's roughly
 20–26 working days left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-09 (continued) — INTERVIEW_PREP.md accuracy pass
+
+### What we built
+No new code, no new build-order item — a documentation-accuracy pass on
+`INTERVIEW_PREP.md`, prompted directly: after last session's ACL work,
+Features 1–6's diagrams and some of their Q&A still described the
+system as it worked *before* later features changed it, not as it
+actually works now.
+- Fixed a broken Mermaid render on GitHub first — nested double quotes
+  inside an otherwise-unquoted node label in Feature 2's diagram broke
+  GitHub's parser; a label containing special characters needs the
+  whole thing quoted, not just part of it. Checked every other diagram
+  in both docs for the same pattern before moving on — none had it.
+- Initially added a "Putting it all together" synthesis section
+  summarizing both full pipelines end to end — reconsidered on
+  request, since that duplicates `ARCHITECTURE.md`'s actual job
+  (a current, combined view of the system) rather than serving
+  `INTERVIEW_PREP.md`'s own purpose (one section per decision).
+  Removed, and the real problem solved differently: fixed the stale
+  sections themselves instead of summarizing around them.
+- Audited every feature section's diagram and claims against the
+  actual current code rather than assuming, and corrected six real
+  problems: Feature 1 and 2's diagrams didn't show the PII check,
+  permission filtering, hybrid search, reranking, the retry loop, or
+  graph context at all; Feature 3's diagram didn't show the permission
+  join or that its output now feeds reranking, not the final answer;
+  Feature 4's diagram didn't note its input pool is already
+  permission-filtered; Feature 5's diagram was missing the
+  graph-context node Feature 6 inserted into the same LangGraph graph
+  *after* Feature 5's diagram was drawn; and Feature 6 contained an
+  outright factual error — it claimed reference-resolution reuses
+  hybrid search's `find_by_keyword` with "no new search mechanism
+  needed," which stopped being true the moment Feature 10 made that
+  function permission-filtered and a separate
+  `find_by_keyword_unrestricted` had to be built. Also softened a
+  now-misleading line in the enterprise-requirements section claiming
+  access control "is meaningless with no auth model" — true when
+  originally written, no longer true after Feature 10.
+- This is now a named, explicit rule in `CLAUDE.md`, not just a
+  one-off cleanup: "Stay in sync, not just additive" — when a new
+  feature changes how an earlier one behaves, its existing section
+  gets corrected in place, not just left next to a newer section that
+  quietly contradicts it.
+
+### What I struggled with
+Not applicable this session in the usual sense — no Step 4 code
+walkthrough happened, so no planted-error question was asked. The real
+challenge was scope discipline: distinguishing what was actually
+*wrong* (a diagram or claim describing behavior that's since changed)
+from what was merely *incomplete* (a still-accurate fact about one
+piece, just not mentioning newer siblings) — only the former needed
+fixing; rewriting the latter would have diluted material that was
+already correct.
+
+### Concepts to revisit
+Unchanged from last session — see above.
+
+### What's next
+Unchanged from last session's "what's next" — API gateway (item 9) if
+the build order is followed strictly; no automated tests yet for ACL,
+MCP, or PII detection's internals; the self-asserted identity and
+unbounded re-sharing rule remain named, accepted limitations.
+
+**Estimated completion: unchanged, ~43%.** A documentation-accuracy
+pass doesn't move a build-order percentage — nothing here was a new
+feature, and the fixes make existing material correct, not more
+complete.

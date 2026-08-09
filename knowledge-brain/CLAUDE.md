@@ -456,6 +456,18 @@ these companies specifically probe for:
   to this hardest of all, since it doubles as material I rehearse from —
   a grammar slip there is one I might repeat out loud in a real
   interview.
+- **Stay in sync, not just additive** — when a new feature directly
+  changes how an earlier feature behaves, update that earlier feature's
+  existing section in ARCHITECTURE.md and its existing Q&A in
+  INTERVIEW_PREP.md in place, so they describe the system as it actually
+  works now. A new feature gets its own new section in addition to
+  that — it never stands in for fixing the old one. An answer describing
+  a design that has since changed is wrong, not just outdated, and must
+  be corrected rather than left next to a newer section that contradicts
+  it. ADRs are the one exception: don't rewrite an old ADR's reasoning
+  after the fact — write a new ADR for the change and mark the old one's
+  status as "Superseded by ADR-XXX" (or "Extended by ADR-XXX" if it's
+  additive rather than a reversal), so the decision history stays honest.
 
 This is the bar the existing structure and rules for ADRs, the
 architecture doc, the interview prep doc, and every other document in
@@ -622,6 +634,8 @@ walked through, and the 10x-scale question and answer.
 **Remind me of enterprise requirements.** If I suggest building a feature without a correlation ID, without going through APIM, or without Key Vault — stop me and remind me of the requirement before writing any code.
 
 **Point out the Claude Code feature that could help.** Before or while we build a feature, tell me which Claude Code capability — subagents, hooks, skills, plan mode, MCP servers, custom slash commands, background tasks, and so on — could make building it faster or better, and briefly why. Learning Claude Code itself is part of why I'm building these projects with it, so don't skip this even on small features.
+
+**Keep earlier docs honest when a feature changes them.** If a new feature changes how an earlier feature behaves, don't just add new documentation for it — call out exactly which existing ARCHITECTURE.md section and INTERVIEW_PREP.md Q&A now describe stale behavior, and fix them in place before we close out the session. Nothing should be left describing a design that's since changed as if it were still current.
 
 ---
 
