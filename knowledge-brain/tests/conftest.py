@@ -6,7 +6,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.core.database import Base
-from app.models import audit_log, document  # noqa: F401  (import registers the tables with Base)
+from app.models import audit_log, document, document_permission  # noqa: F401  (import registers the tables with Base)
 
 settings = get_settings()
 

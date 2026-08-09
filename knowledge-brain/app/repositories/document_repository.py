@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Chunk, Document, DocumentStatus
+from app.models.document_permission import DocumentPermission
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +94,23 @@ class DocumentRepository:
             logger.exception("Failed to mark document %s failed", document_id)
             raise
 
-    async def find_similar_chunks(self, query_embedding: list[float], limit: int = 5) -> list[Chunk]:
+    async def find_similar_chunks(
+        self, query_embedding: list[float], user_id: str, limit: int = 5
+    ) -> list[Chunk]:
         """Return the chunks whose embeddings are closest to a query vector.
 
         `cosine_distance` returns 0 for identical direction and larger
         values for less similar vectors, so ordering ascending and
         taking the first few gives us the most relevant chunks first.
+        Joined against document_permissions so only chunks from documents
+        this user can access are ever candidates — filtered before the
+        ranking and the limit, not after, so an inaccessible chunk can
+        never take a slot in the results a promotable one should've had.
         """
         stmt = (
             select(Chunk)
+            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
+            .where(DocumentPermission.user_id == user_id)
             .order_by(Chunk.embedding.cosine_distance(query_embedding))
             .limit(limit)
         )
@@ -112,13 +121,42 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
-    async def find_by_keyword(self, query: str, limit: int = 5) -> list[Chunk]:
+    async def find_by_keyword(self, query: str, user_id: str, limit: int = 5) -> list[Chunk]:
         """Return the chunks that best match a query via Postgres full-text search.
 
         Both the chunk text and the query are normalized the same way
         (lowercased, stop words removed, words stemmed to their root) by
         `to_tsvector`/`plainto_tsquery` before comparing, and `ts_rank`
-        scores how well each match is, not just whether one exists.
+        scores how well each match is, not just whether one exists. Same
+        permission join as find_similar_chunks, same reasoning: filtered
+        before ranking, not after.
+        """
+        tsquery = func.plainto_tsquery("english", query)
+        tsvector = func.to_tsvector("english", Chunk.text)
+
+        stmt = (
+            select(Chunk)
+            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
+            .where(tsvector.op("@@")(tsquery), DocumentPermission.user_id == user_id)
+            .order_by(func.ts_rank(tsvector, tsquery).desc())
+            .limit(limit)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to search for chunks by keyword")
+            raise
+        return list(result.scalars().all())
+
+    async def find_by_keyword_unrestricted(self, query: str, limit: int = 5) -> list[Chunk]:
+        """Same search as find_by_keyword, deliberately with no permission filter.
+
+        For internal, system-level use only — building the Neo4j reference
+        graph at ingestion time, which asks "does any document define this
+        term" as a fact about the documents themselves, not "what can this
+        particular user see." Never call this on behalf of a user-facing
+        request; every caller answering a real question must use
+        find_by_keyword instead.
         """
         tsquery = func.plainto_tsquery("english", query)
         tsvector = func.to_tsvector("english", Chunk.text)
@@ -132,7 +170,7 @@ class DocumentRepository:
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
-            logger.exception("Failed to search for chunks by keyword")
+            logger.exception("Failed to search for chunks by keyword (unrestricted)")
             raise
         return list(result.scalars().all())
 
@@ -155,16 +193,21 @@ class DocumentRepository:
             raise
         return result.scalar_one_or_none()
 
-    async def get_first_chunk_text(self, document_id: uuid.UUID) -> str | None:
+    async def get_first_chunk_text(self, document_id: uuid.UUID, user_id: str) -> str | None:
         """Return a referenced document's first chunk as a representative snippet.
 
         Used for graph context, not primary retrieval, so one chunk is
         enough to give the LLM a sense of what the referenced document
-        is about, without pulling in its full text.
+        is about, without pulling in its full text. Same permission join
+        as every other retrieval path — a document being *referenced* by
+        one this user can see doesn't mean this user can see it too, and
+        without this filter that's exactly how confidential content could
+        leak into an answer through the graph-context feature.
         """
         stmt = (
             select(Chunk.text)
-            .where(Chunk.document_id == document_id)
+            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
+            .where(Chunk.document_id == document_id, DocumentPermission.user_id == user_id)
             .order_by(Chunk.chunk_index)
             .limit(1)
         )

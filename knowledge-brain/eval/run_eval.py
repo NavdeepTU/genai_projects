@@ -7,6 +7,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.graph_database import driver
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.services.ingestion_service import IngestionService
 from app.services.retrieval_service import RetrievalService
 from eval.judge import judge_correctness, judge_faithfulness
@@ -14,14 +15,20 @@ from eval.judge import judge_correctness, judge_faithfulness
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 DATASET_PATH = Path(__file__).parent / "dataset.json"
 
+# A fixed identity for the eval harness's own fixture documents — not a real
+# person, but every document needs an owner now that ACL exists.
+EVAL_USER_ID = "eval-harness"
 
-async def ensure_fixtures_ingested(repository: DocumentRepository) -> dict[str, uuid.UUID]:
+
+async def ensure_fixtures_ingested(
+    repository: DocumentRepository, permission_repository: PermissionRepository
+) -> dict[str, uuid.UUID]:
     """Make sure every fixture document exists, ingesting any that don't yet.
 
     Returns a mapping from filename to its document ID, so each test case
     can check whether the *correct* document was actually retrieved.
     """
-    ingestion = IngestionService(repository)
+    ingestion = IngestionService(repository, permission_repository)
     filename_to_document_id: dict[str, uuid.UUID] = {}
 
     for fixture_path in sorted(FIXTURES_DIR.glob("*.txt")):
@@ -31,7 +38,7 @@ async def ensure_fixtures_ingested(repository: DocumentRepository) -> dict[str, 
             continue
 
         content = fixture_path.read_bytes()
-        document = await ingestion.ingest_document(fixture_path.name, content)
+        document = await ingestion.ingest_document(fixture_path.name, content, EVAL_USER_ID)
         filename_to_document_id[fixture_path.name] = document.id
 
     return filename_to_document_id
@@ -41,7 +48,7 @@ async def run_one_case(
     service: RetrievalService, case: dict, filename_to_document_id: dict[str, uuid.UUID]
 ) -> dict:
     """Run one test case through the real pipeline and score all three dimensions."""
-    state = await service.run_query(case["question"])
+    state = await service.run_query(case["question"], EVAL_USER_ID)
 
     expected_document_id = filename_to_document_id[case["source_fixture"]]
     retrieval_ok = any(
@@ -65,7 +72,9 @@ async def main() -> None:
     dataset = json.loads(DATASET_PATH.read_text())
 
     async with AsyncSessionLocal() as db_session:
-        filename_to_document_id = await ensure_fixtures_ingested(DocumentRepository(db_session))
+        filename_to_document_id = await ensure_fixtures_ingested(
+            DocumentRepository(db_session), PermissionRepository(db_session)
+        )
 
     results = []
     async with AsyncSessionLocal() as db_session, driver.session() as graph_session:

@@ -5,13 +5,14 @@ from sqlalchemy import select
 
 from app.models.document import Chunk, Document, DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.services.ingestion_service import IngestionService
 
 
 async def test_ingest_document_succeeds(db_session):
     """A .txt upload should end up ready, with its text saved as a chunk."""
     repository = DocumentRepository(db_session)
-    service = IngestionService(repository)
+    service = IngestionService(repository, PermissionRepository(db_session))
     fake_embedding = [0.1] * 1536
 
     with (
@@ -21,7 +22,7 @@ async def test_ingest_document_succeeds(db_session):
             new=AsyncMock(return_value=[fake_embedding]),
         ),
     ):
-        document = await service.ingest_document("notes.txt", b"hello world")
+        document = await service.ingest_document("notes.txt", b"hello world", "test-user")
 
     assert document.status == DocumentStatus.READY
 
@@ -34,7 +35,7 @@ async def test_ingest_document_succeeds(db_session):
 async def test_ingest_document_marks_failed_on_embedding_error(db_session):
     """If OpenAI fails, the document should end up failed, not stuck pending."""
     repository = DocumentRepository(db_session)
-    service = IngestionService(repository)
+    service = IngestionService(repository, PermissionRepository(db_session))
 
     with (
         patch("app.services.ingestion_service.detect_pii", new=AsyncMock(return_value=[])),
@@ -44,7 +45,7 @@ async def test_ingest_document_marks_failed_on_embedding_error(db_session):
         ),
         pytest.raises(RuntimeError),
     ):
-        await service.ingest_document("notes.txt", b"hello world")
+        await service.ingest_document("notes.txt", b"hello world", "test-user")
 
     result = await db_session.execute(select(Document).where(Document.filename == "notes.txt"))
     document = result.scalar_one()
@@ -55,7 +56,7 @@ async def test_ingest_document_marks_failed_on_embedding_error(db_session):
 async def test_ingest_document_flags_pii_for_review(db_session):
     """A document with PII should be held for review, never chunked or embedded."""
     repository = DocumentRepository(db_session)
-    service = IngestionService(repository)
+    service = IngestionService(repository, PermissionRepository(db_session))
 
     with (
         patch(
@@ -64,7 +65,7 @@ async def test_ingest_document_flags_pii_for_review(db_session):
         ),
         patch("app.services.ingestion_service.embed_chunks", new=AsyncMock()) as mock_embed,
     ):
-        document = await service.ingest_document("notes.txt", b"John Doe, SSN 123-45-6789")
+        document = await service.ingest_document("notes.txt", b"John Doe, SSN 123-45-6789", "test-user")
 
     assert document.status == DocumentStatus.PENDING_REVIEW
     assert document.pii_detected is True

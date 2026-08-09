@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from neo4j import AsyncSession as Neo4jAsyncSession
@@ -7,11 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
 from app.core.graph_database import get_graph_session
-from app.core.middleware import get_correlation_id
+from app.core.middleware import get_correlation_id, get_current_user_id
 from app.models.document import DocumentStatus, DocumentUploadResponse
+from app.models.document_permission import GrantAccessRequest, GrantAccessResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
 from app.services.ingestion_service import IngestionService
@@ -34,8 +37,9 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Only .pdf and .txt files are supported")
 
     content = await file.read()
-    service = IngestionService(DocumentRepository(db))
-    document = await service.ingest_document(file.filename, content)
+    user_id = get_current_user_id()
+    service = IngestionService(DocumentRepository(db), PermissionRepository(db))
+    document = await service.ingest_document(file.filename, content, user_id)
 
     if document.status == DocumentStatus.READY:
         try:
@@ -55,6 +59,7 @@ async def upload_document(
         resource_type="document",
         resource_id=str(document.id),
         extra_data={"filename": document.filename, "status": document.status.value},
+        user_id=user_id,
     )
 
     return DocumentUploadResponse(
@@ -62,4 +67,34 @@ async def upload_document(
         filename=document.filename,
         status=document.status,
         correlation_id=correlation_id,
+    )
+
+
+@router.post("/{document_id}/access", response_model=GrantAccessResponse, status_code=201)
+async def grant_document_access(
+    document_id: uuid.UUID,
+    body: GrantAccessRequest,
+    db: AsyncSession = Depends(get_db),
+) -> GrantAccessResponse:
+    """Share a document with another user — only someone who already has access can do this."""
+    user_id = get_current_user_id()
+    permission_repository = PermissionRepository(db)
+
+    if not await permission_repository.has_access(document_id, user_id):
+        raise HTTPException(status_code=403, detail="You don't have access to this document")
+
+    await permission_repository.grant_access(document_id, body.user_id)
+
+    correlation_id = get_correlation_id()
+    await AuditRepository(db).log_action(
+        correlation_id=correlation_id,
+        action="permission_granted",
+        resource_type="document",
+        resource_id=str(document_id),
+        extra_data={"granted_to": body.user_id},
+        user_id=user_id,
+    )
+
+    return GrantAccessResponse(
+        document_id=document_id, granted_to=body.user_id, correlation_id=correlation_id
     )

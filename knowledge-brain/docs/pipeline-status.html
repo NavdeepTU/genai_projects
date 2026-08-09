@@ -313,7 +313,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 9 of 16 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 10 of 17 features complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -702,16 +702,56 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> a document with a real name, phone number, and SSN correctly ends up <code>pending_review</code> with zero chunks saved — never embedded; a clean document reaches <code>ready</code> normally; a document with an Indian PAN number, uploaded through the MCP tool specifically, gets flagged too, confirming both entry points are protected. Live testing (not code review) caught Azure's <code>PersonType</code> category flagging ordinary words like "employee" as PII, fixed with an explicit category allowlist. See ADR-018.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 10 — Document-level access control <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">4 of 4 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Identity middleware</span>
+        <span class="path mono">middleware.py · X-User-Id, required, mirrors correlation ID</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Permissions table + auto-grant</span>
+        <span class="path mono">permission_repository.py · idempotent grant, uploader owns on upload</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Sharing endpoint</span>
+        <span class="path mono">POST /documents/{id}/access · caller must already have access</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Retrieval-time enforcement</span>
+        <span class="path mono">SQL join, filtered before ranking — vector, keyword, and graph context</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> a document owner gets a correct answer; a second user with no grant gets "I don't know" for the identical question; granting access makes the same question succeed; every document uploaded before this feature existed is now correctly invisible to everyone, including its own uploader, until re-granted. Two real bugs found only by exercising this live, not by reading <code>_retrieve_node</code>: <code>DocumentGraphService.build_references</code> crashed against the new required parameter (fixed with a deliberately unrestricted search, since reference-building is a system-wide fact, not a user-scoped view), and <code>get_first_chunk_text</code> — the function behind graph-context snippets — had no permission check at all, a real content-leak path closed with the same join everywhere else uses. See ADR-019.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">08</span>Document-level access control</li>
       <li><span class="n mono">09</span>API gateway (Azure API Management)</li>
       <li><span class="n mono">10</span>Azure deployment (Terraform + CI/CD)</li>
       <li><span class="n mono">11</span>Frontend dashboard</li>
       <li><span class="n mono">12</span>Auth &amp; multi-tenancy hardening</li>
       <li><span class="n mono">13</span>LLM/RAG observability</li>
       <li><span class="n mono">14</span>Real-time answer guardrails</li>
+      <li><span class="n mono">15</span>Multi-agent federated retrieval</li>
     </ul>
   </footer>
 

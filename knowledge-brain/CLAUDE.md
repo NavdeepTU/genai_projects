@@ -56,6 +56,12 @@ for a company's private knowledge, with answers instead of links.
     incoming documents at upload time, not outgoing answers, and from
     the evaluation harness, item 9, which measures quality offline in
     batch, not per live response)
+17. Multi-agent federated retrieval (a supervisor agent classifies
+    which document domain(s) a question needs, dispatches to
+    domain-scoped retrieval agents that each enforce their own
+    document-level ACL from item 8, then a synthesis agent merges the
+    cited answers across domains — see the corresponding Enterprise
+    Requirement)
 
 ---
 
@@ -306,6 +312,25 @@ must have a circuit breaker. If a service fails 3 times in
 response, and alert via Application Insights. Never let one
 failing external service take down the whole pipeline.
 
+**9. Multi-agent federated retrieval**
+A single retrieval step is not enough once a question can span more
+than one document domain (department, source system, or tenant
+sub-scope). A supervisor agent first classifies which domain(s) a
+question needs, using metadata already stored per document. It
+dispatches the question to one domain-scoped retrieval agent per
+relevant domain — each agent runs the existing hybrid search,
+reranking, and document-level ACL filter (requirement 5), but scoped
+only to its own domain. A synthesis agent then merges the per-domain
+answers into a single response, reconciles citations, and flags it
+plainly if two domains disagree. Single-domain questions skip this
+entirely and go straight through the original single-step retrieval
+path — the multi-agent path only activates for genuinely cross-domain
+questions, so the common case pays no extra latency or cost. If one
+domain's retrieval agent fails or times out, its circuit breaker
+(requirement 8) trips for that domain only; synthesis still returns
+an answer built from the domains that succeeded, clearly labeled as
+partial, rather than failing the whole question.
+
 ---
 
 ## Frontend Standards — This Must Look World-Class
@@ -401,6 +426,10 @@ After every major feature, ask me these questions as if you are an interviewer:
 - "How would you change this design if you had 10x the data?"
 - "How does your PII detection layer work and what happens if it misses something?"
 - "How does your document-level ACL interact with the vector retrieval step?"
+- "Why route a cross-domain question through a supervisor and
+  separate domain-scoped agents instead of one retrieval step with
+  a permission filter — what does that buy you, and what does it
+  cost?"
 
 I should be able to answer from memory. If I can't, we revisit before moving on.
 
@@ -408,10 +437,11 @@ I should be able to answer from memory. If I can't, we revisit before moving on.
 
 ## Documentation Bar — Big Tech Interview Standard
 
-ARCHITECTURE.md, INTERVIEW_PREP.md, and every ADR must be written to the
-standard a senior engineer at Google, Microsoft, Amazon, or Meta would be
-held to in an actual interview loop — not just technically correct, but
-answering what these companies specifically probe for:
+ARCHITECTURE.md, INTERVIEW_PREP.md, every ADR, PROGRESS.md, README.md,
+and this CLAUDE.md file itself must be written to the standard a senior
+engineer at Google, Microsoft, Amazon, or Meta would be held to in an
+actual interview loop — not just technically correct, but answering what
+these companies specifically probe for:
 - **Trade-offs, not just choices** — for every decision, what the
   alternatives were and what we gave up to get this one.
 - **Scale and failure** — what breaks at 10x/100x load, how the system
@@ -420,10 +450,17 @@ answering what these companies specifically probe for:
   implications, not just "does it work."
 - **Precision over vagueness** — concrete numbers, concrete scenarios,
   concrete answers, never hand-wavy generalities.
+- **Rich, grammatically correct language** — every sentence should read
+  as though a strong technical writer wrote it: no grammar mistakes, no
+  typos, no awkward or run-on phrasing, no filler. Hold INTERVIEW_PREP.md
+  to this hardest of all, since it doubles as material I rehearse from —
+  a grammar slip there is one I might repeat out loud in a real
+  interview.
 
 This is the bar the existing structure and rules for ADRs, the
-architecture doc, and the interview prep doc are held to — it doesn't
-replace them, it's what "done well" means for all three.
+architecture doc, the interview prep doc, and every other document in
+this project are held to — it doesn't replace them, it's what "done
+well" means for all of them.
 
 ---
 
@@ -467,6 +504,12 @@ Structure it like this:
   How PII detection works, how ACL is enforced at retrieval
   time, how Managed Identity keeps secrets out of the code,
   how the audit log works and why it is append-only.
+
+## Multi-agent retrieval (domain-scoped agents)
+  How the supervisor decides which document domains a question
+  touches, how each domain-scoped retrieval agent enforces its
+  own ACL, how the synthesis agent reconciles answers across
+  domains, and what happens when one domain's agent fails.
 
 ## What could go wrong and how we handle it
   For each major failure scenario, explain in plain English
@@ -577,6 +620,8 @@ walked through, and the 10x-scale question and answer.
 **Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands.
 
 **Remind me of enterprise requirements.** If I suggest building a feature without a correlation ID, without going through APIM, or without Key Vault — stop me and remind me of the requirement before writing any code.
+
+**Point out the Claude Code feature that could help.** Before or while we build a feature, tell me which Claude Code capability — subagents, hooks, skills, plan mode, MCP servers, custom slash commands, background tasks, and so on — could make building it faster or better, and briefly why. Learning Claude Code itself is part of why I'm building these projects with it, so don't skip this even on small features.
 
 ---
 

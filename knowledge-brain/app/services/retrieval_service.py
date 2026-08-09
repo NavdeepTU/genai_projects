@@ -40,12 +40,12 @@ class RetrievalService:
         self.graph_repository = graph_repository
         self._graph = build_query_graph(self)
 
-    async def answer_question(self, question: str) -> str:
+    async def answer_question(self, question: str, user_id: str) -> str:
         """Run one question through the query graph and return the final answer."""
-        state = await self.run_query(question)
+        state = await self.run_query(question, user_id)
         return state["answer"]
 
-    async def run_query(self, question: str) -> QueryState:
+    async def run_query(self, question: str, user_id: str) -> QueryState:
         """Run one question through the query graph and return the full final state.
 
         Exposed separately from answer_question so callers that need more
@@ -56,6 +56,7 @@ class RetrievalService:
         initial_state: QueryState = {
             "original_question": question,
             "question": question,
+            "user_id": user_id,
             "candidates": [],
             "reranked_chunks": [],
             "top_relevance_score": 0.0,
@@ -72,8 +73,12 @@ class RetrievalService:
 
         # Run sequentially, not concurrently: both share one AsyncSession,
         # which isn't safe for two queries running at the same time.
-        vector_chunks, vector_failed = await self._find_similar_chunks_safely(query_embedding)
-        keyword_chunks, keyword_failed = await self._find_by_keyword_safely(state["question"])
+        vector_chunks, vector_failed = await self._find_similar_chunks_safely(
+            query_embedding, state["user_id"]
+        )
+        keyword_chunks, keyword_failed = await self._find_by_keyword_safely(
+            state["question"], state["user_id"]
+        )
 
         if vector_failed and keyword_failed:
             raise RetrievalUnavailableError("Both vector and keyword search failed")
@@ -131,7 +136,9 @@ class RetrievalService:
                 continue
             for referenced_id in referenced_ids:
                 try:
-                    snippet = await self.repository.get_first_chunk_text(uuid.UUID(referenced_id))
+                    snippet = await self.repository.get_first_chunk_text(
+                        uuid.UUID(referenced_id), state["user_id"]
+                    )
                 except SQLAlchemyError:
                     logger.error(
                         "Failed to fetch snippet for referenced document %s",
@@ -162,11 +169,13 @@ class RetrievalService:
         answer = await generate_answer(state["original_question"], context_chunks)
         return {"answer": answer}
 
-    async def _find_similar_chunks_safely(self, query_embedding: list[float]) -> tuple[list[Chunk], bool]:
+    async def _find_similar_chunks_safely(
+        self, query_embedding: list[float], user_id: str
+    ) -> tuple[list[Chunk], bool]:
         """Run vector search; on failure, roll back and report no results rather than raising."""
         try:
             chunks = await self.repository.find_similar_chunks(
-                query_embedding, limit=settings.retrieval_candidate_pool
+                query_embedding, user_id, limit=settings.retrieval_candidate_pool
             )
             self.repository.detach(chunks)
             return chunks, False
@@ -178,10 +187,12 @@ class RetrievalService:
             await self.repository.rollback()
             return [], True
 
-    async def _find_by_keyword_safely(self, question: str) -> tuple[list[Chunk], bool]:
+    async def _find_by_keyword_safely(self, question: str, user_id: str) -> tuple[list[Chunk], bool]:
         """Run keyword search; on failure, roll back and report no results rather than raising."""
         try:
-            chunks = await self.repository.find_by_keyword(question, limit=settings.retrieval_candidate_pool)
+            chunks = await self.repository.find_by_keyword(
+                question, user_id, limit=settings.retrieval_candidate_pool
+            )
             self.repository.detach(chunks)
             return chunks, False
         except SQLAlchemyError:

@@ -25,27 +25,31 @@ Neo4j).
 ```mermaid
 flowchart TD
     subgraph mw["Every request"]
-        REQ[Request arrives] --> CID[Correlation ID middleware<br/>generates or reuses an ID]
+        REQ[Request arrives] --> CID["Correlation ID middleware<br/>(outermost — always runs, even on rejection)"]
+        CID --> UID{"X-User-Id header<br/>present?"}
+        UID -->|no| REJECT["401 + audit log entry<br/>(action: access_denied)"]
     end
 
-    CID --> UP[POST /documents/upload]
-    CID --> Q[POST /query]
+    UID -->|yes| UP[POST /documents/upload]
+    UID -->|yes| Q[POST /query]
 
     subgraph ingest["Getting a document in"]
-        UP --> EXTRACT[Extract text<br/>PDF / .txt]
+        UP --> CREATE[Create document row]
+        CREATE --> GRANT["Auto-grant uploader access<br/>(document_permissions) — unconditional,<br/>survives ready/failed/pending_review alike"]
+        GRANT --> EXTRACT[Extract text<br/>PDF / .txt]
         EXTRACT --> PIICHECK{"PII check<br/>(Azure AI Language, via circuit breaker)"}
         PIICHECK -->|PII found| FLAG["Status: pending_review<br/>pii_detected = true — stop, never embedded"]
         PIICHECK -->|Azure unavailable| FAILCLOSED["Status: failed<br/>(fail closed — not embedded unchecked)"]
         PIICHECK -->|clean| CHUNK[Chunk text]
         CHUNK --> EMBED["Embed chunks<br/>(OpenAI, via circuit breaker)"]
         EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
-        SAVE --> BUILDREFS["Extract references & write to Neo4j<br/>(best-effort, via circuit breaker)"]
+        SAVE --> BUILDREFS["Extract references & write to Neo4j<br/>(system-wide lookup, not permission-scoped —<br/>a fact about documents, not this user's view)"]
     end
 
     subgraph retrieve["Asking a question — LangGraph query pipeline"]
         Q --> QEMBED[Embed the question]
-        QEMBED --> VEC["Vector search: 20 candidates<br/>(fails? use keyword results alone)"]
-        QEMBED --> KW["Keyword search: 20 candidates<br/>(fails? use vector results alone)"]
+        QEMBED --> VEC["Vector search: 20 candidates<br/>joined against document_permissions —<br/>filtered before ranking, not after<br/>(fails? use keyword results alone)"]
+        QEMBED --> KW["Keyword search: 20 candidates<br/>same permission join<br/>(fails? use vector results alone)"]
         VEC --> BOTH{Both failed?}
         KW --> BOTH
         BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
@@ -54,12 +58,17 @@ flowchart TD
         RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
         CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
         REWRITE --> QEMBED
-        CHECK -->|no| GRAPHCTX["Fetch graph context: what do these<br/>chunks' documents reference? (one hop,<br/>via circuit breaker)"]
+        CHECK -->|no| GRAPHCTX["Fetch graph context, same permission join —<br/>a referenced document this user can't see<br/>never contributes a snippet (one hop,<br/>via circuit breaker)"]
         GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM, via circuit breaker)"]
     end
 
     BUILDREFS -.writes.-> NEO4J[(Neo4j)]
     GRAPHCTX -.reads.-> NEO4J
+
+    GRANT -.writes.-> ACL[(document_permissions)]
+    VEC -.reads.-> ACL
+    KW -.reads.-> ACL
+    GRAPHCTX -.reads.-> ACL
 
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
     GEN --> AUDIT2[Audit log:<br/>query_made]
@@ -70,8 +79,14 @@ flowchart TD
 
 **Getting a document in:** a user uploads a file — through the REST
 endpoint or through MCP, both funnel into the exact same pipeline —
-the file's raw text is pulled out, and before anything else happens,
-that text is checked for personal information (names, phone numbers,
+and before anything else, the request has to carry a `X-User-Id`
+header identifying who's asking; missing it means an immediate
+rejection, logged as its own audit event. Once a document row exists,
+its uploader is automatically granted access to it — regardless of
+what happens next, so a document that later fails or gets held for
+review is still visible to the person who uploaded it. The file's raw
+text is then pulled out, and before anything else happens, that text
+is checked for personal information (names, phone numbers,
 government IDs, that kind of thing) by Azure AI Language. If it finds
 any, the document stops right there: it's marked `pending_review` with
 `pii_detected = true`, and nothing about it is ever chunked or
@@ -92,12 +107,17 @@ it — if so, that connection gets written to Neo4j as an explicit link
 between the two documents. This step is best-effort: if it fails, the
 upload still succeeds, it just won't have graph links yet.
 
-**Asking a question:** a user sends a question → it's turned into a
-meaning-vector, and two independent searches run one after another: a
-vector search (closest meaning) and a keyword search (Postgres full-text
-search, for exact terms vector search can miss — error codes, product
-IDs, rare proper nouns). Each fetches a wider pool of 20 candidates, not
-just the final 5. If one of the two searches fails, the system doesn't
+**Asking a question:** a user sends a question, again carrying their
+`X-User-Id` → it's turned into a meaning-vector, and two independent
+searches run one after another: a vector search (closest meaning) and
+a keyword search (Postgres full-text search, for exact terms vector
+search can miss — error codes, product IDs, rare proper nouns). Both
+searches are joined against the permissions table, so a chunk from a
+document this user was never granted access to is never a candidate in
+the first place — filtered before ranking, not after, the same way
+ADR-012's hybrid-search fix avoided truncating results by filtering too
+late. Each fetches a wider pool of 20 candidates, not just the final 5.
+If one of the two searches fails, the system doesn't
 give up — it proceeds using whichever search actually succeeded, and
 only returns an error if *both* fail. The two ranked lists (or the one
 that's available) are merged into one using Reciprocal Rank Fusion,
@@ -116,14 +136,38 @@ Once there are chunks worth using, one more step runs before
 generation: for the documents behind those final chunks, the system
 asks Neo4j what each one explicitly references — not what's similar to
 it, what it actually *names* — and pulls in one snippet from each
-referenced document, one hop only. Those final chunks, the graph
-snippets, plus the *original* question (never the rewritten one — the
-rewrite is only a search tool, not a replacement for what the user
-actually asked), are handed to an LLM, which answers using only that
-retrieved text, and says it doesn't know rather than guessing if the
-answer isn't there.
+referenced document, one hop only. That snippet lookup carries the same
+permission join as the primary search — a document being referenced by
+one this user can see does not mean this user can see the referenced
+document too, and without that check the graph-context feature could
+leak content from documents this user was never granted access to,
+which live testing actually caught happening before it shipped. Those
+final chunks, the graph snippets, plus the *original* question (never
+the rewritten one — the rewrite is only a search tool, not a
+replacement for what the user actually asked), are handed to an LLM,
+which answers using only that retrieved text, and says it doesn't know
+rather than guessing if the answer isn't there.
 
-**What's new since the last update:** PII (personal information)
+**What's new since the last update:** document-level access control
+(build-order step 8) — every uploaded document is now visible only to
+users explicitly granted access, checked at retrieval time via a SQL
+join, not after results come back. A lightweight `X-User-Id` header
+stands in for real identity (full auth is build-order item 14, still
+much later); missing it gets an immediate 401. Uploading a document
+auto-grants its uploader; a new endpoint lets anyone with access grant
+it to someone else. The permission check itself lives inside the
+repository's search queries, not the API routes, so both REST and MCP
+inherit it automatically — but that same reasoning revealed a real gap
+live: `DocumentGraphService`'s reference-building and the query
+pipeline's graph-context snippet lookup each read chunk data through
+their *own* separate functions, neither of which the primary search fix
+touched. Reference-building was deliberately left permission-agnostic
+(it establishes system-wide facts about documents, not a user's view),
+but the graph-context snippet lookup had no permission check at all —
+a real leak, closed with the same join everywhere else uses. See
+ADR-019.
+
+PII (personal information)
 detection (build-order step 7), the first check that can stop a
 document from being ingested at all rather than just degrade quality.
 It runs inside `IngestionService` itself, not either API route, so it
@@ -205,6 +249,38 @@ and hands the file off to the ingestion service. Talks to: the ingestion
 service. If it disappeared, there'd be no way to get a file into the system
 at all.
 
+**Identity middleware (`app/core/middleware.py`)** — the newest
+addition, `user_id_middleware`, sits alongside the correlation ID
+middleware and stamps every request with whoever's calling, read from
+an `X-User-Id` header. Unlike a correlation ID, this one can't be
+invented when missing — no header means an immediate 401, logged to
+the audit table as its own event. Exempts only Swagger UI's own pages
+(`/docs`, `/openapi.json`, `/redoc`), so the API's documentation stays
+browsable without an identity. Talks to: the audit log directly (it
+opens its own database session, the same way MCP's tools do, since
+middleware runs outside FastAPI's dependency injection). If it
+disappeared, every permission check downstream would have nothing to
+check against.
+
+**Permission repository (`app/repositories/permission_repository.py`)**
+— all direct database access for who can see which document.
+`grant_access` is idempotent (`ON CONFLICT DO NOTHING`, not
+check-then-insert, so two concurrent grants for the same pair can't
+race into an error); `has_access` is a plain existence check. Talks to:
+nothing but the database — this table is intentionally simple, one row
+per (document, user) grant, no roles or ownership tiers. If it
+disappeared, nothing could ever be shared, and no document would be
+retrievable by anyone, including its own uploader.
+
+```mermaid
+flowchart LR
+    UP[Document uploaded] --> AUTO["Auto-grant uploader<br/>(unconditional, before any<br/>processing can fail)"]
+    SHARE["POST /documents/id/access<br/>(caller must already have access)"] --> GRANT[grant_access:<br/>idempotent insert]
+    AUTO --> GRANT
+    GRANT --> TABLE[(document_permissions)]
+    TABLE --> CHECK["Every retrieval query joins<br/>against this table, filtered<br/>before ranking"]
+```
+
 **Ingestion service (`app/services/ingestion_service.py`)** — the
 conductor. Knows the *order* the pipeline steps must run in (extract,
 check for PII, then chunk, then embed, then save), and marks the
@@ -244,11 +320,13 @@ flowchart LR
 — runs once per document, right after ingestion succeeds. Reads what
 the document explicitly mentions (via reference extraction), checks
 whether any mention actually matches content already in another
-document (reusing `find_by_keyword`, no new lookup needed), and records
-a `REFERENCES` edge in Neo4j for each real match. Talks to: reference
-extraction, the repository, and the graph repository. Best-effort — if
-it fails, the document still uploads successfully, it just won't have
-graph links yet.
+document (via `find_by_keyword_unrestricted`, deliberately not
+permission-filtered — this step establishes a system-wide fact about
+which documents reference which, not a view scoped to any one user),
+and records a `REFERENCES` edge in Neo4j for each real match. Talks to:
+reference extraction, the repository, and the graph repository.
+Best-effort — if it fails, the document still uploads successfully, it
+just won't have graph links yet.
 
 **Reference extraction (`app/services/reference_extraction.py`)** — a
 single, narrow LLM call: given a document's text, return the specific
@@ -275,7 +353,14 @@ instead of just by exact keyword.
 **Repository (`app/repositories/document_repository.py`)** — the only
 place in the codebase that talks directly to the database. Everything else
 asks the repository to save or update things, rather than writing its own
-database queries.
+database queries. Also the actual enforcement point for document
+permissions: `find_similar_chunks` and `find_by_keyword` both join
+against `document_permissions`, and `get_first_chunk_text` (used for
+graph context) does the same — deliberately not centralized behind one
+shared check, since each query needs the join applied to its own SQL.
+`find_by_keyword_unrestricted` exists specifically *without* that join,
+for the one caller (reference-building) that needs to see every
+document regardless of ownership.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — still the
 conductor for answering questions. `answer_question` builds a small
@@ -347,7 +432,10 @@ readable from anywhere in the code handling that request via
 `get_correlation_id()`, and echoes it back as a response header. Talks to:
 nothing directly — every route and response includes its value. If it
 disappeared, there'd be no way to trace one request's activity across
-logs.
+logs. Registered *last* in `main.py`, deliberately — the last middleware
+registered wraps *outermost*, so this one always gets to stamp its
+header even when `user_id_middleware` rejects a request before
+anything else runs.
 
 **Audit log (`app/models/audit_log.py`, `app/repositories/audit_repository.py`)**
 — an append-only record of every user-initiated, state-changing action
@@ -524,6 +612,26 @@ correctness are judged by two separate LLM calls, not one combined
 call, specifically to avoid one response conflating two different
 judgments. See ADR-016.
 
+Identity is delivered via middleware and a `ContextVar`, mirroring the
+correlation ID pattern exactly, rather than a FastAPI `Depends()` —
+specifically because it needed to cover MCP too, and MCP tools aren't
+FastAPI routes that can use route-level dependency injection.
+Permission checks live inside the repository's own queries as a SQL
+join, applied before ranking and the `LIMIT`, not as a filter on
+results afterward — the same reasoning ADR-012 already used to avoid
+silently truncating results by filtering too late. Sharing a document
+uses the simplest available rule — anyone who currently has access can
+grant it to someone else — accepted deliberately over building
+ownership tracking, a real scope trade-off named in ADR-019, not an
+oversight. Building this surfaced a genuine architectural lesson: there
+is no single central gate protecting all chunk access in this system,
+since `DocumentGraphService`'s reference-building and the query
+pipeline's graph-context lookup each read chunk data through their own
+separate repository functions, neither automatically covered by fixing
+`find_similar_chunks`/`find_by_keyword` alone — the graph-context path
+had no permission check at all until this was found live and fixed.
+See ADR-019.
+
 PII detection runs inside `IngestionService`, not either API route,
 specifically so it protects both `/documents/upload` and MCP's
 `upload_document` without either file changing — the same reasoning
@@ -564,9 +672,14 @@ ADR-017.
 
 **Uploading a document:** a user sends a file to the upload address —
 either the REST endpoint or MCP's `upload_document`, both reach the
-same code from here on. The system checks the file type is supported,
-creates a database record for the document immediately (marked
-"pending"), then extracts its text. Before anything else, that text is
+same code from here on — carrying an `X-User-Id` header identifying
+who they are; missing it, the request is rejected before any of this
+runs. The system checks the file type is supported, creates a database
+record for the document immediately (marked "pending"), and
+immediately grants the uploader access to it — regardless of what
+happens during the rest of ingestion, so a document that later fails or
+gets held for review is still visible to whoever uploaded it. It then
+extracts the document's text. Before anything else, that text is
 checked for personal information by Azure AI Language, scoped to a
 specific 14-category allowlist. If any is found, the document stops
 here: marked "pending review," `pii_detected` set permanently to true,
@@ -586,22 +699,29 @@ link. This step can't fail the upload; if Neo4j or the extraction call
 is unavailable, the document is still "ready," it just has no graph
 links.
 
-**Asking a question:** a user sends a question to the query address. The
-question is turned into a meaning-vector using the same embedding model
-used for chunks, so the two are comparable. Postgres finds 20 candidate
-chunks by vector similarity and, separately, 20 by keyword match, and
-merges the two ranked lists into one with Reciprocal Rank Fusion. Voyage
-AI's reranking model then looks at the actual question and each of those
-20 candidates together, narrows them down to the 5 that genuinely answer
-the question best, and reports how relevant the best one actually is.
-If that top score is weak and this is the first attempt, the pipeline
-loops back: an LLM rephrases the question, and the whole search runs
-again with the new phrasing — once, never more. Once there are chunks
-worth using, the system asks Neo4j what the documents behind those
-chunks explicitly reference — one hop only — and pulls in a snippet
-from each. Those chunks, the graph snippets, and the *original*
-question are sent to an LLM, which writes an answer grounded only in
-that retrieved text.
+**Asking a question:** a user sends a question to the query address,
+again carrying their `X-User-Id`. The question is turned into a
+meaning-vector using the same embedding model used for chunks, so the
+two are comparable. Postgres finds 20 candidate chunks by vector
+similarity and, separately, 20 by keyword match — both searches joined
+against the permissions table, so a document this user was never
+granted access to is never a candidate at all, not filtered out
+afterward — and merges the two ranked lists into one with Reciprocal
+Rank Fusion. Voyage AI's reranking model then looks at the actual
+question and each of those 20 candidates together, narrows them down to
+the 5 that genuinely answer the question best, and reports how relevant
+the best one actually is. If that top score is weak and this is the
+first attempt, the pipeline loops back: an LLM rephrases the question,
+and the whole search runs again with the new phrasing — once, never
+more; the user's identity carries through the retry unchanged, since it
+was set once in the graph's shared state and no node along the way
+touches it. Once there are chunks worth using, the system asks Neo4j
+what the documents behind those chunks explicitly reference — one hop
+only — and pulls in a snippet from each, subject to the same permission
+check: a referenced document this user can't see contributes no
+snippet. Those chunks, the graph snippets, and the *original* question
+are sent to an LLM, which writes an answer grounded only in that
+retrieved text.
 
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
@@ -745,6 +865,35 @@ same way the system it's judging can be. A passing eval score is a
 strong signal, not a mathematical proof. It also only runs when someone
 remembers to run it — nothing wires it into CI yet, so it can't catch a
 regression on its own, only when manually invoked. See ADR-016.
+
+**A new feature reads chunk data through its own path, bypassing
+permission checks that already exist elsewhere** — this already
+happened once, live, while building document-level ACL: fixing the
+join in `find_similar_chunks`/`find_by_keyword` did nothing for
+`get_first_chunk_text`, the separate function powering graph-context
+snippets, which had no permission check at all until it was found and
+fixed. There is no single central gate protecting all chunk access in
+this system — every function reading chunk content needs its own
+explicit check, and a future feature (an admin export tool, a new
+analytics query) that reads chunks through yet another new path would
+need this applied again, deliberately, not inherited automatically.
+See ADR-019.
+
+**A shared document can be re-shared indefinitely, with no way for the
+original uploader to see or stop it** — the sharing rule is
+deliberately simple: anyone with access can grant access to someone
+else. There's no ownership concept distinguishing the original uploader
+from someone granted access later, so a document could, in principle,
+spread to people the uploader never intended and has no visibility
+into. Acceptable for a single-tenant learning project; a real
+multi-tenant deployment would need ownership tracking before this
+rule could be trusted. See ADR-019.
+
+**Identity is entirely self-asserted** — `X-User-Id` is just a header
+value; nothing verifies a caller actually is who they claim to be. The
+same honest trade-off MCP's shared secret already accepted, and for the
+same reason: proportionate for a project with no real users yet, closed
+properly once build-order item 14 (real auth) exists.
 
 **Azure AI Language itself goes down during PII detection** — after 3
 failures in 60 seconds, its own independent circuit breaker opens,
@@ -972,3 +1121,30 @@ anyway (used for reranking and Neo4j, where a missing enhancement
 still leaves a working answer). The same system can reasonably choose
 differently for different checks, depending on what's actually at risk
 if the check is silently skipped.
+
+**Access control list (ACL)** — a record of exactly who is allowed to
+access a specific resource — here, one row per (document, user) pair
+that's been explicitly granted, stored in `document_permissions`. Not
+the same as a role (like "admin"), which grants broad, resource-agnostic
+capability; an ACL entry only ever says something about one specific
+document and one specific user.
+
+**Identity vs. authentication** — identity is *who a request claims to
+be*; authentication is *proving that claim is true*. This project has
+identity (`X-User-Id`) without authentication — nothing verifies the
+header's value is genuine, only that it's present. Real authentication
+(passwords, sessions, tokens someone can't just type in) is
+build-order item 14, not built yet.
+
+**Idempotent** — an operation that produces the same end result no
+matter how many times it runs. `grant_access`'s `ON CONFLICT DO
+NOTHING` makes granting the same permission twice safe — the second
+call changes nothing, rather than erroring or creating a duplicate.
+
+**SQL join** — combining rows from two database tables based on a
+shared value between them, evaluated as part of one query rather than
+as two separate steps in application code. This project's permission
+filter is a join between `chunks` (by way of their `document_id`) and
+`document_permissions`, so the database itself restricts which rows
+are ever candidates for ranking — nothing gets fetched and then
+discarded afterward.

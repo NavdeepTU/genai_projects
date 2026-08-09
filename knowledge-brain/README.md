@@ -59,17 +59,27 @@ and why it was made that way.
   upload endpoint and the MCP tool automatically. Fails closed, not
   open, if Azure itself is unavailable — see
   [`ADR-018`](docs/adr/ADR-018-pii-detection.md).
+- **Document-level access control** — every request, REST or MCP, must
+  carry an `X-User-Id` header identifying the caller; missing it is a
+  401. Uploading a document auto-grants the uploader access; a new
+  endpoint lets anyone with access share it with someone else.
+  Retrieval — vector search, keyword search, and graph-context
+  snippets alike — is filtered by a SQL join against a permissions
+  table before results are ever ranked, not after. See
+  [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
 
-**Not built yet:** document access control, an API gateway, Azure
-deployment, the frontend, and full auth/multi-tenancy. See
-`CLAUDE.md`'s build order for the full plan.
+**Not built yet:** an API gateway, Azure deployment, the frontend, and
+full auth/multi-tenancy (today's identity is a self-asserted header,
+not real authentication). See `CLAUDE.md`'s build order for the full
+plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
   chunking, extraction, and PII detection's "flag and stop" branch —
   it does not yet cover hybrid search, the circuit breaker, the audit
-  log, LangGraph's retry logic, the Neo4j graph feature, MCP, or PII
-  detection's own splitting/batching logic.
+  log, LangGraph's retry logic, the Neo4j graph feature, MCP, PII
+  detection's own splitting/batching logic, or any part of access
+  control.
 - The audit log's "nobody can edit or delete an entry" guarantee is
   enforced at the code level only — the local database connection is a
   superuser and could bypass a real database-level restriction. See
@@ -91,10 +101,14 @@ flowchart LR
     RAG -. reads .-> DB
 ```
 
-Every request also gets a correlation ID (for tracing), an audit log
-entry (for accountability), and OpenAI calls are protected by a circuit
-breaker (so one bad outage doesn't cascade). Full diagrams and the
-reasoning behind every choice live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Every request must also carry an `X-User-Id` header — there's no login
+yet, just a caller-supplied identity, but every document is only
+visible to users explicitly granted access to it, and a request with
+no `X-User-Id` is rejected outright. Every request also gets a
+correlation ID (for tracing), an audit log entry (for accountability),
+and OpenAI calls are protected by a circuit breaker (so one bad outage
+doesn't cascade). Full diagrams and the reasoning behind every choice
+live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Tech stack (what's actually running today)
 
@@ -171,19 +185,37 @@ without writing any `curl` commands by hand.
 
 ### Trying it manually
 
+Every request needs an `X-User-Id` header — any value you like, it's
+just a caller-supplied identity, not a real login:
+
 ```
-curl -X POST http://localhost:8000/documents/upload -F "file=@/path/to/a/file.txt"
+curl -X POST http://localhost:8000/documents/upload \
+  -H "X-User-Id: you" \
+  -F "file=@/path/to/a/file.txt"
 
 curl -X POST http://localhost:8000/query \
+  -H "X-User-Id: you" \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
+```
+
+Uploading a document automatically grants you access to it. To share a
+document with someone else (or test what happens when you *don't* have
+access), grant another user ID:
+
+```
+curl -X POST http://localhost:8000/documents/<document-id>/access \
+  -H "X-User-Id: you" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "someone-else"}'
 ```
 
 The same two actions are also reachable as MCP tools at
 `http://localhost:8000/mcp`, over the Streamable HTTP transport, for
 any MCP-compatible client (e.g. Claude Desktop) — every request must
-include the shared secret you set as `MCP_API_KEY` in an `X-API-Key`
-header.
+include both the shared secret you set as `MCP_API_KEY` in an
+`X-API-Key` header, and an `X-User-Id` header, same as the REST
+endpoints.
 
 ### Running the evaluation harness
 

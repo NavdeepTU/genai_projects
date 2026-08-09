@@ -21,6 +21,7 @@ class QueryState(TypedDict):
 
     original_question: str
     question: str
+    user_id: str
     candidates: list[Chunk]
     reranked_chunks: list[Chunk]
     top_relevance_score: float

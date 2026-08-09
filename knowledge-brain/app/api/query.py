@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
 from app.core.graph_database import get_graph_session
-from app.core.middleware import get_correlation_id
+from app.core.middleware import get_correlation_id, get_current_user_id
 from app.models.query import QueryRequest, QueryResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
@@ -23,9 +23,10 @@ async def query(
 ) -> QueryResponse:
     """Answer a question using retrieval-augmented generation."""
     service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
+    user_id = get_current_user_id()
 
     try:
-        answer = await service.answer_question(request.question)
+        answer = await service.answer_question(request.question, user_id)
     except CircuitOpenError:
         raise HTTPException(
             status_code=503,
@@ -44,6 +45,7 @@ async def query(
         resource_type="query",
         resource_id=correlation_id,
         extra_data={"question": request.question},
+        user_id=user_id,
     )
 
     return QueryResponse(answer=answer, correlation_id=correlation_id)

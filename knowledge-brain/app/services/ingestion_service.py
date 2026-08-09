@@ -1,6 +1,7 @@
 from app.core.config import get_settings
 from app.models.document import Chunk, Document, DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.services.chunking import chunk_text
 from app.services.embedding import embed_chunks
 from app.services.extraction import extract_text
@@ -17,12 +18,14 @@ class IngestionService:
     its own file and knows nothing about the others.
     """
 
-    def __init__(self, repository: DocumentRepository) -> None:
+    def __init__(self, repository: DocumentRepository, permission_repository: PermissionRepository) -> None:
         self.repository = repository
+        self.permission_repository = permission_repository
 
-    async def ingest_document(self, filename: str, content: bytes) -> Document:
+    async def ingest_document(self, filename: str, content: bytes, user_id: str) -> Document:
         """Extract, chunk, embed, and save one uploaded file end to end."""
         document = await self.repository.create_document(filename)
+        await self.permission_repository.grant_access(document.id, user_id)
 
         try:
             text = extract_text(filename, content)

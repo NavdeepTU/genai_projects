@@ -914,6 +914,100 @@ upfront about, not something to imply is broader than it actually is.
 
 ---
 
+## Feature 10: Document-Level Access Control
+
+**What does this feature do, in one sentence?**
+Every uploaded document is now visible only to users explicitly granted
+access to it, enforced by filtering the database query itself at
+retrieval time — not by hiding results after they've already been
+fetched.
+
+```mermaid
+flowchart LR
+    REQ[Request + X-User-Id] --> CHECK{Header present?}
+    CHECK -->|no| REJECT[401, audit logged]
+    CHECK -->|yes| ROUTE[Upload or query]
+    ROUTE --> UP[Upload: auto-grant<br/>the uploader access]
+    ROUTE --> Q[Query: search joined<br/>against permissions table]
+    Q --> RESULT[Only accessible chunks<br/>ever ranked or returned]
+```
+
+**`CLAUDE.md` asks this directly: how does document-level ACL interact
+with the vector retrieval step?**
+The permission check lives inside the same SQL query that does the
+similarity search — a join against a `document_permissions` table,
+applied *before* the `ORDER BY` and the `LIMIT`, not as a filter on the
+results afterward. That ordering matters: filtering after ranking risks
+returning fewer results than requested — or none — even when plenty of
+accessible chunks existed just outside an unfiltered top-N. Filtering
+first means the ranking only ever happens over chunks the user could
+already see.
+
+**Why a plain `X-User-Id` header instead of real login?**
+This project has no user model yet — real auth (passwords, sessions)
+is a much later build-order item. A `user_id` string is a lightweight
+stand-in, the same move MCP made with its shared API key: enough to
+make "does this user have access" a real, checkable question now,
+without waiting on a feature that's still far off. It's self-asserted,
+not authenticated — a real, named limitation, not a hidden one.
+
+**Why middleware instead of a per-route dependency?**
+Identity needed to cover MCP too, and MCP tools aren't FastAPI routes —
+they can't use route-level dependency injection the way `/query` and
+`/documents/upload` can. Middleware wraps the *entire* app, so the same
+mechanism that already gave MCP a correlation ID for free extends to
+identity with no special-casing per entry point.
+
+**Walk me through the two bugs live testing caught here that a code
+review of `_retrieve_node` wouldn't have.**
+Both came from the same root cause: a new permission check protects
+exactly the function it was added to, nothing else that happens to read
+the same data. First, `DocumentGraphService.build_references` — which
+searches every document at ingestion time to find cross-document
+references — crashed against the newly-required `user_id` parameter.
+Fixed with a separate, explicitly unrestricted search method, since
+building the reference graph is a system-level fact about documents,
+not a view scoped to the uploader. Second, and more serious: the
+graph-context feature's snippet lookup, `get_first_chunk_text`, had *no
+permission check at all* — a real path where a user could receive
+content from a document they were never granted access to, as long as
+some document they could see happened to reference it. Neither was
+visible from reading the primary retrieval path alone; both surfaced
+only once the feature was exercised end to end.
+
+**What's the actual lesson from those two bugs, for a system design
+question?**
+There is no single central gate protecting all chunk access in this
+system. Every function that reads chunk content needs its own explicit
+permission check — adding one to `find_similar_chunks` protects
+exactly `find_similar_chunks`. A future feature reading chunks through
+yet another new path would need this applied again, deliberately; it
+isn't inherited automatically just because a similar check exists
+elsewhere in the codebase.
+
+**Who's allowed to share a document with someone else, and why that
+rule?**
+Anyone who currently has access can grant it to someone else — not
+only the original uploader. The permissions table has no concept of
+"owner" versus "was granted access later," every row looks the same,
+so this was the simpler rule to build now. The real trade-off: a
+document can be re-shared indefinitely, with no way for the original
+uploader to see or stop it. Accepted deliberately for this pass, not
+something to carry into a real multi-tenant deployment without adding
+ownership tracking first.
+
+**What would you change here if this needed to handle 10x more
+documents and users?**
+The permission join needs its own index to stay cheap — `(user_id,
+document_id)`, which the unique constraint on the table already
+provides for free. Without it, every single question asked would pay a
+full table scan on `document_permissions` on top of the existing
+vector and keyword search cost, on every request, forever — not a
+one-time migration cost, a permanent tax on every query going forward.
+*Further reading: [OWASP's "Broken Access Control," the #1 risk in the OWASP Top 10:2021](https://owasp.org/Top10/A01_2021-Broken_Access_Control/), the industry-standard reference for exactly this class of vulnerability.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**
@@ -960,3 +1054,14 @@ detection down — fail closed: block the action rather than proceed
 unverified. It's not a project-wide rule, it's a per-check judgment
 call based on what's actually at risk, which is why this same project
 uses both: fail open for quality, fail closed for compliance.
+
+**What's the difference between identity and authentication?**
+Identity is who a request *claims* to be; authentication is *proving*
+that claim is true. This project has identity without authentication —
+every request carries an `X-User-Id`, but nothing verifies that value
+is genuine, only that it's present. That's a real, deliberate
+limitation for a project with no real users yet, not a mistake — the
+same trade-off MCP's shared secret already made. Real authentication
+means the claim can't just be typed in: a password only the real user
+knows, a session token issued after proving it, something that costs
+an attacker real effort to forge.

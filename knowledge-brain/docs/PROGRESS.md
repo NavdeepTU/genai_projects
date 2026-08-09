@@ -1070,3 +1070,132 @@ test coverage — not just a checklist item. Rough remaining effort:
 (item 16) — the frontend and Azure deployment remain the two largest
 untouched chunks. At 3–4 hours/day, that's roughly 18–24 working days
 left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-09 — Feature 10: Document-level access control
+
+### What we built
+- **Document-level access control, build-order item 8**, motivated the
+  same concrete way PII detection was: with MCP and the REST endpoint
+  both live, uploaded documents are genuinely confidential material
+  with nothing yet restricting who could retrieve them. Chose to solve
+  the "no user model exists yet" prerequisite gap the same way MCP
+  solved its own auth gap last month — a lightweight `user_id` stand-in
+  built as the first chunk of this feature itself, not as separate,
+  deferred prerequisite work.
+- **Identity middleware** (`app/core/middleware.py`), mirroring
+  `correlation_id_middleware`'s `ContextVar` pattern exactly, chosen
+  specifically because it needed to cover MCP too, and MCP tools can't
+  use FastAPI's route-level `Depends()`. A missing `X-User-Id` header
+  is rejected outright with a 401 — unlike a correlation ID, an
+  identity can't be safely invented. `/docs`, `/openapi.json`, and
+  `/redoc` stay exempt so Swagger UI remains browsable.
+- **Found live: FastAPI's middleware order is reversed from the
+  intuitive reading** — the *last*-registered middleware ends up
+  *outermost*. `correlation_id_middleware` had to move to last, not
+  first, so it still wraps and stamps a header even on a 401
+  rejection, closing a gap where rejected requests briefly had no
+  correlation ID at all — a direct violation of `CLAUDE.md`'s own
+  "every response includes one" rule.
+- **A scope addition raised mid-session, not originally planned:**
+  rejected requests now get their own audit log entry
+  (`action="access_denied"`), after directly weighing whether "nothing
+  happened, so nothing to log" was the right call for a
+  security-relevant rejection versus a routine business action.
+- **The audit log's `user_id` column — present since `ADR-008`, never
+  once populated** — is now filled in on every `document_upload`,
+  `query_made`, and the new `permission_granted` action.
+- **`document_permissions` table + repository**: one row per
+  (document, user) grant, `grant_access` idempotent via
+  `ON CONFLICT DO NOTHING` (not check-then-insert, to avoid a race
+  between two concurrent grants), `has_access` a plain existence
+  check. Uploading a document auto-grants the uploader, unconditionally,
+  *before* the ingestion `try` block — survives regardless of whether
+  the document ends up ready, failed, or pending review.
+- **A new sharing endpoint**, `POST /documents/{id}/access` — the
+  simplest available rule chosen deliberately: anyone who currently
+  has access can grant it to someone else, not only the original
+  uploader, since the permissions table has no ownership concept to
+  fall back to. Accepted as a real, named scope trade-off, not an
+  oversight.
+- **The actual enforcement**: `find_similar_chunks` and `find_by_keyword`
+  now join against `document_permissions`, filtered *before* the
+  ranking and the `LIMIT` — the same reasoning `ADR-012` already used
+  to avoid silently truncating results by filtering too late.
+- **Two real bugs found live, both from the same root cause** — a new
+  permission check protects exactly the function it was added to nothing
+  else that happens to read the same data: (1) `DocumentGraphService.build_references`
+  crashed against the newly-required parameter; fixed with a
+  deliberately separate, permission-agnostic `find_by_keyword_unrestricted`,
+  since reference-graph-building is a system-wide fact about documents,
+  not a user-scoped retrieval. (2) **A real security gap** —
+  `get_first_chunk_text`, the function behind graph-context snippets,
+  had *no permission check at all*. A user could receive content from
+  a document they were never granted access to, as long as some
+  document they could see happened to reference it. Neither bug was
+  visible from reading `_retrieve_node` alone; both surfaced only once
+  the feature was exercised end to end.
+- **Verified live, fully, through every path**: a document owner gets
+  a correct answer; a second user with no grant gets "I don't know"
+  for the identical question; granting access makes the same question
+  succeed immediately after; every document uploaded before this
+  feature existed is now correctly invisible to everyone, including
+  its own uploader, until re-granted — a consequence flagged and
+  predicted before it was ever observed, not a surprise afterward.
+- Documented in [`ADR-019`](adr/ADR-019-document-level-access-control.md).
+
+### What I struggled with
+- Missed one planted-error explain-back this session (the `/mcp`
+  exemption claim — whether `PUBLIC_PATHS` accidentally covered MCP
+  too), corrected cleanly on request. Correctly caught several others
+  without missing: the `ON CONFLICT DO NOTHING`-versus-`has_access`
+  enforcement question, the `_rewrite_node`/retry-loop state-merging
+  question (twice, once abstractly and once when asked to restate it
+  concretely), and the audit-log validation-error claim.
+- One explain-back answer needed re-explaining in more concrete,
+  step-by-step terms (SQL as a single declarative condition versus a
+  procedural loop) before it landed — the librarian/keycard analogy
+  worked where the first, more abstract phrasing hadn't.
+- Briefly asked to stop mid-explanation; resumed a short while later
+  with a clarifying question instead of the original explain-back,
+  which was answered directly rather than re-pushed.
+- After the feature was fully built and verified, correctly identified
+  from memory (unprompted) that `_rewrite_node`'s partial-dict return
+  meant `user_id` survives a retry unchanged — a right answer to a
+  question that hadn't been asked yet, showing real internalization of
+  how LangGraph state merging works, not just this feature's specifics.
+
+### Concepts to revisit
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  unanswered, many sessions running now.
+- Whether "anyone with access can share further" should be replaced
+  with ownership tracking — an open, deliberately deferred design
+  question, not a misunderstanding.
+
+### What's next
+- API gateway (build-order item 9) is next if the build order is
+  followed strictly.
+- No automated tests yet for anything built this session — the
+  identity middleware, the permission repository, or the retrieval-time
+  joins. Same standing gap as MCP and PII detection before it.
+- The self-asserted `X-User-Id` (no real authentication behind it) and
+  the unbounded re-sharing rule are both named, accepted limitations,
+  not fixed — waiting on build-order item 14 for the former, an open
+  design question for the latter.
+- `CLAUDE.md` grew a new build-order item since last session — item 17,
+  multi-agent federated retrieval, with its own Enterprise Requirement
+  and a new "Multi-agent retrieval" section in the `ARCHITECTURE.md`
+  template. Not started; now factored into the completion estimate
+  below.
+
+**Estimated completion: ~43% of the total project, by weighted effort**
+— up from ~40% last session. 10 of 17 build-order items are done (the
+denominator grew by one, since item 17 was added externally this
+session). Rough remaining effort: ~77 hours across the test suite, real
+auth/multi-tenancy (item 14), API Management, Azure deployment, the
+frontend, guardrails (item 16), and multi-agent federated retrieval
+(item 17) — the frontend and Azure deployment remain the two largest
+untouched chunks, and item 17 is a genuinely large addition to the
+remaining pool, not a small one. At 3–4 hours/day, that's roughly
+20–26 working days left, assuming no scope changes.

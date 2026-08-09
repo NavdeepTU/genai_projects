@@ -6,11 +6,12 @@ from mcp.server.mcpserver import MCPServer
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import AsyncSessionLocal
 from app.core.graph_database import driver as graph_driver
-from app.core.middleware import get_correlation_id
+from app.core.middleware import get_correlation_id, get_current_user_id
 from app.models.document import DocumentStatus
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
 from app.services.ingestion_service import IngestionService
@@ -33,11 +34,12 @@ mcp = MCPServer(name="knowledge-brain")
 )
 async def ask_knowledge_base(question: str) -> str:
     """Wrap RetrievalService.answer_question() as a tool an MCP client can call directly."""
+    user_id = get_current_user_id()
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
         try:
-            answer = await service.answer_question(question)
+            answer = await service.answer_question(question, user_id)
         except (CircuitOpenError, RetrievalUnavailableError):
             return "The knowledge base is temporarily unavailable. Please try again in a moment."
 
@@ -48,6 +50,7 @@ async def ask_knowledge_base(question: str) -> str:
             resource_type="query",
             resource_id=correlation_id,
             extra_data={"question": question},
+            user_id=user_id,
         )
 
         return answer
@@ -68,10 +71,11 @@ async def upload_document(filename: str, content_base64: str) -> str:
         return "Only .pdf and .txt files are supported."
 
     content = base64.b64decode(content_base64)
+    user_id = get_current_user_id()
 
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
-        service = IngestionService(DocumentRepository(db))
-        document = await service.ingest_document(filename, content)
+        service = IngestionService(DocumentRepository(db), PermissionRepository(db))
+        document = await service.ingest_document(filename, content, user_id)
 
         correlation_id = get_correlation_id()
         await AuditRepository(db).log_action(
@@ -80,6 +84,7 @@ async def upload_document(filename: str, content_base64: str) -> str:
             resource_type="document",
             resource_id=str(document.id),
             extra_data={"filename": document.filename, "status": document.status.value},
+            user_id=user_id,
         )
 
         if document.status == DocumentStatus.READY:

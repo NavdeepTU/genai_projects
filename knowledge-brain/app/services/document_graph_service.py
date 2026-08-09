@@ -23,7 +23,7 @@ class DocumentGraphService:
         mentions = await extract_references(text)
 
         for mention in mentions:
-            matches = await self.repository.find_by_keyword(mention, limit=5)
+            matches = await self.repository.find_by_keyword_unrestricted(mention, limit=5)
             other_document_match = next(
                 (chunk for chunk in matches if chunk.document_id != document.id), None
             )
