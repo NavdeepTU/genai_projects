@@ -11,7 +11,11 @@ goal is to say them back naturally, in your own words, not recite them.
 **What does this feature do, in one sentence?**
 It takes an uploaded file, pulls the text out of it, cuts that text into
 small pieces, turns each piece into a list of numbers representing its
-meaning, and saves everything to the database.
+meaning, and saves everything to the database — the *original* core of
+ingestion. Since extended by PII detection (Feature 9, a check that runs
+before any of this) and access control (Feature 10, a grant that runs
+right after); see "Putting it all together" near the end of this document
+for the full pipeline exactly as it runs today.
 
 ```mermaid
 flowchart LR
@@ -96,7 +100,13 @@ request is slow."
 **What does this feature do, in one sentence?**
 It takes a question, turns it into the same kind of meaning-vector as our
 stored chunks, finds the chunks whose meaning is closest to the question,
-and asks an LLM to answer using only those chunks.
+and asks an LLM to answer using only those chunks — the *original* core
+of retrieval, a single vector search. Since extended by hybrid search
+(Feature 3, adds keyword search alongside vector search), reranking
+(Feature 4), the LangGraph retry loop (Feature 5), graph context
+(Feature 6), and access control (Feature 10, filters every search
+below); see "Putting it all together" near the end of this document for
+the full pipeline exactly as it runs today.
 
 ```mermaid
 flowchart LR
@@ -1007,6 +1017,96 @@ one-time migration cost, a permanent tax on every query going forward.
 *Further reading: [OWASP's "Broken Access Control," the #1 risk in the OWASP Top 10:2021](https://owasp.org/Top10/A01_2021-Broken_Access_Control/), the industry-standard reference for exactly this class of vulnerability.*
 
 ---
+
+## Putting it all together — the full pipelines today
+
+Each feature section above teaches one decision in isolation. This
+section is the piece none of them cover on its own: saying the *whole*
+current pipeline back, in the right order, out loud — which is what an
+interviewer actually asks for with "walk me through what happens when
+a user uploads a document" or "walk me through what happens when a
+user asks a question." Every step below names the feature that
+introduced it, so nothing here is new information — it's the same
+facts from Features 1–10, in sequence.
+
+### The full ingestion pipeline, end to end
+
+```mermaid
+flowchart TD
+    A[Request arrives, REST or MCP] --> B{X-User-Id header present? — F10}
+    B -->|no| C[401, audit logged as access_denied]
+    B -->|yes| D[File type checked, .pdf/.txt only — F1]
+    D --> E[Document row created, status pending — F1]
+    E --> F[Uploader auto-granted access, unconditional — F10]
+    F --> G[Text extracted from the file — F1]
+    G --> H{PII check against 14-category allowlist — F9}
+    H -->|found| I[pending_review, pii_detected true, stop here]
+    H -->|Azure unavailable| J[failed, fails closed rather than skip the check]
+    H -->|clean| K[Text split into overlapping chunks — F1]
+    K --> L[Chunks embedded, one batch call — F1]
+    L --> M[Chunks and document saved, status ready — F1]
+    M --> N[Reference extraction, then a system-wide keyword<br/>lookup, not permission-filtered — F6, refined F10]
+    N --> O[REFERENCES edges written to Neo4j, best-effort — F6]
+    O --> P[Audit log entry: document_upload, with user_id — F10]
+    P --> Q[Response returned with correlation_id]
+```
+
+Said out loud: a request has to carry an identity or it's rejected
+before anything else runs — that's the newest layer, sitting in front
+of everything. Past that gate, the file type gets checked, a document
+row gets created, and the uploader is immediately granted access to
+it, no matter what happens next. Text comes out of the file, and
+before any of it is chunked or embedded, it gets checked for personal
+information — a hit holds the document for review and stops the
+pipeline right there; Azure itself being unreachable fails the same
+way, closed, not skipped. Only clean text continues: chunked, embedded,
+saved, marked ready. One last best-effort step looks for other
+documents this one references and links them in Neo4j — deliberately
+not scoped to the uploader's own permissions, since that's a fact
+about the documents, not a view of what one user can see. Then it's
+logged and returned.
+
+### The full retrieval pipeline, end to end
+
+```mermaid
+flowchart TD
+    A[Request arrives, REST or MCP] --> B{X-User-Id header present? — F10}
+    B -->|no| C[401, audit logged as access_denied]
+    B -->|yes| D[Question embedded — F2]
+    D --> E[Vector search, top 20 — F2]
+    D --> F[Keyword search, top 20 — F3]
+    E --> G[Both joined against document_permissions,<br/>filtered before ranking, not after — F10]
+    F --> G
+    G --> H{Both searches failed?}
+    H -->|yes| I[503, search unavailable]
+    H -->|no| J[Merged with Reciprocal Rank Fusion — F3]
+    J --> K[Reranked via Voyage, top 5 plus a relevance score — F4]
+    K --> L{Score weak and first attempt<br/>and reranker available? — F5}
+    L -->|yes| M[LLM rewrites the question, retry from search —<br/>user_id and original question both untouched — F5, F10]
+    M --> D
+    L -->|no| N[Graph context: one hop via Neo4j, same<br/>permission join as the primary search — F6, F10]
+    N --> O[LLM answers from original question plus<br/>reranked chunks plus graph snippets — F2]
+    O --> P[Audit log entry: query_made, with user_id — F10]
+    P --> Q[Response returned with correlation_id]
+```
+
+Said out loud: same identity gate up front. The question gets embedded
+and searched two ways at once, meaning and exact keywords, and both
+searches are restricted to documents this user can actually see before
+either one ranks anything — not filtered afterward. The two ranked
+lists merge, get reranked by a model that looks at the question and
+each candidate together, and if the best result is still weak on the
+very first attempt, the question gets rewritten once and the whole
+search runs again — the user's identity and their original wording
+both survive that loop untouched, since neither one is something the
+retry step ever returns. Once there are chunks worth using, one hop of
+graph context gets pulled in from whatever those chunks' documents
+reference — filtered by the same permission check, so a referenced
+document this user can't see contributes nothing. Everything — the
+chunks, the graph snippets, and the question exactly as the user
+originally asked it, never the rewritten version — goes to the LLM,
+which is told to admit it doesn't know rather than guess. Then it's
+logged and returned.
 
 ## General concepts worth being able to explain from memory
 
