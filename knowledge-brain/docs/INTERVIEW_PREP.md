@@ -103,7 +103,7 @@ flowchart LR
     Q[Question] --> QEMB[Embed question]
     QEMB --> SEARCH[Find closest chunks<br/>by cosine similarity]
     SEARCH --> LLM[LLM: answer using<br/>only these chunks]
-    LLM --> ANS[Grounded answer,<br/>or "I don't know"]
+    LLM --> ANS[Grounded answer,<br/>or admits it doesn't know]
 ```
 
 **Why do we compare vectors instead of just comparing the question's raw
