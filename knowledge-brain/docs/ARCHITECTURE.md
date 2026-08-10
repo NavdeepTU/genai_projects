@@ -933,12 +933,21 @@ build-order item 14 actually existing. See ADR-017.
 
 ## Azure infrastructure overview
 
-Nothing described in this section is actually running yet — it
-describes what Terraform is *configured* to create, not what currently
-exists in Azure. `terraform apply` hasn't been run. This is genuinely
-in-progress work, not a finished feature, which is also why it has no
-ADR yet — one gets written once this is deployed and verified live,
-matching how every other feature in this project has been documented.
+The infrastructure described in this section is now genuinely running
+in Azure, not just configured on paper. `terraform apply` succeeded,
+and the Container App's public URL was verified directly with `curl`
+— a real `200` response, not just a clean Terraform exit code. See
+[ADR-020](adr/ADR-020-azure-deployment-infrastructure.md) for the full
+decision record, including five distinct real errors hit and fixed
+along the way.
+
+What's still missing is the application itself: the Container App is
+running a small public placeholder image, not the FastAPI backend.
+Build-order item 10 (Azure deployment) is therefore infrastructure-complete
+but not feature-complete — a `Dockerfile` hasn't been written yet, no
+real image has been built or pushed, and nothing in Key Vault has real
+secret values in it. That work continues in a future session before
+API Management (item 9) can follow.
 
 The infrastructure lives in `infra/`, following the exact layout
 `CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
@@ -988,11 +997,25 @@ gateway that's supposed to sit in front of it — since a gateway needs
 something real to route to. This is meant to be tightened the moment
 APIM exists, not left as a permanent state.
 
-Still ahead before this is a real, verified deployment: a `Dockerfile`
-(doesn't exist yet), actually running `terraform apply`, populating
-Key Vault with real secret values, building and pushing a real image,
-swapping the placeholder image reference for it, and a GitHub Actions
-pipeline to automate that last step going forward.
+Getting the real infrastructure up took five distinct, real errors,
+each with a different root cause — a subscription-level regional
+restriction on Postgres that Azure's own error message described
+misleadingly, a provider bug that created two resources successfully
+in Azure but failed to record them in Terraform's state (fixed with
+`terraform import`, reconciling state with reality by hand), Postgres
+silently drifting its own availability zone after creation, and the
+placeholder image itself listening on a different port than the one
+originally configured. None were anticipated in the design — all were
+diagnosed from real evidence (`az` CLI output, official docs, or
+GitHub issue threads), not guessed at. Full details in
+[ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
+
+Still ahead before this build-order item is actually finished: a
+`Dockerfile` (doesn't exist yet), populating Key Vault with real
+secret values, building and pushing a real image, swapping the
+placeholder image reference for it (and reverting the ingress port
+back from its current temporary value), and a GitHub Actions pipeline
+to automate that last step going forward.
 
 ## Glossary
 
@@ -1247,3 +1270,16 @@ own dedicated access-policy system. Granting permission through one
 system has no effect on the other — an identity with full Key Vault
 access still has zero access to anything gated by RBAC until granted
 that separately.
+
+**Terraform state** — Terraform's own record of what it believes
+exists in the real world, stored separately from the actual cloud
+resources themselves. Normally kept in sync automatically after every
+`apply`, but a failure at the wrong moment (a network drop, a provider
+bug) can create a real resource in Azure without recording it, leaving
+state and reality out of sync until someone reconciles them by hand.
+
+**`terraform import`** — the command that reconciles state with
+reality: it takes a resource that already exists in the cloud (found
+by its Azure resource ID) and adds it into Terraform's state without
+creating anything new, so the next `plan` stops trying to recreate
+something that's already there.

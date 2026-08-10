@@ -1036,6 +1036,91 @@ one-time migration cost, a permanent tax on every query going forward.
 
 ---
 
+## Feature 11: Azure Deployment — Infrastructure Phase (in progress)
+
+**What does this feature do, in one sentence?**
+Provisions the real cloud infrastructure this backend will eventually
+run on — resource group, Postgres, Key Vault, a container registry, and
+a Container App — via Terraform, currently running a placeholder image
+while the real backend's Dockerfile and CI/CD pipeline are still ahead.
+
+```mermaid
+flowchart TB
+    TF[terraform apply] --> RG[Resource Group]
+    RG --> PG[Postgres Flexible Server<br/>pgvector allow-listed]
+    RG --> KV[Key Vault]
+    RG --> ACR[Container Registry]
+    RG --> ENV[Container Apps Environment]
+    ENV --> APP[Container App]
+    ID[Managed Identity] -->|Get/List secrets| KV
+    ID -->|AcrPull role| ACR
+    APP -->|wears| ID
+    ACR -.->|placeholder image today,<br/>real image later| APP
+    APP -->|public URL| USER[curl verification: HTTP 200]
+```
+
+**Why deploy the backend before building API Management, when
+`CLAUDE.md`'s own build order lists the gateway first?**
+A gateway needs something real to route to. Nothing ran in Azure at
+all before this phase, so API Management would have had no backend to
+sit in front of yet. This is a deliberate, reasoned swap of build-order
+items 9 and 10, not skipping ahead — the dependency direction only goes
+one way.
+
+**Why is the Container App's ingress public right now, when Enterprise
+Requirement 1 says the backend should never be exposed directly to the
+internet?**
+Named and accepted as a temporary, deliberate trade-off, not an
+oversight: with no API Management layer yet, there'd be no way to
+verify the deployment worked at all without a reachable URL to test
+against. It gets tightened the moment item 9 exists.
+
+**Walk me through a real failure this phase hit and how it got
+diagnosed — not from documentation, from an actual error.**
+Postgres failed with `ParameterOutOfRange: Version should be in: []` —
+which reads like a version-support problem, and the natural first
+instinct (try a different Postgres version) didn't fix it. The real
+cause, confirmed with `az postgres flexible-server list-skus --location
+eastus`, was a subscription-level restriction on provisioning that
+resource in `eastus` at all — an empty supported-version list because
+the *region*, not the version, was the actual constraint. Fixed by
+switching to `centralus`, verified unrestricted the same way before
+trusting it.
+
+**What's the general, reusable lesson from that, beyond this one
+Postgres server?**
+A subscription being allowed to use a service doesn't mean every region
+is open for it. `az <service> list-skus --location <region>` is the
+concrete way to check that *before* assuming a region will work, rather
+than reverse-engineering a misleading error message after the fact.
+
+**A different failure left Terraform's state out of sync with what
+was actually in Azure. How, and how do you fix that class of
+problem?**
+A documented AzureRM provider bug ("Provider produced inconsistent
+result after apply... Root object was present, but now absent") caused
+two resources to be created successfully in Azure while the provider
+failed to record them in Terraform's own state file. The fix is
+`terraform import`: given the resource's real Azure ID, it gets added
+into state without creating anything new, so the next plan stops trying
+to recreate something that already exists. More generally, this is why
+teams run `terraform plan` in CI before every merge — to catch state
+drift early, before it silently accumulates.
+
+**What would you change here if this needed to run in a real team,
+not a solo project?**
+`terraform plan` in CI on every pull request, so state drift and
+unintended changes surface before merge, not after a teammate's next
+`apply` collides with someone else's untracked change. Remote state
+(an Azure Storage backend, not a local state file) would also become
+mandatory the moment more than one person runs Terraform against the
+same infrastructure — a local state file has no locking and no shared
+source of truth.
+
+*Further reading: [Terraform's own documentation on `import`](https://developer.hashicorp.com/terraform/cli/import) and [on remote state](https://developer.hashicorp.com/terraform/language/state/remote), both from HashiCorp's official docs.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

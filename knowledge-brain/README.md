@@ -68,10 +68,19 @@ and why it was made that way.
   table before results are ever ranked, not after. See
   [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
 
-**Not built yet:** an API gateway, Azure deployment, the frontend, and
-full auth/multi-tenancy (today's identity is a self-asserted header,
-not real authentication). See `CLAUDE.md`'s build order for the full
-plan.
+**In progress:**
+- **Azure deployment — infrastructure phase** — a Terraform module
+  (`infra/`) provisions a resource group, Postgres Flexible Server,
+  Key Vault, a container registry, and a Container App in Azure, wired
+  together with a Managed Identity instead of any raw secret. Deployed
+  and verified live — the Container App's public URL returns a real
+  HTTP 200 — but it's still running a placeholder image, not this
+  backend. See [`ADR-020`](docs/adr/ADR-020-azure-deployment-infrastructure.md).
+
+**Not built yet:** a `Dockerfile` and CI/CD to get the real backend
+running in Azure, an API gateway, the frontend, and full
+auth/multi-tenancy (today's identity is a self-asserted header, not
+real authentication). See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,

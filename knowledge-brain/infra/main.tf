@@ -47,12 +47,21 @@ resource "azurerm_postgresql_flexible_server" "main" {
   name                   = "${var.project_name}-${var.environment}-pg"
   resource_group_name    = azurerm_resource_group.main.name
   location               = azurerm_resource_group.main.location
-  version                = "16"
+  version                = "15"
   administrator_login    = var.postgres_admin_username
   administrator_password = var.postgres_admin_password
   storage_mb             = 32768
   sku_name                = "B_Standard_B1ms"
   tags                    = local.common_tags
+
+  # Azure assigns/manages the availability zone dynamically after creation;
+  # without this, Terraform keeps trying to "correct" a value it shouldn't
+  # be fighting over — a documented AzureRM provider limitation, not a
+  # mistake in this config. See registry.terraform.io's own notes on this
+  # resource, and hashicorp/terraform-provider-azurerm#25538.
+  lifecycle {
+    ignore_changes = [zone]
+  }
 }
 
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_azure_services" {
@@ -138,7 +147,10 @@ resource "azurerm_container_app" "backend" {
 
   ingress {
     external_enabled = true
-    target_port      = 8000
+    # TEMPORARY: 80 matches the placeholder image's port, just to verify
+    # connectivity end-to-end. Must change back to 8000 (our app's real
+    # port) the moment the real image replaces the placeholder.
+    target_port      = 80
     transport         = "http"
 
     traffic_weight {

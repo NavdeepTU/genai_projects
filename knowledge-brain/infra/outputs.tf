@@ -27,3 +27,13 @@ output "managed_identity_principal_id" {
   description = "Needed to grant this identity further roles later, e.g. permission to pull images from the container registry."
   value       = azurerm_user_assigned_identity.backend.principal_id
 }
+
+output "backend_url" {
+  description = "The Container App's public URL — the one thing needed to actually check whether the placeholder (or, later, our real backend) is reachable."
+  value       = "https://${azurerm_container_app.backend.latest_revision_fqdn}"
+}
+
+output "container_registry_login_server" {
+  description = "Needed later to tag and push our own image, once we're ready to replace the placeholder."
+  value       = azurerm_container_registry.main.login_server
+}

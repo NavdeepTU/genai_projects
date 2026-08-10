@@ -13,6 +13,8 @@
     --done-soft: #E3F3EA;
     --pending: #7A8492;
     --pending-soft: #ECEEF1;
+    --partial: #B7791F;
+    --partial-soft: #FBF0DD;
     --shadow: 0 1px 2px rgba(27,34,43,0.06), 0 8px 24px -12px rgba(27,34,43,0.12);
   }
 
@@ -30,6 +32,8 @@
       --done-soft: #16301F;
       --pending: #838D9B;
       --pending-soft: #262B33;
+      --partial: #E0A94D;
+      --partial-soft: #332A16;
       --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
     }
   }
@@ -46,6 +50,8 @@
     --done-soft: #16301F;
     --pending: #838D9B;
     --pending-soft: #262B33;
+    --partial: #E0A94D;
+    --partial-soft: #332A16;
     --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
   }
   :root[data-theme="light"] {
@@ -61,6 +67,8 @@
     --done-soft: #E3F3EA;
     --pending: #7A8492;
     --pending-soft: #ECEEF1;
+    --partial: #B7791F;
+    --partial-soft: #FBF0DD;
     --shadow: 0 1px 2px rgba(27,34,43,0.06), 0 8px 24px -12px rgba(27,34,43,0.12);
   }
 
@@ -138,6 +146,7 @@
     background: transparent;
     border: 1.5px dashed var(--pending);
   }
+  .dot.partial { background: var(--partial); }
 
   section.block {
     display: flex;
@@ -215,6 +224,7 @@
 
   .status-pill.done { background: var(--done-soft); color: var(--done); }
   .status-pill.pending { background: var(--pending-soft); color: var(--ink-muted); }
+  .status-pill.partial { background: var(--partial-soft); color: var(--partial); }
 
   .arrow {
     flex: none;
@@ -313,11 +323,12 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 10 of 17 features complete</p>
+      <p class="eyebrow">Knowledge Brain · 10 of 17 features complete · 1 in progress</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
       <span class="legend-item"><span class="dot done"></span>Built</span>
+      <span class="legend-item"><span class="dot partial"></span>In progress</span>
       <span class="legend-item"><span class="dot pending"></span>Not started</span>
     </div>
   </header>
@@ -742,11 +753,58 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> a document owner gets a correct answer; a second user with no grant gets "I don't know" for the identical question; granting access makes the same question succeed; every document uploaded before this feature existed is now correctly invisible to everyone, including its own uploader, until re-granted. Two real bugs found only by exercising this live, not by reading <code>_retrieve_node</code>: <code>DocumentGraphService.build_references</code> crashed against the new required parameter (fixed with a deliberately unrestricted search, since reference-building is a system-wide fact, not a user-scoped view), and <code>get_first_chunk_text</code> — the function behind graph-context snippets — had no permission check at all, a real content-leak path closed with the same join everywhere else uses. See ADR-019.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 10 — Azure deployment <span class="status-pill partial" style="margin-left: 0.3rem;">In progress</span></h2>
+      <span class="count">3 of 5 built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Terraform infrastructure</span>
+        <span class="path mono">infra/main.tf · resource group, Postgres, Key Vault, ACR, Container App</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Managed Identity + RBAC wiring</span>
+        <span class="path mono">Key Vault access policy · AcrPull role assignment</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Live deployment verified</span>
+        <span class="path mono">terraform apply succeeded · curl confirms HTTP 200</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill pending">Pending</span>
+        <span class="label">Dockerfile + real image</span>
+        <span class="path mono">Container App still runs a public placeholder image</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill pending">Pending</span>
+        <span class="label">GitHub Actions CI/CD</span>
+        <span class="path mono">image build/push, automated deploy on every merge</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> real infrastructure exists in Azure, not just a clean Terraform plan — its public URL was curled directly and returned a real HTTP 200. Five distinct real errors were diagnosed and fixed along the way, not anticipated in the design: a misleadingly-worded Postgres error that was actually a subscription-level regional restriction (confirmed with <code>az postgres flexible-server list-skus</code>), a provider bug that created two resources in Azure without recording them in Terraform's state (fixed with <code>terraform import</code>), Postgres availability-zone drift (fixed with a <code>lifecycle</code> block), and a port mismatch between the placeholder image and the configured ingress. The Container App still runs a placeholder image, not the real backend — Enterprise Requirement 1's public-ingress trade-off is named and temporary, to be tightened once API Management exists. See ADR-020.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
       <li><span class="n mono">09</span>API gateway (Azure API Management)</li>
-      <li><span class="n mono">10</span>Azure deployment (Terraform + CI/CD)</li>
       <li><span class="n mono">11</span>Frontend dashboard</li>
       <li><span class="n mono">12</span>Auth &amp; multi-tenancy hardening</li>
       <li><span class="n mono">13</span>LLM/RAG observability</li>

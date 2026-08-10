@@ -16,9 +16,9 @@ variable "team" {
 }
 
 variable "azure_region" {
-  description = "Which Azure region to deploy into."
+  description = "Which Azure region to deploy into. eastus was tried first and found to be restricted for Postgres Flexible Server on this subscription (confirmed via az postgres flexible-server list-skus); centralus is not."
   type        = string
-  default     = "eastus"
+  default     = "centralus"
 }
 
 variable "postgres_admin_username" {

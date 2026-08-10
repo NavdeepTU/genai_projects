@@ -1383,3 +1383,104 @@ multi-agent federated retrieval (item 17) — the frontend remains the
 single largest untouched chunk now that deployment is underway. At
 3–4 hours/day, that's roughly 18–24 working days left, assuming no
 scope changes.
+
+## Session: 2026-08-10 (continued) — Azure deployment, phase 2: infrastructure deployed and verified live
+
+### What we built
+- **Ran `terraform apply` for real**, against the module designed last
+  session, and worked through it to a genuine, verified-live success —
+  not a clean plan, an actual reachable Azure deployment.
+- **Five distinct real errors, each diagnosed from evidence, not
+  guesswork**, fully written up in
+  [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md):
+  1. Postgres failed with `ParameterOutOfRange: Version should be in: []`
+     — looked like a version-support issue at first (tried dropping
+     from version 16 to 15, which didn't fix it), but the real cause,
+     confirmed with `az postgres flexible-server list-skus --location
+     eastus`, was a subscription-level restriction on provisioning
+     Flexible Server in `eastus` at all. Fixed by switching the default
+     region to `centralus`, verified to be unrestricted the same way.
+  2. Key Vault failed with a connection reset mid-`apply`, coinciding
+     with the user's laptop losing power — diagnosed as a transient
+     network interruption during Key Vault's own polling, not a config
+     problem; a plain retry succeeded.
+  3. Both the firewall rule and the Container App failed with "Provider
+     produced inconsistent result after apply... Root object was
+     present, but now absent" — confirmed via a GitHub issue thread
+     (`gh issue view 27087`) as a known AzureRM provider bug: the
+     resource is genuinely created in Azure, but the provider fails to
+     record it in Terraform's state. Fixed with `terraform import` for
+     each resource, using the exact resource IDs from the error output.
+  4. Postgres then failed on zone drift — Azure manages the
+     availability zone dynamically after creation, and Terraform kept
+     trying to fight that. Fixed with `lifecycle { ignore_changes =
+     [zone] }`, citing the upstream provider issue in a code comment.
+  5. The region swap forced a full resource group recreation, since a
+     resource group's location can't change in place — expected and
+     understood, not a new bug, but worth naming as a direct
+     consequence of the region fix.
+- **Verified the deployment actually works**, not just that `apply`
+  exited cleanly: curled the Container App's public URL myself, got a
+  successful TLS handshake but no HTTP response at first — traced to a
+  port mismatch (the placeholder image listens on port 80; the config
+  was set to 8000, our app's real port). Fixed by temporarily setting
+  `target_port = 80`, explicitly commented as temporary, and got back a
+  real `200` with the placeholder's actual welcome page.
+- **[ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)** written
+  now that this phase is genuinely deployed and verified live —
+  deliberately withheld last session until that was true.
+- **`docs/ARCHITECTURE.md`'s Azure section rewritten** to describe what
+  is now actually running, not what was merely configured, plus two new
+  glossary terms (Terraform state, `terraform import`) that came
+  directly out of this session's real troubleshooting.
+
+### What I struggled with
+- The Postgres error message itself was actively misleading — "Version
+  should be in: []" reads like a version problem, and the natural first
+  instinct (try a different version number) doesn't fix it, because the
+  real constraint is regional, not version-related. The `az` CLI's own
+  `list-skus` output, not the Terraform error, was what actually
+  revealed the true cause.
+  - Genuinely useful conceptual takeaway, independent of this specific
+    fix: a subscription being allowed to use a service at all doesn't
+    mean every region is open for it — checking with `list-skus` before
+    assuming a region will work is the generalizable lesson here.
+- Several real misconceptions surfaced and were corrected live, not
+  code bugs but worth remembering: that Postgres would "connect through
+  Docker" once deployed (Docker is local-only; Postgres becomes a fully
+  managed Azure service with no containers involved at all); that
+  `terraform apply` itself would replace the placeholder with real
+  backend code (nothing in the current config references our own code
+  yet — that's a separate, later step); and mixing up Container
+  Registry (storage only) with Container App (the thing that actually
+  runs an image) — settled with a warehouse-vs-store analogy.
+
+### Concepts to revisit
+- Terraform state drift as a general operational risk, not just this
+  session's specific fix — worth being able to explain in an interview
+  why `terraform plan` in CI, run before every merge, is the standard
+  mitigation, even though it isn't built here yet.
+- The regional-restriction lesson above, as a general pattern for any
+  cloud provider, not just this specific Postgres SKU.
+
+### What's next
+- Explicitly deferred to a future session, in order: write the
+  `Dockerfile` (architecture was sketched but not yet confirmed or
+  written), build and push a real backend image to the Container
+  Registry, update `infra/main.tf`'s image reference and revert
+  `target_port` from 80 back to 8000, wire up GitHub Actions CI/CD, then
+  move on to API Management (item 9) once a real backend is live.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  no automated tests for ACL, MCP, or PII detection's internals; the
+  self-asserted identity and unbounded re-sharing rule remain named,
+  accepted limitations.
+
+**Estimated completion: ~46% of the total project, by weighted effort**
+— up slightly from ~45% last session. Still 10 of 17 build-order items
+*fully* done; item 10's infrastructure half is now genuinely complete
+and verified live, but the item as a whole isn't finished until the
+real backend is actually running there, so it still doesn't move the
+completed-item count. Rough remaining effort: ~70 hours, essentially
+unchanged from last session's ~72-hour estimate minus the roughly 2
+hours this phase actually took. At 3–4 hours/day, that's still roughly
+18–23 working days left, assuming no scope changes.
