@@ -931,6 +931,69 @@ gap, acceptable only because there's exactly one real caller type
 today. The fix (per-caller keys, plus volume-based alerting) waits on
 build-order item 14 actually existing. See ADR-017.
 
+## Azure infrastructure overview
+
+Nothing described in this section is actually running yet — it
+describes what Terraform is *configured* to create, not what currently
+exists in Azure. `terraform apply` hasn't been run. This is genuinely
+in-progress work, not a finished feature, which is also why it has no
+ADR yet — one gets written once this is deployed and verified live,
+matching how every other feature in this project has been documented.
+
+The infrastructure lives in `infra/`, following the exact layout
+`CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
+resource, `variables.tf` holds their inputs, `outputs.tf` exposes the
+values later pieces will need.
+
+A single resource group holds everything, tagged for cost tracking the
+same way every Terraform resource in this project is required to be.
+Inside it: a Container Apps environment, meant to eventually run the
+FastAPI backend as a container — currently pointed at a small public
+placeholder image rather than our own, deliberately. Infrastructure
+changes (Terraform) and routine deployments (which image is currently
+running) are being kept as two separate concerns from the start — the
+second one is meant to be handled by GitHub Actions later, not by
+re-running Terraform on every code change.
+
+Postgres becomes Azure Database for PostgreSQL Flexible Server, on the
+cheapest Burstable tier, with `pgvector` explicitly allow-listed at the
+server level — a separate step from actually enabling the extension
+inside a database, which still has to happen by hand, the same way it
+did locally. Neo4j does not become an Azure-native resource at all —
+it becomes Neo4j AuraDB, a fully managed service outside Azure
+entirely, reached over the network exactly the way OpenAI or Voyage
+already are. That's a deliberate choice, not an oversight:
+`CLAUDE.md`'s own service mapping never actually specified how Neo4j
+should be hosted, and AuraDB's free tier matches the same
+managed-over-self-hosted pattern already used for Postgres.
+
+Every secret is meant to live in Key Vault, never in an environment
+variable. A single user-assigned Managed Identity is what's actually
+allowed to read from it — a real Azure AD identity the Container App
+will "wear," not a password. That same identity is separately granted
+permission to pull images from the container registry, through a
+completely different Azure permission system — RBAC role assignments,
+not Key Vault's own access policies. Worth knowing these are two
+unrelated systems, not the same mechanism reused twice.
+
+One real, temporary compromise, named on purpose: the Container App's
+ingress is public-facing, meaning once actually deployed, the backend
+would be reachable directly from the internet with no gateway in front
+of it. Enterprise Requirement 1 says that should never happen — but
+Azure API Management (build-order item 9) doesn't exist yet, and
+there'd be no way to verify a deployment even happened without a
+reachable URL to test against in the meantime. Deliberately swapping
+the build order here — deploying the backend before building the
+gateway that's supposed to sit in front of it — since a gateway needs
+something real to route to. This is meant to be tightened the moment
+APIM exists, not left as a permanent state.
+
+Still ahead before this is a real, verified deployment: a `Dockerfile`
+(doesn't exist yet), actually running `terraform apply`, populating
+Key Vault with real secret values, building and pushing a real image,
+swapping the placeholder image reference for it, and a GitHub Actions
+pipeline to automate that last step going forward.
+
 ## Glossary
 
 **Chunk** — a small piece of a larger document's text.
@@ -1148,3 +1211,39 @@ filter is a join between `chunks` (by way of their `document_id`) and
 `document_permissions`, so the database itself restricts which rows
 are ever candidates for ranking — nothing gets fetched and then
 discarded afterward.
+
+**Infrastructure as code (Terraform)** — describing cloud resources in
+files, checked into git, instead of clicking through a cloud provider's
+console. The files are the source of truth; running them is what
+creates or changes the real infrastructure, so what's committed always
+matches what should exist — never something remembered or discovered
+by clicking around after the fact.
+
+**Terraform resource vs. data block** — a `resource` block creates and
+manages something new; a `data` block only looks up information that
+already exists, creating nothing. Both can reference other blocks by
+name, but only one of the two ever changes real infrastructure.
+
+**Managed Identity (Azure)** — an Azure Active Directory identity that
+belongs to a piece of software, not a person — created so a running
+resource can prove who it is to another Azure service without ever
+holding a password. A *user-assigned* identity, this project's choice,
+exists as its own standalone resource and can be attached to more than
+one thing; a *system-assigned* identity is created and destroyed
+automatically alongside the one specific resource it belongs to.
+
+**Tenant ID vs. principal ID (Azure AD)** — a tenant ID identifies an
+entire organization's directory; a principal ID (also called an object
+ID) identifies one specific identity — a person, an app, a managed
+identity — inside that directory. Many different principal IDs can
+exist inside the same one tenant ID.
+
+**RBAC (role-based access control) vs. a resource's own access
+policy** — two separate, unrelated Azure permission systems. Most
+Azure services (including the container registry) use general-purpose
+RBAC, granted via a role assignment naming a specific role (like
+`AcrPull`, "can pull images, nothing else"); Key Vault instead uses its
+own dedicated access-policy system. Granting permission through one
+system has no effect on the other — an identity with full Key Vault
+access still has zero access to anything gated by RBAC until granted
+that separately.

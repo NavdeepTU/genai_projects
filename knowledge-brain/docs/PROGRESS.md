@@ -1269,3 +1269,117 @@ unbounded re-sharing rule remain named, accepted limitations.
 pass doesn't move a build-order percentage — nothing here was a new
 feature, and the fixes make existing material correct, not more
 complete.
+
+---
+
+## Session: 2026-08-10 — Azure deployment, phase 1: core Terraform infrastructure (in progress)
+
+### What we built
+- **A deliberate, reasoned swap of build-order items 9 and 10** — API
+  Management (item 9) needs a real backend to route to, and nothing
+  runs in Azure yet, so deploying the backend (item 10) comes first,
+  with the gateway going in front of it afterward. Not skipping ahead
+  carelessly — the user identified this dependency themselves before
+  it was raised.
+- **Resolved a real, previously-unaddressed gap**: `CLAUDE.md`'s Azure
+  service mapping never actually said what Neo4j maps to. Checked
+  Neo4j's own current pricing directly rather than assume — AuraDB
+  Free is genuinely $0, no card required, but only available by
+  signing up directly at neo4j.com, not through Azure Marketplace
+  (which now only lists paid tiers). Chosen over self-hosting Neo4j in
+  a container, matching the same managed-over-self-hosted pattern
+  already used for Postgres and Redis elsewhere in this project.
+- **The core Terraform module** (`infra/main.tf`, `variables.tf`,
+  `outputs.tf`, plus a `.gitignore` fix and a `terraform.tfvars.example`
+  template mirroring the existing `.env`/`.env.example` split): a
+  resource group, Log Analytics workspace, Container Apps environment,
+  Postgres Flexible Server (Burstable tier, `pgvector` allow-listed at
+  the server level), Key Vault, a user-assigned Managed Identity
+  granted both Key Vault read access and (via a separate RBAC role
+  assignment) permission to pull from a new Container Registry, and
+  the Container App resource itself — attached to that identity,
+  pointed at a placeholder public image for now rather than our own.
+- **A real architectural decision, not just an implementation detail:**
+  Terraform manages the Container App's *existence and shape*; which
+  image it's actually running is deliberately left to be updated later
+  by GitHub Actions, not by re-running Terraform on every code change
+  — two separate concerns kept separate from the start.
+- **Caught myself mid-edit**: initially added `infra/.terraform.lock.hcl`
+  to `.gitignore`, then corrected it — that file should be committed,
+  same reasoning as `uv.lock`, since it pins provider versions for
+  reproducibility and holds no secrets.
+- **A real Enterprise Requirement trigger, handled per `CLAUDE.md`'s own
+  rule**: about to give the Container App public ingress, which means
+  it would be reachable directly from the internet with nothing in
+  front of it — a direct conflict with Enterprise Requirement 1 (never
+  expose the backend directly). Stopped and flagged this explicitly
+  before writing the ingress block, rather than deciding silently.
+  Resolved: external ingress for now, explicitly temporary, tightened
+  the moment API Management (item 9) exists — the alternative,
+  internal-only ingress, would leave no way to verify a deployment even
+  happened until the gateway existed too.
+- `min_replicas = 1, max_replicas = 1`, fixed rather than a range,
+  deliberately tied to an already-documented gap: `ADR-010`'s circuit
+  breaker state lives in one process's memory only — a second replica
+  would turn that known limitation into a real, live problem.
+
+### What I struggled with
+- Missed one planted-error explain-back cleanly on the first pass: got
+  the dependency direction backwards between the Log Analytics
+  Workspace and the Container Apps Environment (said the workspace
+  depends on the environment; it's the reverse), and didn't clearly
+  address whether file position or references determine Terraform's
+  creation order. Corrected fully on request, including a clean,
+  accurate restatement of *why* file position doesn't matter.
+- Caught every other planted claim correctly on the first attempt:
+  that a Terraform resource's local label becomes its real Azure name
+  (it doesn't), that a `0.0.0.0`/`0.0.0.0` firewall rule blocks
+  everything (it's a reserved "allow Azure services" convention, not a
+  literal IP), that a `data` block can create infrastructure the way a
+  `resource` block can (it can't), that Key Vault access implies
+  registry access (two unrelated permission systems), and that a
+  Managed Identity was already "in use" before being attached to the
+  Container App (it wasn't — granted permissions and active use are
+  different things).
+- Independently asked several sharp clarifying questions beyond what
+  was being taught directly — self-asserted vs. not authenticated,
+  resource group vs. environment vs. container app, tenant ID vs.
+  principal ID, and specifically whether a principal ID needs separate
+  registration into a tenant (it doesn't — automatic, inherited from
+  the subscription).
+
+### Concepts to revisit
+Unchanged from before, plus: this session's Terraform work hasn't been
+applied yet, so nothing here has been verified live — a real gap given
+how much this project has otherwise leaned on live testing over
+reading code as the source of truth.
+
+### What's next
+- Explicitly not done yet, in order: write a `Dockerfile`; run
+  `terraform init`/`plan`/`apply` (the user's own steps, not run this
+  session); populate Key Vault with real secret values; build and push
+  the real backend image; swap the placeholder image reference for it;
+  wire up GitHub Actions to automate that swap going forward; smoke
+  test the live deployment.
+- No ADR yet for this — deliberately deferred until the deployment is
+  actually applied and verified live, consistent with how every other
+  feature in this project has earned its ADR only after real
+  verification, not just a design.
+- API Management (item 9) follows once the backend is actually live in
+  Azure and reachable.
+- Everything from prior sessions' "what's next" still stands
+  unchanged: no automated tests for ACL, MCP, or PII detection's
+  internals; the self-asserted identity and unbounded re-sharing rule
+  remain named, accepted limitations.
+
+**Estimated completion: ~45% of the total project, by weighted effort**
+— up from ~43% last session. Still 10 of 17 build-order items *fully*
+done — item 10 (Azure deployment) is now genuinely in progress, not
+finished, so it doesn't move the completed-item count yet, only the
+underlying effort estimate. Rough remaining effort: ~72 hours across
+finishing deployment, the test suite, real auth/multi-tenancy (item
+14), API Management, the frontend, guardrails (item 16), and
+multi-agent federated retrieval (item 17) — the frontend remains the
+single largest untouched chunk now that deployment is underway. At
+3–4 hours/day, that's roughly 18–24 working days left, assuming no
+scope changes.
