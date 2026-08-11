@@ -139,7 +139,7 @@ resource "azurerm_container_app" "backend" {
 
     container {
       name   = "backend"
-      image  = "mcr.microsoft.com/k8se/quickstart:latest"
+      image  = "${azurerm_container_registry.main.login_server}/knowledge-brain-backend:latest"
       cpu    = 0.5
       memory = "1Gi"
     }
@@ -147,10 +147,7 @@ resource "azurerm_container_app" "backend" {
 
   ingress {
     external_enabled = true
-    # TEMPORARY: 80 matches the placeholder image's port, just to verify
-    # connectivity end-to-end. Must change back to 8000 (our app's real
-    # port) the moment the real image replaces the placeholder.
-    target_port      = 80
+    target_port      = 8000
     transport         = "http"
 
     traffic_weight {

@@ -941,13 +941,33 @@ and the Container App's public URL was verified directly with `curl`
 decision record, including five distinct real errors hit and fixed
 along the way.
 
-What's still missing is the application itself: the Container App is
-running a small public placeholder image, not the FastAPI backend.
-Build-order item 10 (Azure deployment) is therefore infrastructure-complete
-but not feature-complete — a `Dockerfile` hasn't been written yet, no
-real image has been built or pushed, and nothing in Key Vault has real
-secret values in it. That work continues in a future session before
-API Management (item 9) can follow.
+The Container App is still, as of this session, running the small
+public placeholder image, not the FastAPI backend — but the real image
+now exists and is verified. A `Dockerfile` builds it (`python:3.12-slim`,
+`uv` for dependency installation, a dependency-layer/app-layer split
+for Docker build caching, running as a non-root user), and it's been
+run locally against real Postgres and Neo4j containers and confirmed
+working end to end, including a genuine LangGraph-generated answer
+from a real `/query` call. The image is pushed to Azure Container
+Registry and confirmed present there. `infra/main.tf` has been updated
+to reference it (and to revert the ingress port back to 8000, the
+app's real port, from the placeholder-matching `80` used temporarily
+last session) — but `terraform apply` has not been run with that
+change yet. See [ADR-021](adr/ADR-021-containerizing-the-backend.md).
+
+That apply is being held back deliberately: the Container App
+currently has zero environment variables configured, so deploying the
+real image as-is would very likely produce a container that
+crash-loops on startup — something `terraform apply`'s own
+success/failure signal would never surface, since it only confirms the
+resource was updated, not that the process inside it stayed alive.
+Wiring the Container App to pull real secrets from Key Vault (which
+currently holds nothing) is in progress, not finished — only the new
+Terraform variables for the real secret values have been written so
+far. Build-order item 10 (Azure deployment) is therefore further along
+than infrastructure-only, but still not feature-complete. That work
+continues in a future session before API Management (item 9) can
+follow.
 
 The infrastructure lives in `infra/`, following the exact layout
 `CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
@@ -1283,3 +1303,26 @@ reality: it takes a resource that already exists in the cloud (found
 by its Azure resource ID) and adds it into Terraform's state without
 creating anything new, so the next `plan` stops trying to recreate
 something that's already there.
+
+**Docker layer caching** — Docker builds an image as a stack of
+layers, one per instruction, and reuses a previously-built layer
+instead of redoing it whenever that layer's inputs haven't changed
+since the last build. Ordering a Dockerfile so rarely-changing inputs
+(dependency files) come before frequently-changing ones (application
+code) means most rebuilds skip straight to reinstalling nothing but
+the app itself.
+
+**Non-root container user** — running a container's process as an
+ordinary, low-privilege user instead of Docker's root default. Doesn't
+change how the app behaves; only matters if the app or a dependency is
+ever compromised, in which case an attacker inherits that limited
+user's permissions instead of root's — a defense-in-depth measure for
+a scenario that may never happen, not a fix for something broken
+today.
+
+**`host.docker.internal`** — a special hostname Docker provides
+specifically so a process running *inside* a container can reach
+services running on the machine hosting that container. Necessary
+because `localhost` means something different depending on where it's
+evaluated: inside a container, it refers to the container itself, not
+the laptop or server running it.

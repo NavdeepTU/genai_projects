@@ -69,16 +69,23 @@ and why it was made that way.
   [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
 
 **In progress:**
-- **Azure deployment — infrastructure phase** — a Terraform module
-  (`infra/`) provisions a resource group, Postgres Flexible Server,
-  Key Vault, a container registry, and a Container App in Azure, wired
-  together with a Managed Identity instead of any raw secret. Deployed
-  and verified live — the Container App's public URL returns a real
-  HTTP 200 — but it's still running a placeholder image, not this
-  backend. See [`ADR-020`](docs/adr/ADR-020-azure-deployment-infrastructure.md).
+- **Azure deployment** — a Terraform module (`infra/`) provisions a
+  resource group, Postgres Flexible Server, Key Vault, a container
+  registry, and a Container App in Azure, wired together with a
+  Managed Identity instead of any raw secret. Deployed and verified
+  live — the Container App's public URL returns a real HTTP 200. See
+  [`ADR-020`](docs/adr/ADR-020-azure-deployment-infrastructure.md).
+- **The real backend image** — a `Dockerfile` builds it, verified
+  locally end-to-end (a real `/query` call against real Postgres and
+  Neo4j containers, reached via `host.docker.internal`), and it's
+  pushed to Azure Container Registry, confirmed present there. `main.tf`
+  references it, but the Container App is still running a placeholder
+  — `terraform apply` is deliberately being held back until Key Vault
+  secret wiring is finished, since applying now would likely deploy a
+  silent crash-loop. See [`ADR-021`](docs/adr/ADR-021-containerizing-the-backend.md).
 
-**Not built yet:** a `Dockerfile` and CI/CD to get the real backend
-running in Azure, an API gateway, the frontend, and full
+**Not built yet:** the Key Vault secret wiring that's still in
+progress, GitHub Actions CI/CD, an API gateway, the frontend, and full
 auth/multi-tenancy (today's identity is a self-asserted header, not
 real authentication). See `CLAUDE.md`'s build order for the full plan.
 

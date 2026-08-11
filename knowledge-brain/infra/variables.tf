@@ -32,3 +32,49 @@ variable "postgres_admin_password" {
   type        = string
   sensitive   = true
 }
+
+variable "neo4j_uri" {
+  description = "Connection URI for the Neo4j AuraDB instance the deployed backend talks to. Not a secret itself, but specific to this deployment, so no default."
+  type        = string
+}
+
+variable "neo4j_user" {
+  description = "Neo4j username. AuraDB instances always use 'neo4j' as the admin username, so this defaults to it."
+  type        = string
+  default     = "neo4j"
+}
+
+variable "neo4j_password" {
+  description = "Password for the Neo4j AuraDB instance. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}
+
+variable "openai_api_key" {
+  description = "OpenAI API key used for embeddings and answer generation. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}
+
+variable "voyage_api_key" {
+  description = "Voyage AI API key used for reranking. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}
+
+variable "mcp_api_key" {
+  description = "Shared API key gating this project's own MCP server endpoint. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}
+
+variable "azure_language_endpoint" {
+  description = "Endpoint URL for the Azure AI Language resource used for PII detection. Not a secret itself, but specific to this deployment, so no default."
+  type        = string
+}
+
+variable "azure_language_key" {
+  description = "API key for the Azure AI Language resource used for PII detection. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}

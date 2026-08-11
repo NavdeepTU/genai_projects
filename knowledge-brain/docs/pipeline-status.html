@@ -756,7 +756,7 @@
   <section class="block">
     <div class="block-title">
       <h2>Feature 10 — Azure deployment <span class="status-pill partial" style="margin-left: 0.3rem;">In progress</span></h2>
-      <span class="count">3 of 5 built</span>
+      <span class="count">5 of 7 built</span>
     </div>
     <div class="row">
       <div class="node">
@@ -777,16 +777,32 @@
       </div>
       <div class="node">
         <span class="status-pill done">Built</span>
-        <span class="label">Live deployment verified</span>
+        <span class="label">Live infrastructure verified</span>
         <span class="path mono">terraform apply succeeded · curl confirms HTTP 200</span>
       </div>
       <div class="arrow">
         <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       <div class="node">
-        <span class="status-pill pending">Pending</span>
-        <span class="label">Dockerfile + real image</span>
-        <span class="path mono">Container App still runs a public placeholder image</span>
+        <span class="status-pill done">Built</span>
+        <span class="label">Dockerfile, verified locally</span>
+        <span class="path mono">Dockerfile · non-root user · real /query answer via host.docker.internal</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Image pushed to ACR</span>
+        <span class="path mono">az acr repository list confirms knowledge-brain-backend</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill partial">In progress</span>
+        <span class="label">Key Vault secret wiring</span>
+        <span class="path mono">variables added · access policy, secrets, and Container App env blocks pending</span>
       </div>
       <div class="arrow">
         <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -798,7 +814,7 @@
       </div>
     </div>
 
-    <p class="caveat"><strong>Verified end-to-end:</strong> real infrastructure exists in Azure, not just a clean Terraform plan — its public URL was curled directly and returned a real HTTP 200. Five distinct real errors were diagnosed and fixed along the way, not anticipated in the design: a misleadingly-worded Postgres error that was actually a subscription-level regional restriction (confirmed with <code>az postgres flexible-server list-skus</code>), a provider bug that created two resources in Azure without recording them in Terraform's state (fixed with <code>terraform import</code>), Postgres availability-zone drift (fixed with a <code>lifecycle</code> block), and a port mismatch between the placeholder image and the configured ingress. The Container App still runs a placeholder image, not the real backend — Enterprise Requirement 1's public-ingress trade-off is named and temporary, to be tightened once API Management exists. See ADR-020.</p>
+    <p class="caveat"><strong>Verified end-to-end:</strong> real infrastructure exists in Azure, not just a clean Terraform plan — its public URL was curled directly and returned a real HTTP 200. Five distinct real errors were diagnosed and fixed along the way, not anticipated in the design: a misleadingly-worded Postgres error that was actually a subscription-level regional restriction (confirmed with <code>az postgres flexible-server list-skus</code>), a provider bug that created two resources in Azure without recording them in Terraform's state (fixed with <code>terraform import</code>), Postgres availability-zone drift (fixed with a <code>lifecycle</code> block), and a port mismatch between the placeholder image and the configured ingress. See ADR-020. The Dockerfile was then built and verified locally against real Postgres and Neo4j — including catching a real bug where <code>.env</code>'s quoted <code>OPENAI_API_KEY</code> broke only inside Docker's own <code>--env-file</code> parser, not <code>python-dotenv</code>'s. The image is confirmed in ACR and <code>infra/main.tf</code> now references it, but <code>terraform apply</code> is deliberately being held back until Key Vault wiring is finished — applying now, with zero environment variables configured on the Container App, would likely deploy a silent crash-loop. See ADR-021.</p>
   </section>
 
   <footer class="roadmap">

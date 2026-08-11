@@ -1036,13 +1036,15 @@ one-time migration cost, a permanent tax on every query going forward.
 
 ---
 
-## Feature 11: Azure Deployment — Infrastructure Phase (in progress)
+## Feature 11: Azure Deployment — Infrastructure, Image, and Registry (in progress)
 
 **What does this feature do, in one sentence?**
-Provisions the real cloud infrastructure this backend will eventually
-run on — resource group, Postgres, Key Vault, a container registry, and
-a Container App — via Terraform, currently running a placeholder image
-while the real backend's Dockerfile and CI/CD pipeline are still ahead.
+Provisions the real cloud infrastructure this backend runs on —
+resource group, Postgres, Key Vault, a container registry, and a
+Container App, via Terraform — and now also builds the backend's real
+Docker image, verifies it locally against real dependencies, and
+pushes it to that registry; the Container App itself is still running
+a placeholder until Key Vault secret wiring finishes.
 
 ```mermaid
 flowchart TB
@@ -1055,7 +1057,10 @@ flowchart TB
     ID[Managed Identity] -->|Get/List secrets| KV
     ID -->|AcrPull role| ACR
     APP -->|wears| ID
-    ACR -.->|placeholder image today,<br/>real image later| APP
+    DF[Dockerfile] -->|docker build| IMG[Local image]
+    IMG -->|verified: real /query answer<br/>via host.docker.internal| IMG
+    IMG -->|docker push| ACR
+    ACR -.->|placeholder image today,<br/>real image once Key Vault wiring lands| APP
     APP -->|public URL| USER[curl verification: HTTP 200]
 ```
 
@@ -1118,6 +1123,70 @@ same infrastructure — a local state file has no locking and no shared
 source of truth.
 
 *Further reading: [Terraform's own documentation on `import`](https://developer.hashicorp.com/terraform/cli/import) and [on remote state](https://developer.hashicorp.com/terraform/language/state/remote), both from HashiCorp's official docs.*
+
+**Walk me through a bug that only showed up inside Docker, not when
+running the app directly — and how you knew it wasn't just a bad API
+key.**
+`.env`'s `OPENAI_API_KEY` was wrapped in double quotes. Running the app
+directly worked fine, because `python-dotenv` strips surrounding quotes
+when it parses `.env`. Running the exact same file through Docker's
+`--env-file` flag failed with an OpenAI `401`, because that flag treats
+everything after the `=` completely literally — quotes included — so
+the key that actually reached OpenAI had a stray `"` glued onto the
+front. The giveaway was in the traceback itself: the masked key in the
+error message started with a literal `"` character. Ruled out a stale
+key specifically by testing the *same* key both ways — it worked
+outside Docker and failed inside it, which only makes sense if the
+difference is in how the two paths parse the file, not the key itself.
+
+**Why copy `pyproject.toml` and `uv.lock` into the image before
+copying the actual application code?**
+Docker builds an image as a stack of cached layers, and skips rebuilding
+any layer whose inputs haven't changed since the last build. Dependencies
+change far less often than application code, so installing them in their
+own layer — before the code that changes on every commit is even copied
+in — means most rebuilds skip straight past a slow, full dependency
+reinstall and land only on the cheap step of registering the new code.
+
+**Why run the container as a non-root user, and what would actually
+break if that line were removed?**
+Nothing breaks functionally — the app behaves identically either way
+under normal operation. What changes is risk, not behavior, and only if
+something goes wrong: if the app or a dependency is ever exploited, an
+attacker running as root inside the container has a much larger blast
+radius — rewriting any file, installing tools, sitting one step closer
+to a full container escape — than the same attacker confined to an
+ordinary user's permissions. Defense in depth for a scenario that may
+never happen, not a fix for something broken today.
+
+**Does referencing the registry's address with Terraform interpolation
+(`azurerm_container_registry.main.login_server`) instead of a literal
+string grant the Container App permission to pull the image?**
+No — that string is purely a label telling Azure *what* to pull, and
+interpolating it versus hardcoding the identical string makes zero
+difference to whether the pull succeeds. Permission is a completely
+separate mechanism: the Container App's `identity` block attaches the
+Managed Identity, its `registry` block tells Azure to authenticate with
+that identity when pulling, and the identity only actually has pull
+rights because of a separate `azurerm_role_assignment` granting it
+`AcrPull` against this registry. Naming what you want and being
+authorized to get it are always two different systems in Azure — the
+same lesson as tenant ID vs. principal ID, and RBAC vs. Key Vault's
+access-policy system, from earlier this build.
+
+**The real image is built and pushed to ACR, and `main.tf` already
+references it — why not just run `terraform apply` and see what
+happens?**
+Because the Container App currently has zero environment variables
+configured. Applying now would very likely deploy a container that
+crash-loops on startup, since `pydantic-settings` requires several
+values with no defaults — and `terraform apply`'s own success signal
+would never reveal that, since it only confirms the *resource* updated,
+not that the *process inside it* stayed alive. Catching this before
+running `apply`, rather than debugging a silent failure afterward from
+Application Insights logs, is the cheaper failure to have.
+
+*Further reading: [Docker's own documentation on `.env` file syntax](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax), which explicitly notes that values are used literally and are not quote-aware — directly explains this session's bug.*
 
 ---
 

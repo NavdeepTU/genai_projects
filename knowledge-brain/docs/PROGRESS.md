@@ -1484,3 +1484,115 @@ completed-item count. Rough remaining effort: ~70 hours, essentially
 unchanged from last session's ~72-hour estimate minus the roughly 2
 hours this phase actually took. At 3–4 hours/day, that's still roughly
 18–23 working days left, assuming no scope changes.
+
+## Session: 2026-08-11 — Azure deployment, phase 3: Dockerfile, ACR push, Key Vault wiring (in progress)
+
+### What we built
+- **`Dockerfile` and `.dockerignore`**, written and explained chunk by
+  chunk: `python:3.12-slim`, `uv`'s binary copied directly from
+  Astral's own image, a dependency-layer/app-layer split for Docker
+  build caching, a non-root `appuser`, and `uvicorn app.main:app`
+  matching this project's real convention rather than the `fastapi`
+  CLI shown in the official examples.
+- **Verified the image locally, not just that it builds** — ran it
+  against the existing `docker compose` Postgres and Neo4j (reached
+  via `host.docker.internal`, since `localhost` inside a container
+  means the container itself), and got a real, LangGraph-generated
+  answer back from `/query` — full pipeline, for real, inside the
+  container.
+- **A genuine bug, found only by running the image, not by reading
+  `.env` or the Dockerfile:** `OPENAI_API_KEY` in `.env` was wrapped in
+  double quotes. `python-dotenv` (used when running the app directly)
+  strips quotes automatically; Docker's `--env-file` flag does not —
+  it passes the value completely literally. The container-only symptom
+  was an OpenAI `401`, with a literal `"` visible at the start of the
+  masked key in the traceback. Diagnosed by comparing a direct local
+  run (worked) against the same file inside the container (failed) —
+  confirmed it wasn't a stale key, since the same key worked fine
+  outside Docker. Fixed by stripping the quotes.
+- **Pushed the real image to Azure Container Registry**, confirmed
+  present with `az acr repository list` — not just a clean
+  `docker push` exit code.
+- **`infra/main.tf` updated** to reference the real image and revert
+  the ingress port from its temporary `80` back to `8000` — but
+  **`terraform apply` was deliberately not run with this change.** The
+  Container App has zero environment variables configured right now;
+  applying this as-is would likely deploy a container that
+  crash-loops on startup, invisibly to `terraform apply`'s own
+  success signal. Caught this before handing over `apply` commands,
+  rather than after.
+- **[ADR-021](adr/ADR-021-containerizing-the-backend.md)** written for
+  the containerization work, since it's genuinely complete and
+  verified live (locally, and confirmed in ACR) — scoped narrowly,
+  the same way ADR-020 was, rather than claiming the whole of item 10
+  is done.
+- **Started the Key Vault wiring** needed before that `apply` is safe:
+  new sensitive Terraform variables for the real secret values
+  (`neo4j_password`, `openai_api_key`, `voyage_api_key`,
+  `mcp_api_key`, `azure_language_key`) and non-secret variables for
+  plain config (`neo4j_uri`, `neo4j_user`, `azure_language_endpoint`).
+  Only this first chunk is done — still ahead: a Key Vault access
+  policy granting write permission to whoever runs Terraform (distinct
+  from the Managed Identity's existing read-only one),
+  `azurerm_key_vault_secret` resources for the actual values, and the
+  Container App's own `secret`/`env` blocks wiring it all together.
+
+### What I struggled with
+- One real conceptual regression, caught and corrected: said the app
+  "runs inside Azure Container Registry" while explaining the Key
+  Vault plan — ACR only ever stores the image; the Container App runs
+  it. Same distinction taught earlier this session, worth having
+  fully solid before it comes up again.
+- One planted-error round not answered before the session ended: a
+  question about whether `sensitive = true` on a Terraform variable
+  also encrypts that value inside `infra/*.tfstate`. A related, correct
+  point was raised and confirmed first (that `sensitive = true` doesn't
+  by itself route a value into Key Vault — that's decided by which
+  resource block references it) — the state-encryption question itself
+  is still open, to pick up next session.
+- Two real misconceptions surfaced and corrected live, same pattern as
+  every session so far: that "connecting to Docker" was a real step
+  in pushing an image (there's no such step — you tag the already-built
+  image with the registry's address, then push directly to ACR), and
+  that live-reload dev mode could somehow apply to the Container App
+  running in Azure (bind mounts only work between a container and the
+  literal machine it's running on — there's no way to link a laptop
+  folder to a container running in a different datacenter).
+
+### Concepts to revisit
+- The unanswered `sensitive = true` / state-file-encryption question
+  from the end of this session — needs a real answer before Key Vault
+  wiring continues, since it bears directly on whether `.tfstate`'s
+  current gitignore treatment is still correct.
+- Docker's `--env-file` vs. `python-dotenv`'s quote-stripping — a
+  concrete instance of a broader lesson worth having ready for an
+  interview: config correctness has to be verified against what
+  actually consumes it, not just read by eye.
+
+### What's next
+- Finish the Key Vault wiring, in order: a Key Vault access policy for
+  the human running Terraform (separate from the Managed Identity's
+  existing read-only one), `azurerm_key_vault_secret` resources for
+  each real value, and `secret`/`env` blocks on the Container App
+  itself.
+- An actual Neo4j AuraDB instance still needs to exist with real
+  connection details — `.env` still points at the local `docker
+  compose` Neo4j, not AuraDB, so this is needed before the Key Vault
+  secret for it has a real value to hold.
+- Once wired, run `terraform apply` for real, then verify the live
+  Azure URL the same way local Docker was verified — a real `/query`
+  call, not just a clean `apply` exit code.
+- API Management (item 9) still follows only once the real backend is
+  confirmed running live in Azure.
+- Everything from prior sessions' "what's next" still stands
+  unchanged: no automated tests for ACL, MCP, or PII detection's
+  internals; the self-asserted identity and unbounded re-sharing rule
+  remain named, accepted limitations.
+
+**Estimated completion: ~47% of the total project, by weighted effort**
+— up slightly from ~46% last session. Still 10 of 17 build-order items
+*fully* done; item 10 is now genuinely close — infrastructure, the
+image, and the registry are all done and verified, with Key Vault
+wiring and the final `apply` the only real pieces left. Rough
+remaining effort: ~68 hours. At 3–4 hours/day, that's roughly 17–23
+working days left, assuming no scope changes.
