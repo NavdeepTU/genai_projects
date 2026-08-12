@@ -931,43 +931,74 @@ gap, acceptable only because there's exactly one real caller type
 today. The fix (per-caller keys, plus volume-based alerting) waits on
 build-order item 14 actually existing. See ADR-017.
 
+**A Container App deployment can report success while the app itself
+is completely unreachable** — witnessed directly, not hypothetical:
+`terraform apply` exited cleanly, yet the real backend stayed down for
+over an hour, silently replaced in practice by an old, unrelated
+revision still marked healthy. `provisioningState` only confirms
+Azure's API accepted the request to update a resource; it says nothing
+about whether the process inside the new container ever actually
+started. There's no automated alert on this today — an availability
+probe against a real endpoint (Application Insights, hitting a `/health`
+route that doesn't exist yet) would catch it immediately; right now
+the only backstop is a human noticing a stale response. See ADR-022.
+
 ## Azure infrastructure overview
 
-The infrastructure described in this section is now genuinely running
-in Azure, not just configured on paper. `terraform apply` succeeded,
-and the Container App's public URL was verified directly with `curl`
-— a real `200` response, not just a clean Terraform exit code. See
-[ADR-020](adr/ADR-020-azure-deployment-infrastructure.md) for the full
-decision record, including five distinct real errors hit and fixed
-along the way.
+The real backend is now genuinely running in Azure — not the
+placeholder, the actual FastAPI application, reading its secrets from
+Key Vault, and reachable from the public internet. This was verified
+directly, not assumed from a clean `terraform apply`: a `curl` against
+the app's real URL returned an actual `200` from `uvicorn`, serving
+FastAPI's Swagger UI, with a genuine `x-correlation-id` header on the
+response — Enterprise Requirement 3 working end to end in the deployed
+environment, not just in local dev. Build-order item 10 (Azure
+deployment) is now complete for the backend half of the system; API
+Management (item 9) and GitHub Actions CI/CD are what's left.
 
-The Container App is still, as of this session, running the small
-public placeholder image, not the FastAPI backend — but the real image
-now exists and is verified. A `Dockerfile` builds it (`python:3.12-slim`,
-`uv` for dependency installation, a dependency-layer/app-layer split
-for Docker build caching, running as a non-root user), and it's been
-run locally against real Postgres and Neo4j containers and confirmed
-working end to end, including a genuine LangGraph-generated answer
-from a real `/query` call. The image is pushed to Azure Container
-Registry and confirmed present there. `infra/main.tf` has been updated
-to reference it (and to revert the ingress port back to 8000, the
-app's real port, from the placeholder-matching `80` used temporarily
-last session) — but `terraform apply` has not been run with that
-change yet. See [ADR-021](adr/ADR-021-containerizing-the-backend.md).
+Getting there took three separate phases, each documented in its own
+ADR: [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)
+(the infrastructure itself — five distinct real errors, from a
+regional Postgres restriction to a provider bug needing `terraform
+import`), [ADR-021](adr/ADR-021-containerizing-the-backend.md) (the
+`Dockerfile`, built and verified locally, pushed to Azure Container
+Registry), and [ADR-022](adr/ADR-022-deploying-the-real-backend-image.md)
+(actually getting that image running live, covered below).
 
-That apply is being held back deliberately: the Container App
-currently has zero environment variables configured, so deploying the
-real image as-is would very likely produce a container that
-crash-loops on startup — something `terraform apply`'s own
-success/failure signal would never surface, since it only confirms the
-resource was updated, not that the process inside it stayed alive.
-Wiring the Container App to pull real secrets from Key Vault (which
-currently holds nothing) is in progress, not finished — only the new
-Terraform variables for the real secret values have been written so
-far. Build-order item 10 (Azure deployment) is therefore further along
-than infrastructure-only, but still not feature-complete. That work
-continues in a future session before API Management (item 9) can
-follow.
+Key Vault now holds six real secrets — the Postgres connection string,
+the Neo4j AuraDB password, and the OpenAI, Voyage, MCP, and Azure
+Language API keys — each written by Terraform and read by the
+Container App at startup through its Managed Identity, never as a
+plain environment variable with a real value baked into `main.tf` or
+committed to git. Two non-secret values (the Neo4j connection URI and
+the Azure Language endpoint) ride alongside as plain environment
+variables, since there's nothing to protect in a URL by itself.
+
+Deploying that image live surfaced a real, non-obvious failure that
+took a genuine diagnostic chain to trace: `terraform apply` reported
+success, but the app stayed unreachable for over an hour afterward.
+The actual cause was the container image's own CPU architecture —
+built with a plain `docker build` on an Apple Silicon Mac, it came out
+targeting `arm64`, while Azure Container Apps only runs `amd64`. Azure
+could fetch the image just fine; it just couldn't run what was inside
+it, surfacing as `ImagePullBackOff` with zero console output ever
+produced, since the container never actually started. The fix was
+rebuilding with `--platform linux/amd64` explicitly set, rather than
+left to Docker's host-architecture default. Along the way, a
+misleading detour: `az role assignment list`'s table view displayed
+what looked like the wrong identity holding the registry's `AcrPull`
+permission — actually just a display quirk (it falls back to showing
+a service principal's client ID when Azure AD can't resolve a friendly
+name), not a real misconfiguration. The permission had been correct
+the whole time. Full account, including the fix for `outputs.tf`
+computing a URL that silently went stale on every new deployment, is
+in ADR-022.
+
+Infrastructure changes (Terraform) and routine deployments (which
+image is currently running) remain two separate concerns, same as
+planned from the start — today's redeploy used `az containerapp
+update` directly, with GitHub Actions still the intended way to
+automate that step going forward, not yet built.
 
 The infrastructure lives in `infra/`, following the exact layout
 `CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
@@ -976,13 +1007,11 @@ values later pieces will need.
 
 A single resource group holds everything, tagged for cost tracking the
 same way every Terraform resource in this project is required to be.
-Inside it: a Container Apps environment, meant to eventually run the
-FastAPI backend as a container — currently pointed at a small public
-placeholder image rather than our own, deliberately. Infrastructure
-changes (Terraform) and routine deployments (which image is currently
-running) are being kept as two separate concerns from the start — the
-second one is meant to be handled by GitHub Actions later, not by
-re-running Terraform on every code change.
+Inside it: a Container Apps environment running the real FastAPI
+backend as a container, reachable at a stable app-level URL that
+always resolves to whichever revision currently holds live traffic —
+distinct from a revision-pinned URL, which stays tied to one specific
+deploy forever (see Glossary).
 
 Postgres becomes Azure Database for PostgreSQL Flexible Server, on the
 cheapest Burstable tier, with `pgvector` explicitly allow-listed at the
@@ -996,14 +1025,16 @@ already are. That's a deliberate choice, not an oversight:
 should be hosted, and AuraDB's free tier matches the same
 managed-over-self-hosted pattern already used for Postgres.
 
-Every secret is meant to live in Key Vault, never in an environment
-variable. A single user-assigned Managed Identity is what's actually
-allowed to read from it — a real Azure AD identity the Container App
-will "wear," not a password. That same identity is separately granted
-permission to pull images from the container registry, through a
-completely different Azure permission system — RBAC role assignments,
-not Key Vault's own access policies. Worth knowing these are two
-unrelated systems, not the same mechanism reused twice.
+Every secret lives in Key Vault, never in an environment variable with
+a real value in it. A single user-assigned Managed Identity is what's
+actually allowed to read from it — a real Azure AD identity the
+Container App "wears," not a password. That same identity is
+separately granted permission to pull images from the container
+registry, through a completely different Azure permission system —
+RBAC role assignments, not Key Vault's own access policies. Worth
+knowing these are two unrelated systems, not the same mechanism reused
+twice — confirmed the hard way this session, tracing an apparent
+permissions failure that turned out to be a red herring instead.
 
 One real, temporary compromise, named on purpose: the Container App's
 ingress is public-facing, meaning once actually deployed, the backend
@@ -1030,12 +1061,12 @@ diagnosed from real evidence (`az` CLI output, official docs, or
 GitHub issue threads), not guessed at. Full details in
 [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
 
-Still ahead before this build-order item is actually finished: a
-`Dockerfile` (doesn't exist yet), populating Key Vault with real
-secret values, building and pushing a real image, swapping the
-placeholder image reference for it (and reverting the ingress port
-back from its current temporary value), and a GitHub Actions pipeline
-to automate that last step going forward.
+Still ahead: a GitHub Actions pipeline to automate future image
+rebuilds and redeploys (today's was done by hand, with
+`--platform linux/amd64` set explicitly to avoid repeating this
+session's architecture mismatch), and Azure API Management (item 9),
+which is what finally closes the "public-facing ingress" gap named
+above.
 
 ## Glossary
 
@@ -1326,3 +1357,40 @@ services running on the machine hosting that container. Necessary
 because `localhost` means something different depending on where it's
 evaluated: inside a container, it refers to the container itself, not
 the laptop or server running it.
+
+**Container App revision** — a snapshot of a Container App's full
+configuration (image, environment variables, everything) at one point
+in time. Every deploy creates a new one. In "Single" revision mode,
+this project's choice, exactly one revision holds live traffic at a
+time — but a new revision can exist and even hold that traffic weight
+while still being unhealthy underneath, which is exactly what happened
+this session.
+
+**Revision-pinned URL vs. app-level URL** — a Container App exposes
+two different kinds of address: one tied to a specific, named revision
+(permanently, even after a newer revision replaces it), and one at the
+app level that always resolves to whichever revision currently holds
+live traffic. `infra/outputs.tf` originally used the first kind by
+mistake, which made a real fix look like it hadn't worked, since the
+URL being tested could never reflect anything deployed after it.
+
+**Image architecture (`amd64` vs. `arm64`) / `ImagePullBackOff`** — a
+container image is built for one specific CPU instruction set, not
+architecture-neutral. `docker build` defaults to whatever chip the
+build machine itself uses; Apple Silicon Macs produce `arm64` images
+by default, while Azure Container Apps only runs `amd64`. Nothing in
+`docker build`, `docker push`, or a registry listing checks for this
+mismatch — it only surfaces where the image is actually run, as
+`ImagePullBackOff`, Azure's status for "this container will not start."
+Fixed by passing `--platform linux/amd64` to `docker build` explicitly.
+
+**Client ID vs. principal ID (Azure AD), redux** — see also "Tenant ID
+vs. principal ID" above. A single identity actually carries both: the
+client ID is what it uses to authenticate *as itself* (used correctly
+elsewhere in this project, e.g. `managed_identity_client_id`); the
+principal ID (object ID) is what Azure's permission system checks when
+deciding *what it's allowed to do*. Confusing the two doesn't
+necessarily error loudly — `az role assignment list`'s table view can
+display a client ID as a fallback label when it can't resolve a
+friendly name, which looks identical to a real misconfiguration unless
+you check the raw `principalId` field specifically.

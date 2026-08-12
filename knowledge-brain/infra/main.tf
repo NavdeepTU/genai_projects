@@ -77,6 +77,11 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
   value     = "VECTOR"
 }
 
+resource "azurerm_postgresql_flexible_server_database" "main" {
+  name      = "knowledge_brain"
+  server_id = azurerm_postgresql_flexible_server.main.id
+}
+
 data "azurerm_client_config" "current" {}
 
 resource "azurerm_key_vault" "main" {
@@ -101,6 +106,60 @@ resource "azurerm_key_vault_access_policy" "backend" {
   object_id    = azurerm_user_assigned_identity.backend.principal_id
 
   secret_permissions = ["Get", "List"]
+}
+
+resource "azurerm_key_vault_access_policy" "terraform_admin" {
+  key_vault_id = azurerm_key_vault.main.id
+  tenant_id    = data.azurerm_client_config.current.tenant_id
+  object_id    = data.azurerm_client_config.current.object_id
+
+  secret_permissions = ["Get", "List", "Set", "Delete"]
+}
+
+locals {
+  database_url = "postgresql+asyncpg://${var.postgres_admin_username}:${var.postgres_admin_password}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/${azurerm_postgresql_flexible_server_database.main.name}"
+}
+
+resource "azurerm_key_vault_secret" "database_url" {
+  name         = "database-url"
+  value        = local.database_url
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
+resource "azurerm_key_vault_secret" "neo4j_password" {
+  name         = "neo4j-password"
+  value        = var.neo4j_password
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
+resource "azurerm_key_vault_secret" "openai_api_key" {
+  name         = "openai-api-key"
+  value        = var.openai_api_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
+resource "azurerm_key_vault_secret" "voyage_api_key" {
+  name         = "voyage-api-key"
+  value        = var.voyage_api_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
+resource "azurerm_key_vault_secret" "mcp_api_key" {
+  name         = "mcp-api-key"
+  value        = var.mcp_api_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
+resource "azurerm_key_vault_secret" "azure_language_key" {
+  name         = "azure-language-key"
+  value        = var.azure_language_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
 }
 
 resource "azurerm_container_registry" "main" {
@@ -133,6 +192,42 @@ resource "azurerm_container_app" "backend" {
     identity = azurerm_user_assigned_identity.backend.id
   }
 
+  secret {
+    name                = "database-url"
+    key_vault_secret_id = azurerm_key_vault_secret.database_url.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
+  secret {
+    name                = "neo4j-password"
+    key_vault_secret_id = azurerm_key_vault_secret.neo4j_password.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
+  secret {
+    name                = "openai-api-key"
+    key_vault_secret_id = azurerm_key_vault_secret.openai_api_key.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
+  secret {
+    name                = "voyage-api-key"
+    key_vault_secret_id = azurerm_key_vault_secret.voyage_api_key.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
+  secret {
+    name                = "mcp-api-key"
+    key_vault_secret_id = azurerm_key_vault_secret.mcp_api_key.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
+  secret {
+    name                = "azure-language-key"
+    key_vault_secret_id = azurerm_key_vault_secret.azure_language_key.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
   template {
     min_replicas = 1
     max_replicas = 1
@@ -142,6 +237,51 @@ resource "azurerm_container_app" "backend" {
       image  = "${azurerm_container_registry.main.login_server}/knowledge-brain-backend:latest"
       cpu    = 0.5
       memory = "1Gi"
+
+      env {
+        name        = "DATABASE_URL"
+        secret_name = "database-url"
+      }
+
+      env {
+        name        = "NEO4J_PASSWORD"
+        secret_name = "neo4j-password"
+      }
+
+      env {
+        name        = "OPENAI_API_KEY"
+        secret_name = "openai-api-key"
+      }
+
+      env {
+        name        = "VOYAGE_API_KEY"
+        secret_name = "voyage-api-key"
+      }
+
+      env {
+        name        = "MCP_API_KEY"
+        secret_name = "mcp-api-key"
+      }
+
+      env {
+        name        = "AZURE_LANGUAGE_KEY"
+        secret_name = "azure-language-key"
+      }
+
+      env {
+        name  = "NEO4J_URI"
+        value = var.neo4j_uri
+      }
+
+      env {
+        name  = "NEO4J_USER"
+        value = var.neo4j_user
+      }
+
+      env {
+        name  = "AZURE_LANGUAGE_ENDPOINT"
+        value = var.azure_language_endpoint
+      }
     }
   }
 

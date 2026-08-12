@@ -29,8 +29,8 @@ output "managed_identity_principal_id" {
 }
 
 output "backend_url" {
-  description = "The Container App's public URL — the one thing needed to actually check whether the placeholder (or, later, our real backend) is reachable."
-  value       = "https://${azurerm_container_app.backend.latest_revision_fqdn}"
+  description = "The Container App's stable public URL. Always resolves to whichever revision currently holds live traffic — unlike a revision-pinned URL, it doesn't go stale when a new revision is deployed."
+  value       = "https://${azurerm_container_app.backend.ingress[0].fqdn}"
 }
 
 output "container_registry_login_server" {

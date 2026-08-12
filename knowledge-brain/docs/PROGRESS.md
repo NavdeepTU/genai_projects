@@ -1596,3 +1596,132 @@ image, and the registry are all done and verified, with Key Vault
 wiring and the final `apply` the only real pieces left. Rough
 remaining effort: ~68 hours. At 3–4 hours/day, that's roughly 17–23
 working days left, assuming no scope changes.
+
+---
+
+## Session: 2026-08-12 — Azure deployment, phase 4: real backend live; a real production-style incident diagnosed and fixed
+
+### What we built
+- **A real Neo4j AuraDB instance created** (Neo4j's own managed cloud
+  hosting, outside Azure entirely — see `ARCHITECTURE.md`'s Azure
+  section) and its connection URI and generated password added to
+  `infra/terraform.tfvars`, which is gitignored and never touched git.
+- **Finished the Key Vault wiring left open last session**: the
+  remaining OpenAI, Voyage, MCP, and Azure Language API keys were
+  already sitting in `.env` and were added to `terraform.tfvars` too.
+  All 9 required Terraform variables were filled in for the first time
+  this project has had them.
+- **Ran `terraform apply` for real, successfully** — "8 added, 1
+  changed" (the Key Vault access policy, six secrets, one missed
+  Postgres database resource from an earlier session, plus the
+  Container App picking up its new secret/env wiring).
+- **A real incident, diagnosed end to end, not guessed at:** despite
+  the clean `apply`, the backend stayed unreachable for over an hour
+  afterward. Full diagnostic chain, each step driven by actual command
+  output, not assumption: `az containerapp revision list` (found a
+  second, newer revision sitting at 100% traffic weight but
+  `Unhealthy`) → `az containerapp replica show` (`runningStateDetails:
+  ImagePullBackOff`, zero restarts, container never actually started)
+  → confirmed the image and its `latest` tag genuinely existed in ACR
+  → a real false lead: `az role assignment list -o table`'s `Principal`
+  column appeared to show the wrong identity holding `AcrPull`,
+  resolved by checking the raw JSON `principalId` field directly,
+  which was correct all along — the table view falls back to
+  displaying a service principal's client ID when Azure AD can't
+  resolve a friendly name → `az acr repository show-manifests` found
+  the real cause: the image was built `arm64` (the build machine's own
+  Apple Silicon chip), not the `amd64` Azure Container Apps actually
+  runs.
+- **Fixed live**: rebuilt with `docker build --platform linux/amd64`
+  explicit, pushed, and forced a genuinely new revision with
+  `--revision-suffix v2` (a plain `az containerapp update` alone
+  reused the existing, still-broken revision object, since Azure
+  compares config text, not registry contents, to decide whether a new
+  revision is needed). Verified for real: `curl` against the app's
+  stable URL returned `HTTP/2 200`, real Swagger UI, and a genuine
+  `x-correlation-id` header — Enterprise Requirement 3 confirmed
+  working in the actual deployed environment, not just local dev.
+- **Found and fixed a second real bug along the way**: `outputs.tf`'s
+  `backend_url` was built from `latest_revision_fqdn`, a hostname
+  permanently pinned to one specific revision's name. Every `curl`
+  against it during this session's debugging kept hitting the *old*,
+  already-working placeholder revision no matter what got fixed
+  afterward — an actively misleading signal, not just a stale value.
+  Fixed to use `ingress[0].fqdn`, the app-level address that always
+  tracks whichever revision currently holds live traffic.
+- **[ADR-022](adr/ADR-022-deploying-the-real-backend-image.md)**
+  written for the whole incident, and ADR-021's status line updated to
+  point forward to it ("Extended by ADR-022") rather than rewriting
+  ADR-021's own original reasoning.
+- `docs/ARCHITECTURE.md`'s Azure section, "What could go wrong"
+  section, and Glossary all updated in place to describe the system as
+  it actually runs now — not the placeholder-era description from two
+  sessions ago. `docs/INTERVIEW_PREP.md` gained a new Feature 12
+  section for this incident, and Feature 11's own diagram and title
+  were fixed where they described the now-stale placeholder state.
+
+### What I struggled with
+- Ran two Terraform/Azure CLI commands directly myself early in the
+  session (`terraform state list`, before catching it) — a direct
+  violation of this project's explicit rule that external tools
+  (Terraform, Azure CLI, Docker) are always run by hand, not by
+  Claude, specifically so the hands-on practice isn't skipped. Caught
+  and named out loud before continuing, not silently corrected.
+- Asked to explain the `outputs.tf` fix back, with a planted factual
+  error (falsely claiming the fixed `backend_url` would still change
+  on every new revision, exactly backwards from the actual fix) — the
+  question was explicitly skipped by request rather than answered.
+  Per this project's own rule, that should have been pushed back on
+  once rather than accepted outright; instead the false claim was
+  simply corrected directly before moving on. Worth being firmer about
+  this next time a question gets waved off rather than answered.
+
+### Concepts to revisit
+- The `outputs.tf` explain-back question above — never actually
+  confirmed understood in the user's own words, just corrected by
+  Claude. Worth circling back to directly: what does
+  `ingress[0].fqdn` actually give you, and why does it not change
+  across deploys the way `latest_revision_fqdn` does?
+- Client ID vs. principal ID (Azure AD) as a general Azure concept —
+  this session's role-assignment false lead was a direct, costly
+  demonstration of the distinction, and it's now in the Glossary, but
+  hasn't been explained back and checked yet.
+- Why `az containerapp update` didn't create a new revision on its
+  own the first time (config-text comparison, not registry-content
+  comparison) — used correctly to reach the fix, but not yet
+  explained back from first principles.
+
+### What's next
+- GitHub Actions CI/CD is the one piece of build-order item 10 still
+  not built — and now has a concrete, motivating reason beyond
+  convenience: a CI runner builds on real `amd64` hardware, which
+  would have made this session's entire incident structurally
+  impossible.
+- API Management (item 9) can now follow for real, since a real
+  backend — not a placeholder — is actually live to route to.
+- `CLAUDE.md` gained two new build-order items this session (18:
+  conversation history with context condensing, 19: streamed answer
+  generation with in-flight guardrail checks) and two new Enterprise
+  Requirements to match — not started, but now formally scoped with
+  their own build-order slots rather than living only in
+  `future_improvements.txt`.
+- Everything from prior sessions' "what's next" still stands
+  unchanged: no automated tests for ACL, MCP, or PII detection's
+  internals; the self-asserted identity and unbounded re-sharing rule
+  remain named, accepted limitations; the test suite still hasn't
+  grown since PII detection.
+
+**Estimated completion: ~44% of the total project, by weighted effort**
+— down from ~47% last session, despite real progress, because total
+scope grew faster than this session shrank it: `CLAUDE.md` gained two
+new build-order items (18, 19) this session, adding an estimated
+~18–24 hours of new scope on top of what remained. 11 of 19 build-order
+items are now fully done (up from 10 of 17) — item 10's backend is
+genuinely live and verified, with only GitHub Actions CI/CD left
+inside that item. Rough remaining effort: ~85 hours across GitHub
+Actions CI/CD, the test suite, real auth/multi-tenancy (item 14), API
+Management, the frontend, guardrails (item 16), multi-agent federated
+retrieval (item 17), conversation history with context condensing
+(item 18), and streamed answer generation (item 19) — the frontend
+remains the single largest untouched chunk. At 3–4 hours/day, that's
+roughly 21–28 working days left, assuming no further scope changes.

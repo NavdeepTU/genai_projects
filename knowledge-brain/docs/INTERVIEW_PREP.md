@@ -1036,15 +1036,15 @@ one-time migration cost, a permanent tax on every query going forward.
 
 ---
 
-## Feature 11: Azure Deployment — Infrastructure, Image, and Registry (in progress)
+## Feature 11: Azure Deployment — Infrastructure, Image, and Registry
 
 **What does this feature do, in one sentence?**
 Provisions the real cloud infrastructure this backend runs on —
 resource group, Postgres, Key Vault, a container registry, and a
-Container App, via Terraform — and now also builds the backend's real
-Docker image, verifies it locally against real dependencies, and
-pushes it to that registry; the Container App itself is still running
-a placeholder until Key Vault secret wiring finishes.
+Container App, via Terraform — and builds the backend's real Docker
+image, verifies it locally against real dependencies, and pushes it to
+that registry, ready for the Container App to actually run (see
+Feature 12 for getting it live).
 
 ```mermaid
 flowchart TB
@@ -1060,8 +1060,7 @@ flowchart TB
     DF[Dockerfile] -->|docker build| IMG[Local image]
     IMG -->|verified: real /query answer<br/>via host.docker.internal| IMG
     IMG -->|docker push| ACR
-    ACR -.->|placeholder image today,<br/>real image once Key Vault wiring lands| APP
-    APP -->|public URL| USER[curl verification: HTTP 200]
+    ACR -->|image ready to pull| APP
 ```
 
 **Why deploy the backend before building API Management, when
@@ -1187,6 +1186,102 @@ running `apply`, rather than debugging a silent failure afterward from
 Application Insights logs, is the cheaper failure to have.
 
 *Further reading: [Docker's own documentation on `.env` file syntax](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax), which explicitly notes that values are used literally and are not quote-aware — directly explains this session's bug.*
+
+---
+
+## Feature 12: Azure Deployment — Going Live
+
+**What does this feature do, in one sentence?**
+Finishes wiring the Container App to Key Vault, runs `terraform apply`
+for real, and gets the actual FastAPI backend reachable and serving
+traffic in Azure — diagnosing and fixing a real deploy failure along
+the way that Terraform's own success output never surfaced.
+
+```mermaid
+flowchart TB
+    APPLY[terraform apply: success] --> CURL1[curl backend_url: 404]
+    CURL1 -->|wrong lead: URL was<br/>pinned to an old revision| REVLIST[az containerapp revision list]
+    REVLIST -->|new revision exists,<br/>HealthState: Unhealthy| REPLICA[az containerapp replica show]
+    REPLICA -->|runningStateDetails:<br/>ImagePullBackOff| ACRCHECK[Confirm image + tag<br/>exist in ACR: yes]
+    ACRCHECK --> RBACCHECK[Check AcrPull role assignment]
+    RBACCHECK -->|principalId correct;<br/>table view's display<br/>was misleading| MANIFEST[az acr repository<br/>show-manifests]
+    MANIFEST -->|Architecture: arm64| FIX[docker build<br/>--platform linux/amd64]
+    FIX --> PUSH[docker push] --> REVISION2[New revision: --v2]
+    REVISION2 --> CURL2[curl ingress fqdn: 200<br/>real Swagger UI, x-correlation-id]
+```
+
+**`terraform apply` finished with "Apply complete," yet the backend
+was unreachable for over an hour afterward. How is that possible, and
+what does it mean for trusting infrastructure-as-code tools in
+general?**
+`terraform apply`'s success signal only confirms that the API calls to
+update Azure resources succeeded — it says nothing about whether the
+process running inside the container actually started and stayed
+alive. Those are two genuinely different questions, checked by two
+different systems: Terraform owns "does the resource exist with this
+configuration," Azure's own container runtime owns "is the process
+inside it actually running." The general lesson, consistent with this
+project's whole pattern of verifying against the real running system
+rather than trusting a clean exit code: a successful `apply` is
+necessary, not sufficient, for a deployment actually working.
+
+**Walk me through the actual root cause, and why nothing earlier in
+the pipeline caught it.**
+The Docker image was built with a plain `docker build` on an Apple
+Silicon Mac, which defaults to building for `arm64` — the Mac's own
+chip architecture. Azure Container Apps only runs `amd64`. Nothing in
+`docker build`, `docker push`, or `az acr repository list` checks
+whether an image's target architecture matches where it's meant to
+run, because none of those steps are the one that actually executes
+it — the mismatch only surfaces at the one place that tries to run the
+image, as `ImagePullBackOff`, with zero container startup logs ever
+produced, since the container never actually started.
+
+**A separate diagnostic step looked like it found a *second* bug — a
+role assignment on the wrong identity. It turned out to be nothing.
+What actually happened, and what's the general lesson?**
+`az role assignment list -o table`'s `Principal` column is a display
+convenience, not the authoritative permission record: when Azure AD
+can't resolve a friendly display name for a service principal, it
+falls back to showing that identity's client ID instead of its
+principal ID (object ID) — the two are different values entirely.
+That fallback label happened to look exactly like the *wrong* identity
+had the permission. The actual `AcrPull` role assignment, checked in
+raw JSON, had the correct `principalId` the entire time. The general
+lesson: when a specific value actually matters, check the raw field a
+system uses to make its real decision, not a column a CLI chose to
+render for human convenience — the two are not guaranteed to agree.
+
+**`infra/outputs.tf` also had a real bug found this session. What was
+it, and how did it actually make the incident harder to diagnose, not
+just wrong on its own?**
+`backend_url` was built from `azurerm_container_app.backend.latest_revision_fqdn`
+— a hostname with one specific revision's name baked into it,
+permanently, from the moment it was computed. Every `curl` against
+that URL during this session's debugging kept hitting the *old*,
+already-working placeholder revision, regardless of what got fixed
+afterward, because that URL had no way to ever reflect a new
+deployment. It wasn't just an inconvenience — it actively produced a
+false "still broken" signal even after real progress had already been
+made, and cost real debugging time until it was noticed. Fixed by
+switching to `ingress[0].fqdn`, the app-level address that always
+tracks whichever revision currently holds live traffic.
+
+**What would you change here if this needed to run in a real team,
+not a solo project?**
+An automated availability check — an Application Insights probe
+hitting a real `/health` endpoint (which doesn't exist yet in this
+project) on a schedule — rather than relying on a human noticing a
+stale response, the way this session's incident was actually caught.
+And build-order item 12's GitHub Actions CI/CD removes this entire
+class of bug structurally: a GitHub-hosted runner builds on `amd64`
+hardware natively, so there's no host-architecture mismatch possible
+in the first place. That's a concrete argument for CI-driven builds
+beyond convenience — it's not just faster, it removes a whole category
+of environment-specific failure that a manual, local-machine
+build-and-push workflow is exposed to by default.
+
+*Further reading: [Docker's own documentation on multi-platform builds](https://docs.docker.com/build/building/multi-platform/), covering exactly this default-to-host-architecture behavior and the `--platform` flag that overrides it.*
 
 ---
 

@@ -62,6 +62,19 @@ for a company's private knowledge, with answers instead of links.
     document-level ACL from item 8, then a synthesis agent merges the
     cited answers across domains — see the corresponding Enterprise
     Requirement)
+18. Conversation history and context-aware follow-ups (condense a
+    follow-up question against the last few turns into one standalone
+    question before it enters the existing retrieval pipeline —
+    including the multi-agent path from item 17 — so a question like
+    "what about the other one" resolves correctly; see the
+    corresponding Enterprise Requirement)
+19. Streamed answer generation (token-by-token via Server-Sent Events,
+    chunked into sentence-sized segments so the guardrails check from
+    item 16 still runs before each segment reaches the user; only the
+    final generation step streams — retrieval, reranking, ACL
+    filtering, and the multi-agent federated retrieval path from item
+    17 all complete server-side first; see the corresponding
+    Enterprise Requirement)
 
 ---
 
@@ -331,6 +344,49 @@ domain's retrieval agent fails or times out, its circuit breaker
 an answer built from the domains that succeeded, clearly labeled as
 partial, rather than failing the whole question.
 
+**10. Conversation-aware retrieval with context condensing**
+A follow-up question like "what about the other one" cannot go
+straight into retrieval — it has no meaning on its own. Before any
+retrieval step runs (including the multi-agent path in requirement 9),
+an LLM condensing step rewrites the raw follow-up into a standalone
+question using the last few turns of the conversation as context. Only
+the condensed question touches hybrid search, reranking, and domain
+classification — the rest of the pipeline is unchanged and has no
+awareness that the question came from a multi-turn conversation.
+Conversations and their turns (raw question, condensed question,
+answer, cited sources, confidence score, domains used, correlation_id)
+are stored in PostgreSQL; the last few turns of an active conversation
+are cached in Redis so condensing does not pay a database round trip
+on every message. Document-level ACL (requirement 5) is re-checked on
+every turn against the current retrieval, never inherited from an
+earlier turn in the same conversation — a permission change mid-thread
+takes effect immediately, and a stored past answer never grants future
+access.
+
+**11. Streamed answer generation with in-flight guardrail checks**
+The final answer streams to the client token-by-token over Server-Sent
+Events (SSE) rather than waiting for the full response — SSE, not
+WebSocket, since this is one-way server-to-client output with no need
+for a bidirectional channel, and it passes through Azure API Management
+with less friction than a WebSocket upgrade. Streaming attaches to
+exactly one place in the pipeline: the final generation call. Question
+condensing (requirement 10), retrieval, reranking, ACL filtering, and
+the multi-agent federated retrieval path (requirement 9) all complete
+first, fully server-side — only the synthesis step's answer text
+streams, regardless of how many domains contributed to it. Because
+every generated answer must pass the guardrails check (build item 16)
+before reaching the user, raw token-by-token forwarding is not safe —
+tokens are buffered and released in sentence-sized chunks, each chunk
+checked by the guardrails moderation step before it is sent; a failed
+chunk halts the stream with a "content blocked" event instead of that
+sentence. Time-to-first-token (TTFT) is tracked as its own metric
+alongside total latency — streaming does not reduce how long the model
+takes to finish, it reduces how long the user waits to see anything. On
+a Redis cache hit, no generation call happens, so nothing streams — the
+complete cached answer returns immediately. If the client disconnects
+mid-stream, the server detects it and cancels the underlying LLM call
+rather than paying for tokens nobody will read.
+
 ---
 
 ## Frontend Standards — This Must Look World-Class
@@ -361,7 +417,11 @@ they visit the live link. Build it to this standard:
   PII warning badge if flagged
 - Query interface — a clean chat-like interface showing the
   question, the answer, the source documents cited with
-  highlighted relevant passages, and the confidence score
+  highlighted relevant passages, and the confidence score. The
+  answer streams in token-by-token as it generates, rather than
+  appearing all at once. A sidebar lists past conversations so a
+  user can resume an old thread or start a new one, same as any
+  modern chat product.
 - Analytics page — query volume over time, top questions asked,
   retrieval accuracy trends, average response time
 - Admin panel — tenant management, user permissions, document
@@ -430,6 +490,21 @@ After every major feature, ask me these questions as if you are an interviewer:
   separate domain-scoped agents instead of one retrieval step with
   a permission filter — what does that buy you, and what does it
   cost?"
+- "How do you handle a follow-up question that only makes sense
+  given what was asked before, like 'what about the other one'?"
+- "Why condense a follow-up into a standalone question before
+  retrieval instead of passing the raw conversation history into
+  the prompt — what does condensing cost you, and what does it buy?"
+- "Could a follow-up question in a conversation leak access to a
+  document the user was never permitted to see? Why or why not?"
+- "Why SSE instead of WebSocket for streaming the answer, given
+  the multi-agent retrieval path already exists — what would a
+  WebSocket actually buy you here that SSE doesn't?"
+- "Your guardrails check runs on the full generated answer — how
+  does that still work once the answer is streaming out token by
+  token?"
+- "What does streaming actually improve, given the model takes
+  the same total time to finish generating either way?"
 
 I should be able to answer from memory. If I can't, we revisit before moving on.
 
@@ -522,6 +597,21 @@ Structure it like this:
   touches, how each domain-scoped retrieval agent enforces its
   own ACL, how the synthesis agent reconciles answers across
   domains, and what happens when one domain's agent fails.
+
+## Conversation history and context condensing
+  How a follow-up question gets rewritten into a standalone
+  question before retrieval, why condensing beats passing raw
+  chat history into the prompt, where conversations and turns
+  are stored, and how document-level ACL still applies fresh on
+  every turn regardless of what an earlier turn in the same
+  conversation could see.
+
+## Streamed answer generation
+  Why SSE instead of WebSocket, why streaming attaches only to
+  the final generation step and not to retrieval or the
+  multi-agent path, how sentence-chunked guardrail checks keep
+  streaming compatible with the moderation requirement, and why
+  time-to-first-token is tracked separately from total latency.
 
 ## What could go wrong and how we handle it
   For each major failure scenario, explain in plain English

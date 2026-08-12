@@ -4,6 +4,8 @@
 Accepted (for the container image itself — built, run, and verified
 live, and confirmed pushed to Azure Container Registry. The Azure
 Container App is not yet running this image; see Consequences.)
+Extended by ADR-022, which deploys this image for real and covers
+what broke along the way.
 
 ## Context
 Build-order item 10, continuing from ADR-020's infrastructure phase.
