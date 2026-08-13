@@ -1285,6 +1285,103 @@ build-and-push workflow is exposed to by default.
 
 ---
 
+## Feature 13: GitHub Actions CI/CD via OIDC (written, not yet run live)
+
+**What does this feature do, in one sentence?**
+Automates what was previously a manual deploy sequence — a GitHub
+Actions workflow tests, builds, and deploys the backend on every push
+to `main`, authenticating to Azure through a short-lived OIDC token
+instead of a stored secret; written and reviewed, but not yet applied
+or triggered for real.
+
+```mermaid
+flowchart LR
+    PUSH[Push to main<br/>knowledge-brain/**] --> TEST[uv run pytest]
+    TEST -->|pass| LOGIN[Azure login via OIDC<br/>no stored secret]
+    LOGIN --> BUILD[docker build<br/>--platform linux/amd64]
+    BUILD --> PUSHIMG[docker push to ACR]
+    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix sha]
+    DEPLOY --> SMOKE[curl backend_url/docs]
+```
+
+**Why OIDC instead of just storing an Azure service principal secret
+as a GitHub Actions secret — what does OIDC actually buy you?**
+A stored secret is a standing liability the moment it exists — it sits
+at rest, it can leak, it needs rotation, and it works from anywhere
+it's pasted until someone notices and revokes it. OIDC removes the
+credential entirely: GitHub mints a short-lived, signed token for each
+individual workflow run, and Azure AD trusts that token only if it
+matches an exact, pre-configured condition. There's nothing sitting in
+GitHub for an attacker to steal in the first place.
+
+**What does that "exact, pre-configured condition" actually restrict,
+concretely?**
+The federated identity credential's `subject` is set to
+`repo:NavdeepTU/genai_projects:ref:refs/heads/main` — matching this
+repo and the workflow's own `main`-branch trigger precisely. Even if
+this identity's client ID somehow became publicly known, only a
+workflow run on this exact repository's `main` branch could actually
+authenticate as it — not a fork, not a pull request, not a different
+branch. A leaked shared secret, by contrast, grants access to whoever
+holds the string, unconditionally, from anywhere.
+
+**An Azure AD `Application` and a `Service Principal` both got created
+for this identity. What's the actual difference, and why does it
+matter which one a role assignment points at?**
+An Application is an identity's *definition* — its registration, its
+name — not something Azure's RBAC system can grant anything to
+directly. The Service Principal is the actual, usable instance of that
+identity inside this specific Azure AD tenant, and it's the Service
+Principal's object ID that a role assignment's `principal_id` needs.
+This is the same object-ID-vs-client-ID shape of mistake as ADR-022's
+role-assignment detour, one layer earlier: get the wrong ID into the
+wrong field here, and a role assignment either targets nothing real or
+silently doesn't do what it looks like it does.
+
+**Why two narrow role assignments (`AcrPush` on the registry,
+`Container Apps Contributor` on one specific Container App) instead of
+one broad `Contributor` grant on the whole resource group?**
+A single broad grant would never need revisiting as the project grows,
+but it would also let a compromised or misconfigured workflow run
+touch Postgres, Key Vault, or anything else sharing that resource
+group — capability this pipeline has no actual use for. Scoped
+narrowly, a compromised CI run can push a bad image and swap a
+revision, a real but bounded risk, and nothing more. The honest cost:
+every *new* thing this pipeline needs to touch later needs its own
+deliberate role assignment added, rather than already being covered.
+
+**Once CI starts deploying on its own, what stops Terraform from
+undoing it the next time someone runs `terraform apply` for something
+unrelated?**
+Nothing would, without an explicit fix — `main.tf` still declares a
+static `image = "...knowledge-brain-backend:latest"`, and by default
+Terraform re-enforces every field on every apply, forever. A
+`lifecycle { ignore_changes = [template[0].container[0].image] }`
+block tells Terraform to permanently stop tracking that one specific
+field once CI takes over — not the whole `container` block, just that
+one path. Every sibling field (`cpu`, `memory`, every `env` block)
+stays exactly as tracked as before. See
+[ADR-023](adr/ADR-023-ci-owns-the-deployed-image.md) for the full
+reasoning, including the rejected alternative of having CI drive every
+deploy through `terraform apply` itself — ruled out because this
+project has no remote Terraform state backend yet, which a
+CI-triggered `apply` would need to be safe at all.
+
+**What would you change here if this needed to run in a real team,
+not a solo project?**
+`revision_mode` is still `Single` — a new image, deployed by CI or
+anyone else, cuts over 100% of traffic immediately, regardless of how
+many replicas are running. That's a real gap independent of anything
+built this session: real protection against a bad deploy needs
+Container Apps' `Multiple` revision mode with explicit traffic
+splitting, so a new revision earns a growing share of traffic instead
+of an instant, all-or-nothing cutover. Worth naming as deliberately
+out of scope here, not assumed to already exist.
+
+*Further reading: [Microsoft's own documentation on connecting GitHub Actions to Azure via OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure), covering the exact federated-credential pattern used here.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

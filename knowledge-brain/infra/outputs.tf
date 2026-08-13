@@ -37,3 +37,28 @@ output "container_registry_login_server" {
   description = "Needed later to tag and push our own image, once we're ready to replace the placeholder."
   value       = azurerm_container_registry.main.login_server
 }
+
+output "github_actions_client_id" {
+  description = "Set as the AZURE_CLIENT_ID GitHub Actions variable (not a secret) — identifies the OIDC identity to azure/login."
+  value       = azuread_application.github_actions.client_id
+}
+
+output "github_actions_tenant_id" {
+  description = "Set as the AZURE_TENANT_ID GitHub Actions variable (not a secret)."
+  value       = data.azurerm_client_config.current.tenant_id
+}
+
+output "github_actions_subscription_id" {
+  description = "Set as the AZURE_SUBSCRIPTION_ID GitHub Actions variable (not a secret)."
+  value       = data.azurerm_client_config.current.subscription_id
+}
+
+output "container_registry_name" {
+  description = "Set as the ACR_NAME GitHub Actions variable — needed for `az acr login --name`."
+  value       = azurerm_container_registry.main.name
+}
+
+output "container_app_name" {
+  description = "Set as the CONTAINER_APP_NAME GitHub Actions variable — needed for `az containerapp update --name`."
+  value       = azurerm_container_app.backend.name
+}

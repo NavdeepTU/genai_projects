@@ -1725,3 +1725,132 @@ retrieval (item 17), conversation history with context condensing
 (item 18), and streamed answer generation (item 19) — the frontend
 remains the single largest untouched chunk. At 3–4 hours/day, that's
 roughly 21–28 working days left, assuming no further scope changes.
+
+---
+
+## Session: 2026-08-13 — GitHub Actions CI/CD via OIDC (written, not yet run live)
+
+### What we built
+- **The last piece of build-order item 10: automated deploys.** A
+  GitHub Actions workflow (`.github/workflows/knowledge-brain-ci-cd.yml`,
+  at the monorepo root — the only place GitHub discovers workflows
+  across this repo's three sibling projects) triggers on any push to
+  `main` touching `knowledge-brain/`, runs the real test suite as a
+  gate, builds explicitly for `amd64` (closing last session's
+  arm64/amd64 incident for good, not just as a one-time fix), pushes
+  to ACR, deploys via `az containerapp update --revision-suffix
+  ${{ github.sha }}`, and smoke-tests the live URL.
+- **OIDC federated identity for Azure auth — no stored secret in
+  GitHub at all.** New `infra/github_oidc.tf`: an `azuread_application`
+  and `azuread_service_principal` for the CI identity, a federated
+  identity credential whose trust condition is scoped to exactly
+  `repo:NavdeepTU/genai_projects:ref:refs/heads/main` (only a workflow
+  run on this repo's `main` branch can authenticate as it), and two
+  narrowly-scoped role assignments — `AcrPush` on the registry only,
+  `Container Apps Contributor` on the one Container App only, not the
+  whole resource group.
+- **Code review before ever running any of it caught three real
+  bugs, all fixed:** a duplicate `data "azurerm_client_config"
+  "current"` block (would have failed `terraform validate` outright,
+  since it already exists in `main.tf`); a doubled `https://` in the
+  smoke test's curl target, since `backend_url` already includes the
+  scheme; and the workflow's image name (`knowledge-brain`) not
+  matching what the rest of the project already calls it
+  (`knowledge-brain-backend`), which would have deployed successfully
+  but left `main.tf`'s own declared image silently out of sync with
+  what CI actually shipped.
+- **A related, real architectural decision: who owns the Container
+  App's `image` field once CI can deploy on its own.** Without a fix,
+  a future `terraform apply` for any unrelated change would silently
+  revert the running image back to `main.tf`'s static `:latest`
+  reference, undoing whatever CI had deployed. Fixed with a
+  `lifecycle { ignore_changes = [template[0].container[0].image] }`
+  block — the same mechanism already used for Postgres's `zone` drift,
+  applied to a new kind of drift. Considered and rejected the
+  alternative (CI driving every deploy through `terraform apply`
+  itself): ruled out because this project has no remote Terraform
+  state backend yet, which that approach would need to be safe.
+- Two new ADRs: [`ADR-023`](adr/ADR-023-ci-owns-the-deployed-image.md)
+  (the Terraform/CI ownership boundary) and
+  [`ADR-024`](adr/ADR-024-github-actions-oidc.md) (the OIDC design
+  itself — options considered, why OIDC over a stored secret, why two
+  narrow role assignments instead of one broad grant).
+- `docs/ARCHITECTURE.md`'s Azure section, `docs/INTERVIEW_PREP.md`
+  (new Feature 13), `docs/pipeline-status.html`, and `README.md` all
+  updated to describe this accurately as **written and reviewed, not
+  yet verified live** — consistent with this project's own rule that a
+  feature earns "done" status only once actually run, not once coded.
+
+### What I struggled with
+- Real conceptual gaps on Azure AD's object model, worked through and
+  corrected: initially unsure whether a role assignment attaches to an
+  Application or its Service Principal (an Application is an
+  identity's definition, not something RBAC can grant to directly —
+  the Service Principal is the actual usable instance); corrected
+  cleanly once walked through. Separately missed, then corrected, a
+  mix-up between an identity's client ID and its object ID specifically
+  on the federated identity credential's `application_id` argument
+  (it takes the Application's object ID, not its client ID) — the same
+  shape of mistake as last session's role-assignment detour, one layer
+  earlier in the setup.
+- Mixed up what `azure/login` (authenticates the pipeline to Azure via
+  OIDC) versus `az acr login` (bridges that authenticated session into
+  Docker's own, separate credential store) each actually do — initially
+  thought `az acr login` was the step supplying the client/tenant/
+  subscription IDs, which is backwards; those feed into `azure/login`
+  earlier in the pipeline. Correctly reasoned, unprompted, that both
+  of those steps and the `docker build`/`push` steps all run on the
+  GitHub-hosted runner itself.
+- Missed an explain-back question, twice, on why
+  `ignore_changes = [template[0].container[0].image]` only suppresses
+  that one specific field, not sibling fields like `memory` in the
+  same block — needed the literal code shown (the exact list contents)
+  rather than an analogy, plus a first-principles correction that
+  Terraform's default behavior is to track every field continuously,
+  forever, unless a field is explicitly named in `ignore_changes` —
+  that block is the deliberate exception, not the norm. Landed
+  correctly on the third pass.
+
+### Concepts to revisit
+- Azure AD Application vs. Service Principal, and client ID vs. object
+  ID specifically on federated identity credentials — landed today but
+  worth a cold re-explanation next time it comes up, since it took a
+  couple of corrections to get there.
+- `ignore_changes`'s exact-path scoping (not whole-block scoping) and
+  Terraform's default continuous-tracking behavior — also took
+  multiple passes; worth a quick self-check before this resurfaces.
+
+### What's next
+- Run `terraform apply` in `infra/` to actually create the OIDC
+  identity, federated credential, and role assignments in Azure —
+  nothing here exists live yet.
+- Read the new `terraform output` values and set the 8 GitHub Actions
+  repository variables (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_SUBSCRIPTION_ID`, `ACR_NAME`, `ACR_LOGIN_SERVER`,
+  `CONTAINER_APP_NAME`, `RESOURCE_GROUP`, `BACKEND_URL`).
+- Push a change touching `knowledge-brain/` to `main` to trigger the
+  workflow for the first time, and verify it actually completes —
+  build-order item 10 isn't fully done until this runs successfully at
+  least once, live.
+- API Management (item 9) still follows once this closes out.
+- `revision_mode = "Single"` means a bad deploy — from CI or anyone
+  else — still cuts over 100% of traffic instantly; real protection
+  needs `Multiple` revision mode with traffic splitting, named in
+  ADR-024 as deliberately out of scope for now.
+- Everything from prior sessions' "what's next" still stands
+  unchanged: no automated tests for ACL, MCP, or PII detection's
+  internals; the test suite still hasn't grown since PII detection.
+
+**Estimated completion: ~47% of the total project, by weighted
+effort** — up from ~44% last session. The CI/CD design work
+(the OIDC identity, the workflow itself, code review catching three
+bugs, and the Terraform/CI ownership decision) represents real,
+meaningful progress on item 10's last remaining piece, even though it
+isn't verified live yet and so doesn't flip a build-order item to
+fully "done" on its own. Rough remaining effort: ~80 hours, down from
+~85 — across actually running this pipeline for the first time, the
+test suite, real auth/multi-tenancy (item 14), API Management, the
+frontend, guardrails (item 16), multi-agent federated retrieval (item
+17), conversation history with context condensing (item 18), and
+streamed answer generation (item 19). At 3–4 hours/day, that's roughly
+20–27 working days left, assuming no further scope changes.

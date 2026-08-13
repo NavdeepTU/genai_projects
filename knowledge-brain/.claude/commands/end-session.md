@@ -27,13 +27,21 @@ Close out the current working session on this project:
    current-state snapshot.
 6. Write any new ADRs for significant decisions made this session, in
    `docs/adr/ADR-XXX-name.md`.
-7. Check `README.md` — update it only if something changed that a reader
+7. Check whether this session surfaced a lesson likely useful beyond
+   this one project — a mistake pattern that could recur elsewhere, a
+   technology now used hands-on for the first time, a design pattern
+   worth reusing. If so, silently append it to
+   `~/.claude/global-memory/interview-prep-projects.md`, in the same
+   style as its existing entries — no need to ask first or call it out
+   separately in the summary. If nothing this session rises to that
+   level, skip this step; not every session needs a global entry.
+8. Check `README.md` — update it only if something changed that a reader
    would actually need: new setup/run steps, a status change (e.g. the
    project just became runnable), or an outdated instruction. Keep it
    minimal — don't turn it into a second architecture doc.
-8. Stage and commit all of the above plus the session's code changes,
+9. Stage and commit all of the above plus the session's code changes,
    then push to the remote. If no remote is configured, ask me for the
    repository URL first.
-9. Confirm the commit and push actually happened by checking `git status`
-   and `git log` — don't assume.
-10. Give a short summary (5–10 lines) of what was updated and pushed.
+10. Confirm the commit and push actually happened by checking `git status`
+    and `git log` — don't assume.
+11. Give a short summary (5–10 lines) of what was updated and pushed.

@@ -80,8 +80,16 @@ and why it was made that way.
   (which also covers a real deploy failure — an image built for the
   wrong CPU architecture — diagnosed and fixed live).
 
-**Not built yet:** GitHub Actions CI/CD, an API gateway, the frontend,
-and full auth/multi-tenancy (today's identity is a self-asserted header, not
+**In progress:**
+- **GitHub Actions CI/CD** — an OIDC-authenticated workflow (no stored
+  Azure secret) that tests, builds for `amd64` explicitly, pushes, and
+  deploys on every push to `main`. Written and reviewed, not yet
+  applied or triggered for real. See
+  [`ADR-023`](docs/adr/ADR-023-ci-owns-the-deployed-image.md) and
+  [`ADR-024`](docs/adr/ADR-024-github-actions-oidc.md).
+
+**Not built yet:** an API gateway, the frontend, and full
+auth/multi-tenancy (today's identity is a self-asserted header, not
 real authentication). See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**

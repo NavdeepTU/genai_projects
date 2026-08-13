@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 3.0"
     }
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -297,4 +301,16 @@ resource "azurerm_container_app" "backend" {
   }
 
   tags = local.common_tags
+
+  # Once deployed, GitHub Actions owns which image tag is actually
+  # running (a plain `az containerapp update` on every push to main) —
+  # Terraform provisions the Container App's shape (secrets, env vars,
+  # scaling, ingress) but deliberately stops tracking the image field
+  # after the first apply, so a later `terraform apply` for an
+  # unrelated change never reverts a CI-deployed image back to this
+  # file's static `:latest` reference. Same pattern as the Postgres
+  # `zone` lifecycle block above, applied to a different kind of drift.
+  lifecycle {
+    ignore_changes = [template[0].container[0].image]
+  }
 }

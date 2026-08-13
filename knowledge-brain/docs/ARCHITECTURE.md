@@ -953,17 +953,21 @@ the app's real URL returned an actual `200` from `uvicorn`, serving
 FastAPI's Swagger UI, with a genuine `x-correlation-id` header on the
 response — Enterprise Requirement 3 working end to end in the deployed
 environment, not just in local dev. Build-order item 10 (Azure
-deployment) is now complete for the backend half of the system; API
-Management (item 9) and GitHub Actions CI/CD are what's left.
+deployment) has its manual path fully working; the automated path
+(GitHub Actions CI/CD) is written and reviewed, not yet run live — see
+below. API Management (item 9) is the one piece not started at all.
 
-Getting there took three separate phases, each documented in its own
+Getting there took four separate phases, each documented in its own
 ADR: [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)
 (the infrastructure itself — five distinct real errors, from a
 regional Postgres restriction to a provider bug needing `terraform
 import`), [ADR-021](adr/ADR-021-containerizing-the-backend.md) (the
 `Dockerfile`, built and verified locally, pushed to Azure Container
-Registry), and [ADR-022](adr/ADR-022-deploying-the-real-backend-image.md)
-(actually getting that image running live, covered below).
+Registry), [ADR-022](adr/ADR-022-deploying-the-real-backend-image.md)
+(actually getting that image running live, covered below), and
+[ADR-023](adr/ADR-023-ci-owns-the-deployed-image.md) /
+[ADR-024](adr/ADR-024-github-actions-oidc.md) (automating deploys via
+GitHub Actions, covered further down).
 
 Key Vault now holds six real secrets — the Postgres connection string,
 the Neo4j AuraDB password, and the OpenAI, Voyage, MCP, and Azure
@@ -996,9 +1000,44 @@ in ADR-022.
 
 Infrastructure changes (Terraform) and routine deployments (which
 image is currently running) remain two separate concerns, same as
-planned from the start — today's redeploy used `az containerapp
-update` directly, with GitHub Actions still the intended way to
-automate that step going forward, not yet built.
+planned from the start. Automating the deploy half is now written: a
+GitHub Actions workflow, at the monorepo root since that's the only
+place GitHub discovers workflow files across this repo's three sibling
+projects, triggers on any push to `main` touching `knowledge-brain/`,
+runs the test suite as a real gate, builds explicitly for `amd64`
+(closing the earlier architecture mismatch for good, not just this one
+time), pushes to ACR, deploys via `az containerapp update`, and smoke
+tests the live URL. It authenticates to Azure via OIDC — a federated
+identity trust rule scoped to exactly this repository's `main`
+branch — rather than a stored secret sitting in GitHub, with two
+narrowly-scoped role assignments (push to the registry, manage this
+one Container App, nothing broader). See
+[ADR-024](adr/ADR-024-github-actions-oidc.md) for the full reasoning,
+including two bugs review caught before anything was ever run.
+
+Letting CI deploy on its own terms meant deciding who owns the
+Container App's `image` field going forward — Terraform's own static
+`:latest` reference would otherwise get silently re-applied over
+whatever CI actually deployed, the next time anyone ran `terraform
+apply` for an unrelated reason. A `lifecycle` block now tells Terraform
+to stop tracking that one field permanently once CI takes over, the
+same mechanism already used for Postgres's `zone` drift. See
+[ADR-023](adr/ADR-023-ci-owns-the-deployed-image.md).
+
+```mermaid
+flowchart LR
+    PUSH[Push to main<br/>knowledge-brain/**] --> TEST[uv run pytest]
+    TEST -->|pass| LOGIN[Azure login via OIDC<br/>no stored secret]
+    LOGIN --> BUILD[docker build<br/>--platform linux/amd64]
+    BUILD --> PUSHIMG[docker push to ACR]
+    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix sha]
+    DEPLOY --> SMOKE[curl backend_url/docs]
+```
+
+This is written and reviewed but not yet run: `terraform apply` hasn't
+created the OIDC identity in Azure yet, the GitHub Actions repository
+variables haven't been set from `terraform output`, and the workflow
+has never actually triggered.
 
 The infrastructure lives in `infra/`, following the exact layout
 `CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
@@ -1061,12 +1100,10 @@ diagnosed from real evidence (`az` CLI output, official docs, or
 GitHub issue threads), not guessed at. Full details in
 [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
 
-Still ahead: a GitHub Actions pipeline to automate future image
-rebuilds and redeploys (today's was done by hand, with
-`--platform linux/amd64` set explicitly to avoid repeating this
-session's architecture mismatch), and Azure API Management (item 9),
-which is what finally closes the "public-facing ingress" gap named
-above.
+Still ahead: actually running the GitHub Actions pipeline above for
+the first time (it's written and reviewed, not yet applied or
+triggered), and Azure API Management (item 9), which is what finally
+closes the "public-facing ingress" gap named above.
 
 ## Glossary
 
@@ -1394,3 +1431,26 @@ necessarily error loudly — `az role assignment list`'s table view can
 display a client ID as a fallback label when it can't resolve a
 friendly name, which looks identical to a real misconfiguration unless
 you check the raw `principalId` field specifically.
+
+**Azure AD Application vs. Service Principal** — an `azuread_application`
+is an identity's *definition* — its name, its registration — not
+something Azure's permission system can grant anything to directly. A
+`Service Principal` is the actual usable instance of that identity
+inside one specific Azure AD tenant, and it's the Service Principal's
+object ID (not the Application's client ID, and not the Application's
+own object ID either) that a role assignment's `principal_id` needs.
+Every identity used for RBAC in this project — the backend's Managed
+Identity, now the GitHub Actions identity — is really a Service
+Principal under the hood, even when Terraform's resource name says
+something else.
+
+**OIDC (OpenID Connect) federated identity** — a way for one system to
+prove its identity to another without ever holding a shared secret.
+GitHub mints a short-lived, signed token for each workflow run;
+Azure AD trusts that token directly, but only if it matches an exact,
+pre-configured condition — here, a workflow run on this specific
+repository's `main` branch, nothing broader. The alternative (a stored
+service principal secret as a GitHub Actions secret) works too, but
+it's a standing credential that exists at rest and can leak; OIDC's
+token exists only for the duration of one workflow run and proves
+nothing on its own outside that exact trust condition. See ADR-024.
