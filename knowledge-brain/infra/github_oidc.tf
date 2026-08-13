@@ -14,7 +14,14 @@ resource "azuread_application_federated_identity_credential" "github_actions" {
   description    = "Trusts GitHub Actions runs on knowledge-brain's main branch to authenticate via OIDC, no stored secret."
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:NavdeepTU/genai_projects:ref:refs/heads/main"
+
+  # GitHub includes immutable numeric org/repo IDs alongside the names
+  # in this account's OIDC subject claims (protects against a renamed
+  # or transferred repo inheriting trust meant for the original one) —
+  # confirmed from the exact subject Azure rejected on a real run, not
+  # guessed at. The plain name-only format this was originally written
+  # with no longer matches what GitHub actually sends.
+  subject = "repo:NavdeepTU@35778181/genai_projects@1321286864:ref:refs/heads/main"
 }
 
 resource "azurerm_role_assignment" "github_actions_acr_push" {

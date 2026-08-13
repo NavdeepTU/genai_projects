@@ -1854,3 +1854,102 @@ frontend, guardrails (item 16), multi-agent federated retrieval (item
 17), conversation history with context condensing (item 18), and
 streamed answer generation (item 19). At 3–4 hours/day, that's roughly
 20–27 working days left, assuming no further scope changes.
+
+---
+
+## Session: 2026-08-13 (continued) — CI/CD pipeline verified live; build-order item 10 complete
+
+### What we built
+- **Applied the OIDC infrastructure for real.** `terraform apply`
+  created all 5 resources (the Azure AD Application, its Service
+  Principal, the federated identity credential, and the two role
+  assignments) cleanly, exactly matching plan. Set all 8 GitHub
+  Actions repository variables from `terraform output` via `gh
+  variable set`, confirmed with `gh variable list`.
+- **First real run failed three times, each fixed with a real,
+  evidence-based diagnosis:**
+  1. `Run tests` failed with 9 missing `Settings` fields —
+     `tests/conftest.py` imports `app.core.database`, which validates
+     the full `Settings` model at import time, and none of the values
+     `.env` normally supplies exist on any CI runner. Fixed by adding
+     a real, ephemeral `pgvector/pgvector:pg16` Postgres service
+     container to the workflow (matching `docker-compose.yml`
+     exactly), a step enabling the `vector` extension in it, and
+     plain placeholder values for the 8 fields nothing in the current
+     test suite actually calls for real.
+  2. `Azure login` failed with `AADSTS700213: No matching federated
+     identity record found` — the actual OIDC token's subject
+     included this account's immutable numeric organization and
+     repository IDs (`repo:org@ownerId/repo@repoId:ref:...`), not
+     just the plain names our federated credential was configured
+     to trust. Fixed by reading the exact rejected subject out of
+     Azure's own error message and updating `github_oidc.tf` to
+     match it precisely, rather than guessing at the format.
+  3. `Deploy new revision` failed with `ContainerAppInvalidRevisionName`
+     — a raw 40-character commit SHA combined with the Container
+     App's own name exceeded Azure's 54-character combined limit for
+     a revision name, and could just as easily have started with a
+     digit, which Azure also rejects. Fixed with a short,
+     letter-prefixed revision suffix (`run-` plus the SHA's first 8
+     characters), valid for any possible commit.
+  4. Along the way, discovered editing the workflow file itself
+     doesn't match its own `paths: knowledge-brain/**` trigger filter
+     (it lives at the monorepo root) — added `workflow_dispatch:` so
+     the pipeline can be re-run on demand without needing an unrelated
+     real change to `knowledge-brain/` queued up first.
+- **The pipeline now completes a full, real, unassisted run**: test →
+  OIDC login → build for `amd64` → push to ACR → deploy a new revision
+  → smoke test against the live URL — all green, no manual
+  intervention once triggered.
+- **Build-order item 10 (Azure deployment via Terraform + GitHub
+  Actions CI/CD) is now fully complete**, matching this project's own
+  rule that a feature earns "done" only once verified running, not
+  once written.
+- [`ADR-025`](adr/ADR-025-ci-cd-first-real-run.md) documents all three
+  fixes; ADR-024's status updated to point forward to it rather than
+  rewriting its own original reasoning.
+- `ARCHITECTURE.md`, `INTERVIEW_PREP.md` (three new Q&A pairs on
+  Feature 13), `pipeline-status.html`, and `README.md` all updated to
+  reflect item 10 as genuinely, verifiably done.
+
+### What I struggled with
+- Not applicable this session — this stretch was hands-on operational
+  debugging (reading real CI logs, applying real fixes, re-running),
+  not a Step 4 code walkthrough with a planted-error explain-back. One
+  real, useful question was asked and answered correctly without
+  prompting: what the smoke test step actually does and why the
+  `sleep 15` matters, tying it directly back to the arm64 incident's
+  "reported success, wasn't actually working" lesson from earlier
+  today.
+
+### Concepts to revisit
+- Unchanged from earlier today — Azure AD Application vs. Service
+  Principal, client ID vs. object ID on federated credentials, and
+  `ignore_changes`'s exact-path scoping are all worth a cold
+  self-check next time they come up.
+
+### What's next
+- API Management (item 9) is now the only piece of the original Azure
+  deployment work left — everything else in build-order item 10 is
+  done and verified.
+- Worth a look eventually, not urgent: the 9 placeholder test-env
+  values hardcoded in the workflow YAML would need to become real
+  values (likely GitHub Actions secrets, not plain variables) if the
+  test suite ever grows to make a genuine, unmocked call to Neo4j,
+  OpenAI, Voyage, or Azure Language.
+- `revision_mode = "Single"` still means any deploy — CI's or
+  Terraform's — cuts over all traffic instantly; real deploy safety
+  would need `Multiple` revision mode with traffic splitting, named in
+  ADR-024/025 as deliberately out of scope for now.
+- Everything from prior sessions' "what's next" still stands
+  unchanged: no automated tests for ACL, MCP, or PII detection's
+  internals; the test suite still hasn't grown since PII detection.
+
+**Estimated completion: ~49% of the total project, by weighted
+effort** — up from ~47% earlier today. Build-order item 10 flips from
+"in progress" to genuinely, fully done — the first build-order item
+completion since Feature 10 was opened, a meaningful, real milestone
+even though the remaining ~78 hours across items 9, 14, 16–19, the
+frontend, and the test suite are unchanged in kind from this morning's
+estimate. At 3–4 hours/day, that's roughly 20–26 working days left,
+assuming no further scope changes.

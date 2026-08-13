@@ -79,14 +79,16 @@ and why it was made that way.
   [`ADR-022`](docs/adr/ADR-022-deploying-the-real-backend-image.md)
   (which also covers a real deploy failure — an image built for the
   wrong CPU architecture — diagnosed and fixed live).
-
-**In progress:**
 - **GitHub Actions CI/CD** — an OIDC-authenticated workflow (no stored
   Azure secret) that tests, builds for `amd64` explicitly, pushes, and
-  deploys on every push to `main`. Written and reviewed, not yet
-  applied or triggered for real. See
-  [`ADR-023`](docs/adr/ADR-023-ci-owns-the-deployed-image.md) and
-  [`ADR-024`](docs/adr/ADR-024-github-actions-oidc.md).
+  deploys on every push to `main`. Verified live with a real,
+  unassisted, successful end-to-end run. See
+  [`ADR-023`](docs/adr/ADR-023-ci-owns-the-deployed-image.md),
+  [`ADR-024`](docs/adr/ADR-024-github-actions-oidc.md), and
+  [`ADR-025`](docs/adr/ADR-025-ci-cd-first-real-run.md) (three more
+  real bugs — a missing CI test database, a GitHub OIDC subject claim
+  mismatch, and an Azure revision-naming limit — found only once the
+  pipeline actually ran).
 
 **Not built yet:** an API gateway, the frontend, and full
 auth/multi-tenancy (today's identity is a self-asserted header, not

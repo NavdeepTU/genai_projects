@@ -1,10 +1,12 @@
 # ADR-024: GitHub Actions CI/CD via OIDC federated identity
 
 ## Status
-Accepted, written and reviewed. Not yet applied or run live —
-`terraform apply` hasn't been run for the new identity/role
-assignments, the GitHub Actions repository variables haven't been set,
-and the workflow has never actually triggered. See Consequences.
+Accepted and verified live — `terraform apply` created the identity
+and role assignments, the repository variables are set, and the
+workflow has completed a full successful run end to end (test → OIDC
+login → build → push → deploy → smoke test). Extended by
+[ADR-025](ADR-025-ci-cd-first-real-run.md), which covers three more
+real bugs found only by actually running this, not by reviewing it.
 
 ## Context
 The last piece of build-order item 10: automate what today is a
@@ -104,14 +106,12 @@ nothing more.
   separate, related decision on how Terraform and this pipeline
   coexist without fighting over the Container App's `image` field
   going forward.
-- **Not yet done, in order:** `terraform apply` (no OIDC identity
-  actually exists in Azure yet), setting the 8 GitHub Actions
-  repository variables from `terraform output`, and a push touching
-  `knowledge-brain/` on `main` to trigger the workflow for the first
-  time. Build-order item 10 isn't fully complete until this runs
-  successfully at least once, live — consistent with this project's
-  own rule that a feature earns "done" status only once verified
-  running, not once written.
+- **Now fully done, verified live:** `terraform apply` created the
+  identity and role assignments, all 8 repository variables are set,
+  and the workflow has completed a real, successful end-to-end run.
+  Build-order item 10 is complete. Getting from "written" to "actually
+  passing" surfaced three more real bugs, none visible from code review
+  alone — see [ADR-025](ADR-025-ci-cd-first-real-run.md).
 
 ## Scale, cost, and on-call reality
 OIDC's real payoff shows up in exactly the incident it prevents: a

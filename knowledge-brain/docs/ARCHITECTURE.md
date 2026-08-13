@@ -953,21 +953,25 @@ the app's real URL returned an actual `200` from `uvicorn`, serving
 FastAPI's Swagger UI, with a genuine `x-correlation-id` header on the
 response — Enterprise Requirement 3 working end to end in the deployed
 environment, not just in local dev. Build-order item 10 (Azure
-deployment) has its manual path fully working; the automated path
-(GitHub Actions CI/CD) is written and reviewed, not yet run live — see
-below. API Management (item 9) is the one piece not started at all.
+deployment) is now **fully complete** — both the manual deploy path
+and the automated one (GitHub Actions CI/CD) are verified live, the
+latter with a real, unassisted, successful end-to-end run. API
+Management (item 9) is the one piece of the original deployment work
+not started at all.
 
-Getting there took four separate phases, each documented in its own
+Getting there took five separate phases, each documented in its own
 ADR: [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)
 (the infrastructure itself — five distinct real errors, from a
 regional Postgres restriction to a provider bug needing `terraform
 import`), [ADR-021](adr/ADR-021-containerizing-the-backend.md) (the
 `Dockerfile`, built and verified locally, pushed to Azure Container
 Registry), [ADR-022](adr/ADR-022-deploying-the-real-backend-image.md)
-(actually getting that image running live, covered below), and
+(actually getting that image running live, covered below),
 [ADR-023](adr/ADR-023-ci-owns-the-deployed-image.md) /
-[ADR-024](adr/ADR-024-github-actions-oidc.md) (automating deploys via
-GitHub Actions, covered further down).
+[ADR-024](adr/ADR-024-github-actions-oidc.md) (designing automated
+deploys via GitHub Actions, covered further down), and
+[ADR-025](adr/ADR-025-ci-cd-first-real-run.md) (three more real bugs
+found only once that pipeline actually ran).
 
 Key Vault now holds six real secrets — the Postgres connection string,
 the Neo4j AuraDB password, and the OpenAI, Voyage, MCP, and Azure
@@ -1030,14 +1034,24 @@ flowchart LR
     TEST -->|pass| LOGIN[Azure login via OIDC<br/>no stored secret]
     LOGIN --> BUILD[docker build<br/>--platform linux/amd64]
     BUILD --> PUSHIMG[docker push to ACR]
-    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix sha]
+    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix run-sha8]
     DEPLOY --> SMOKE[curl backend_url/docs]
 ```
 
-This is written and reviewed but not yet run: `terraform apply` hasn't
-created the OIDC identity in Azure yet, the GitHub Actions repository
-variables haven't been set from `terraform output`, and the workflow
-has never actually triggered.
+This is now verified live — a real, unassisted workflow run completed
+every step successfully. Getting there took three more real fixes,
+each found only by actually running the pipeline somewhere that wasn't
+a laptop, none visible from reading the YAML or Terraform alone: the
+test job needed a real, ephemeral Postgres service container, since
+`.env` (and the values it holds) has never existed on any CI runner;
+the federated credential's trust `subject` needed this GitHub account's
+actual immutable organization and repository IDs, not just their
+names, which GitHub includes as a real anti-repo-hijacking security
+measure; and the deploy step's revision name needed a short,
+letter-prefixed identifier instead of a raw 40-character commit SHA,
+since Azure caps a Container App revision name at 54 combined
+characters and requires it to start with a letter. Full account in
+[ADR-025](adr/ADR-025-ci-cd-first-real-run.md).
 
 The infrastructure lives in `infra/`, following the exact layout
 `CLAUDE.md`'s scaffolding rules specify: `main.tf` holds every
@@ -1100,10 +1114,9 @@ diagnosed from real evidence (`az` CLI output, official docs, or
 GitHub issue threads), not guessed at. Full details in
 [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
 
-Still ahead: actually running the GitHub Actions pipeline above for
-the first time (it's written and reviewed, not yet applied or
-triggered), and Azure API Management (item 9), which is what finally
-closes the "public-facing ingress" gap named above.
+Still ahead: Azure API Management (item 9), the one remaining piece,
+which is what finally closes the "public-facing ingress" gap named
+above.
 
 ## Glossary
 
@@ -1454,3 +1467,22 @@ service principal secret as a GitHub Actions secret) works too, but
 it's a standing credential that exists at rest and can leak; OIDC's
 token exists only for the duration of one workflow run and proves
 nothing on its own outside that exact trust condition. See ADR-024.
+The trust condition itself — the token's `subject` claim — isn't
+always just `repo:org/repo:ref:refs/heads/branch`: this account's
+tokens include immutable numeric organization and repository IDs
+too (`repo:org@ownerId/repo@repoId:ref:...`), a real anti-hijacking
+measure protecting against a renamed or transferred repository
+inheriting trust meant for the original one. The federated credential
+has to be configured against whatever format the tokens actually use,
+confirmed from a real rejected token's exact subject, not assumed from
+documentation alone. See ADR-025.
+
+**Azure Container App revision naming constraints** — a revision name
+must be 54 characters or fewer *combined with* the Container App's own
+name, must start with a letter, and must end with an alphanumeric
+character. A raw 40-character commit SHA used directly as a revision
+suffix can blow past that combined limit and, depending on the SHA,
+can just as easily start with a digit — both real, silent failure
+modes for a naive CI deploy step. A short, letter-prefixed slice of
+the SHA (e.g. `run-` plus its first 8 characters) satisfies all three
+rules for any possible commit. See ADR-025.

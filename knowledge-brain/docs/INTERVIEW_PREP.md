@@ -1285,14 +1285,14 @@ build-and-push workflow is exposed to by default.
 
 ---
 
-## Feature 13: GitHub Actions CI/CD via OIDC (written, not yet run live)
+## Feature 13: GitHub Actions CI/CD via OIDC
 
 **What does this feature do, in one sentence?**
 Automates what was previously a manual deploy sequence — a GitHub
 Actions workflow tests, builds, and deploys the backend on every push
 to `main`, authenticating to Azure through a short-lived OIDC token
-instead of a stored secret; written and reviewed, but not yet applied
-or triggered for real.
+instead of a stored secret; written, reviewed, and now verified with a
+real, successful, unassisted end-to-end run.
 
 ```mermaid
 flowchart LR
@@ -1300,7 +1300,7 @@ flowchart LR
     TEST -->|pass| LOGIN[Azure login via OIDC<br/>no stored secret]
     LOGIN --> BUILD[docker build<br/>--platform linux/amd64]
     BUILD --> PUSHIMG[docker push to ACR]
-    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix sha]
+    PUSHIMG --> DEPLOY[az containerapp update<br/>--revision-suffix run-sha8]
     DEPLOY --> SMOKE[curl backend_url/docs]
 ```
 
@@ -1366,6 +1366,70 @@ reasoning, including the rejected alternative of having CI drive every
 deploy through `terraform apply` itself — ruled out because this
 project has no remote Terraform state backend yet, which a
 CI-triggered `apply` would need to be safe at all.
+
+**The pipeline was reviewed and looked correct, but failed three times
+in a row the first time it actually ran. Walk me through the first
+failure — why did the test step fail in CI when it passes locally?**
+`Settings` requires 9 environment variables with no defaults, normally
+supplied by `.env` locally — a file that's gitignored on purpose and
+has never existed on any CI runner. `tests/conftest.py` imports
+`app.core.database`, which calls `get_settings()` at module import
+time, so even a test with nothing to do with Neo4j or PII detection
+still needs all 9 fields present just to get past that one import. The
+fix: a real, ephemeral Postgres service container in the workflow
+itself (matching the local `docker-compose.yml` image exactly, with
+the `vector` extension enabled as a setup step) for the field that
+actually needs to be real, and plain placeholder strings for the other
+8, since nothing in the current test suite makes a real, unmocked call
+to any of those services.
+
+**Second failure: `AADSTS700213: No matching federated identity
+record found`, even though the identity and role assignments were
+created successfully. What was actually wrong?**
+The federated credential's `subject` was configured as the plain
+`repo:NavdeepTU/genai_projects:ref:refs/heads/main`. The token GitHub
+actually presented had a different subject: it included this
+account's immutable numeric organization and repository IDs alongside
+the names (`repo:org@ownerId/repo@repoId:ref:...`) — a real GitHub
+security feature protecting against a renamed or transferred
+repository inheriting trust meant for the original one. Nothing about
+the design was wrong; the assumed subject format just wasn't the one
+this account's tokens actually use. Fixed by reading the exact
+rejected subject out of Azure's own error message and configuring the
+federated credential against that, rather than guessing from
+documentation.
+
+**Third failure: `ContainerAppInvalidRevisionName`. What went wrong,
+and what's the general lesson about using a commit SHA as an
+identifier?**
+A raw 40-character commit SHA was used directly as
+`--revision-suffix`. Combined with the Container App's own name (27
+characters), that's 69 characters — past Azure's 54-character combined
+limit for a revision name. A second, latent issue sat in the same
+constraint: a revision name must start with a letter, and a raw hex
+SHA can just as easily start with a digit as not — it happened not to
+matter on the commit that triggered this, but the very next one could
+have failed for a different reason. The general lesson: an identifier
+that's "unique enough" (a full SHA) isn't automatically "valid enough"
+for wherever it's about to be used — every consumer of an identifier
+has its own constraints (length, character set, starting character),
+and satisfying uniqueness doesn't guarantee satisfying those. Fixed
+with a short, letter-prefixed slice (`run-` plus the SHA's first 8
+characters), valid for any possible commit.
+
+**None of those three were visible from reading the code. What does
+that say about when a feature actually counts as "done"?**
+Code review is real and caught real bugs earlier — the duplicate
+Terraform data source, the doubled `https://`, the image name mismatch
+in ADR-024 were all found before anything ever ran. But all three of
+*these* failures only exist at the boundary between this project's
+code and the actual external systems running it: a CI runner with no
+`.env`, this specific GitHub account's real token format, Azure's
+specific naming rules. None of that is discoverable by reading YAML or
+Terraform more carefully, no matter how thoroughly. This is the same
+standard this project already holds every other feature to — verified
+running for real, not just reviewed — just applied to the pipeline
+itself instead of the thing it deploys.
 
 **What would you change here if this needed to run in a real team,
 not a solo project?**
