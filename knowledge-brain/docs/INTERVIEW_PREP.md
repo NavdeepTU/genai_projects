@@ -1068,7 +1068,7 @@ flowchart TB
 A gateway needs something real to route to. Nothing ran in Azure at
 all before this phase, so API Management would have had no backend to
 sit in front of yet. This is a deliberate, reasoned swap of build-order
-items 9 and 10, not skipping ahead — the dependency direction only goes
+items 11 and 12, not skipping ahead — the dependency direction only goes
 one way.
 
 **Why is the Container App's ingress public right now, when Enterprise
@@ -1077,7 +1077,11 @@ internet?**
 Named and accepted as a temporary, deliberate trade-off, not an
 oversight: with no API Management layer yet, there'd be no way to
 verify the deployment worked at all without a reachable URL to test
-against. It gets tightened the moment item 9 exists.
+against. **Correction, added when Feature 14 (API Management) was
+actually built:** it did not get tightened the moment item 11 existed
+— Consumption tier APIM turned out to have no static outbound IP at
+all, so the network-level restriction this sentence implied never
+became possible without a paid tier upgrade. See ADR-026.
 
 **Walk me through a real failure this phase hit and how it got
 diagnosed — not from documentation, from an actual error.**
@@ -1443,6 +1447,147 @@ of an instant, all-or-nothing cutover. Worth naming as deliberately
 out of scope here, not assumed to already exist.
 
 *Further reading: [Microsoft's own documentation on connecting GitHub Actions to Azure via OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure), covering the exact federated-credential pattern used here.*
+
+---
+
+## Feature 14: API Management Gateway
+
+**What does this feature do, in one sentence?**
+Puts Azure API Management in front of the backend as the one intended
+public entry point, stamping a shared secret only it and the app know
+onto every request it forwards, so the FastAPI service can tell a
+request that genuinely passed through the gateway from one that
+didn't.
+
+```mermaid
+flowchart LR
+    CLIENT[Caller] -->|"POST /v1/query"| APIM["API Management<br/>(Consumption tier)"]
+    KV[(Key Vault)] -->|"named value reads<br/>the secret via APIM's<br/>own managed identity"| APIM
+    APIM -->|"stamps X-Gateway-Secret<br/>header, forwards"| BACKEND["Container App<br/>(FastAPI backend)"]
+    BACKEND --> CHECK{"gateway_secret_middleware:<br/>header correct?"}
+    CHECK -->|no| REJECT["401 + audit log entry"]
+    CHECK -->|yes| USERID["user_id_middleware<br/>(unchanged)"]
+```
+
+**The design called for two independent locks — a network restriction
+and a header secret. Only one exists today. What happened to the
+other one?**
+Azure Container Apps' `ip_security_restriction` can only allow traffic
+from IP addresses APIM actually reports — and Consumption tier APIM
+doesn't have a static, queryable outbound IP at all. `az apim show
+... publicIpAddresses` came back empty, confirmed live, not assumed.
+The Terraform block that was meant to build this looped over an empty
+list, generated zero rules, and `terraform apply` reported success
+anyway — a config that was accepted but did nothing. True network
+isolation needs Developer or Premium tier's VNet integration, a real
+fixed monthly cost this project chose not to take on yet. The dead
+code was removed rather than left in, since a restriction block that
+silently protects nothing is worse than no restriction block at all.
+
+**Why Consumption tier at all, if it can't do the thing the original
+design needed?**
+Cost, same reasoning already used for Postgres (Burstable), the
+container registry (Basic), and Neo4j (AuraDB Free) — pay-per-call, no
+fixed monthly bill, appropriate for a project with no real production
+traffic yet. The tier choice was made *before* discovering it couldn't
+support IP restriction; once that was confirmed live, the honest move
+was accepting one working lock instead of silently pretending the
+second one still existed.
+
+**If the gateway secret ever leaked, what could someone actually do
+with it?**
+Call the backend's raw Container App URL directly, skipping API
+Management (and whatever rate limiting or logging it would otherwise
+provide) entirely — the header check has no way to distinguish a
+request that came through the real gateway from one that didn't; it
+only checks whether the value is correct. Combined with this project's
+other honest, named gap — `X-User-Id` being entirely self-asserted,
+with nothing verifying the claim — a leaked secret plus a made-up user
+ID would be enough to reach real application logic. The same shape of
+risk this project already accepted for the MCP server's shared key,
+now applying here too.
+
+**Why import the API definition from FastAPI's own `/openapi.json`
+instead of declaring each route by hand in Terraform?**
+One source of truth. Hand-declaring `/documents/upload`, `/query`, and
+every future route a second time in `apim.tf` means two places can
+silently drift apart the moment a route changes. Importing from the
+same spec Swagger UI already renders means APIM's picture of the API
+stays accurate automatically, the next time this file gets re-applied
+after a route changes — no separate manual step to remember.
+
+**`gateway_secret_middleware` sits between `correlation_id_middleware`
+and `user_id_middleware` in the registration order. Why that specific
+position, and not first or last?**
+The last middleware registered wraps outermost and runs first on the
+way in — a rule this project established while building document-level
+ACL, now applied to a three-middleware stack for the first time.
+Registration order is `user_id_middleware`, then
+`gateway_secret_middleware`, then `correlation_id_middleware` — so
+actual execution order is `correlation_id_middleware` (always stamps a
+header, even on rejection) → `gateway_secret_middleware` → `user_id_middleware`.
+Checking "did this come through our gateway" before "who is this" is
+deliberate: if the gateway check ran last, a request that never passed
+through APIM at all could still get its identity checked and reach
+real logic before the more fundamental check ever fired, making the
+gateway secret decorative rather than a real outer gate.
+
+**A real incident: applying the rate-limiting policy failed with
+`"Policy is not allowed in 'Consumption' sku"`. What was tried, what
+actually happened, and what's still open?**
+The original policy, `rate-limit-by-key` (keyed per caller IP or
+subscription, matching the requirement's "100 requests/minute per
+tenant" language), isn't available on Consumption tier at all — not a
+syntax error, confirmed via the exact rejection message once the
+policy was actually saved. Azure's own snippet picker offered an
+alternative, plain `rate-limit`, but that policy is scoped
+per-*subscription* — meaningless here, since `subscription_required =
+false` was already set deliberately to avoid building APIM's separate
+subscription-key system this session. Rate limiting was removed
+entirely rather than ship something that looked like "100 per tenant"
+but actually behaved like "100 total, for everyone combined." A
+follow-up correction, caught during this feature's own interview-prep
+review: upgrading tier likely restores `rate-limit-by-key` directly,
+without needing to touch `subscription_required` at all, since that
+policy never depended on subscriptions in the first place — meaning
+"upgrade tier" may fix both the network lock and real rate limiting
+together, not two separate blockers. Not yet confirmed against Azure's
+own policy-availability docs.
+
+**A second real incident, found while trying to verify this feature,
+not caused by it: what did the request trace actually show, and how
+did that prove the feature worked despite the request failing?**
+API Management's built-in Test-and-Trace tool showed the named value
+correctly resolving the real secret from Key Vault, the `set-header`
+step correctly stamping it onto the request, and the request being
+correctly forwarded to the backend with that header present — every
+piece of the mechanism this feature built working exactly as designed.
+The backend then returned a `500`, but the container logs showed why:
+`asyncpg.exceptions.UndefinedTableError: relation "audit_log" does not
+exist` — a completely unrelated, pre-existing gap. Nobody had ever run
+`create_tables.py` against the real Azure Postgres database; every
+previous "verified live" deployment check only ever hit `/docs`, which
+never touches the database at all. Both `gateway_secret_middleware`
+and `user_id_middleware` write to `audit_log` on every rejection before
+returning an error, so this crashes *any* rejected request today,
+blocking a clean end-to-end status-code test — but the trace evidence
+alone was sufficient to confirm the gateway mechanism itself works,
+gathered a different way than originally planned. Tracked as its own
+standalone follow-up, not folded into this feature.
+
+**What would you change here if this needed to run at genuine
+production scale, with real external users?**
+Upgrade to a VNet-capable tier and let the network layer do what the
+header secret does today by convention — a compromised or leaked
+secret currently has no second obstacle in its way. Pair that with
+real per-caller rate limiting (via `rate-limit-by-key`, once available)
+and structured request/response logging into Application Insights,
+neither of which exist yet. All three are named, accepted gaps for a
+project with no real production traffic — not oversights, but not
+something that should still be true the day this handles genuine
+external load either.
+
+*Further reading: [Microsoft's own API Management policy reference](https://learn.microsoft.com/en-us/azure/api-management/api-management-policies), covering exactly which policies are available on which tier — the source that should have been checked before assuming `rate-limit-by-key` would work on Consumption tier.*
 
 ---
 

@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -5,6 +6,7 @@ from contextvars import ContextVar
 from fastapi import Request, Response
 from starlette.responses import JSONResponse
 
+from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.repositories.audit_repository import AuditRepository
 
@@ -79,3 +81,39 @@ async def user_id_middleware(
         _user_id.reset(token)
 
     return response
+
+
+async def gateway_secret_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Reject any request that didn't pass through API Management.
+
+    APIM stamps every request it forwards with this header, using a value
+    only it and this app know — stored in Key Vault, read by each side
+    through its own managed identity, never hardcoded anywhere. A request
+    missing it, or carrying the wrong value, didn't come through the
+    gateway. This is the one real access control on this backend today —
+    Consumption tier APIM has no static IP to restrict network access to
+    (see ADR-026), so this header is the only thing standing between the
+    public internet and the app.
+    """
+    if request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    provided_secret = request.headers.get("X-Gateway-Secret", "")
+    expected_secret = get_settings().apim_gateway_secret
+
+    if not secrets.compare_digest(provided_secret, expected_secret):
+        async with AsyncSessionLocal() as session:
+            await AuditRepository(session).log_action(
+                correlation_id=get_correlation_id(),
+                action="access_denied",
+                resource_type="request",
+                resource_id=get_correlation_id(),
+                extra_data={"path": request.url.path, "reason": "missing or invalid gateway secret"},
+            )
+        return JSONResponse(
+            {"detail": "Request did not come through the API gateway"}, status_code=401
+        )
+
+    return await call_next(request)

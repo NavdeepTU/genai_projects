@@ -62,3 +62,8 @@ output "container_app_name" {
   description = "Set as the CONTAINER_APP_NAME GitHub Actions variable — needed for `az containerapp update --name`."
   value       = azurerm_container_app.backend.name
 }
+
+output "apim_gateway_url" {
+  description = "The public URL meant to be used to reach the backend. The Container App's own direct URL still works too (Consumption tier has no static IP to restrict to — see ADR-026); the gateway secret header is the one real lock, not network isolation."
+  value       = "${azurerm_api_management.main.gateway_url}/${azurerm_api_management_api.backend.path}"
+}

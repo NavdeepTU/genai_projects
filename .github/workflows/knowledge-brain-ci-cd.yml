@@ -61,6 +61,7 @@ jobs:
           MCP_API_KEY: test-key
           AZURE_LANGUAGE_ENDPOINT: https://test.cognitiveservices.azure.com/
           AZURE_LANGUAGE_KEY: test-key
+          APIM_GATEWAY_SECRET: test-key
         run: uv run pytest
 
       - name: Azure login (OIDC, no stored secret)
@@ -90,7 +91,16 @@ jobs:
             --image ${{ vars.ACR_LOGIN_SERVER }}/knowledge-brain-backend:${{ github.sha }} \
             --revision-suffix run-${GITHUB_SHA:0:8}
 
-      - name: Smoke test
+      - name: Smoke test (through API Management, not the backend's direct URL)
         run: |
           sleep 15
-          curl -f ${{ vars.BACKEND_URL }}/docs
+          status=$(curl -s -o response.json -w "%{http_code}" -X POST "${{ vars.APIM_GATEWAY_URL }}/query" \
+            -H "Content-Type: application/json" -d '{"question": "smoke test"}')
+          echo "Status: $status"
+          cat response.json
+          if [ "$status" != "401" ]; then
+            echo "Expected 401 (missing X-User-Id — proves the request reached the app through the gateway), got $status"
+            exit 1
+          fi
+          grep -q "X-User-Id header is required" response.json || \
+            (echo "Got a 401, but not for the expected reason — the gateway check itself may be failing" && exit 1)

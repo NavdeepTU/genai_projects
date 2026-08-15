@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     azure_language_key: str
     pii_max_chars_per_document: int = 5000
 
+    # API Management gateway
+    apim_gateway_secret: str
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -78,3 +78,14 @@ variable "azure_language_key" {
   type        = string
   sensitive   = true
 }
+
+variable "apim_publisher_name" {
+  description = "Organization name shown on API Management's developer-facing pages (docs, notification emails). Cosmetic only, not a secret."
+  type        = string
+  default     = "Knowledge Brain"
+}
+
+variable "apim_publisher_email" {
+  description = "Contact email Azure API Management sends service notifications to (e.g. certificate expiry warnings). Not a secret, but no default — must be a real address you actually check."
+  type        = string
+}

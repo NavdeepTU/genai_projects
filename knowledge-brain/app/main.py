@@ -4,7 +4,11 @@ from fastapi import FastAPI
 
 from app.api.documents import router as documents_router
 from app.api.query import router as query_router
-from app.core.middleware import correlation_id_middleware, user_id_middleware
+from app.core.middleware import (
+    correlation_id_middleware,
+    gateway_secret_middleware,
+    user_id_middleware,
+)
 from app.mcp.auth import ApiKeyMiddleware
 from app.mcp.server import mcp
 
@@ -27,6 +31,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Knowledge Brain", lifespan=lifespan)
 
 app.middleware("http")(user_id_middleware)
+app.middleware("http")(gateway_secret_middleware)
 app.middleware("http")(correlation_id_middleware)
 
 app.include_router(documents_router)

@@ -16,17 +16,28 @@ answering with whatever it has. Both flows now also touch a second
 database: Neo4j, which remembers explicit references between documents
 (not similarity — actual "this mentions that") and lets a question's
 answer pull in context from a document that was never directly
-retrieved, only connected. Everything after that in the build order
-doesn't exist yet. Every request, regardless of which flow it's on,
-also gets a correlation ID, an audit log entry, and circuit-breaker
-protection around its external AI calls (OpenAI, Voyage AI, and now
-Neo4j).
+retrieved, only connected. A request also reaches the backend through
+one of two doors now: the intended one, Azure API Management, which
+stamps a shared secret onto everything it forwards; or the Container
+App's own direct URL, which still works too, since Consumption tier
+APIM has no network-level way to block it. Everything after that in
+the build order doesn't exist yet. Every request, regardless of which
+flow it's on, also gets a correlation ID, an audit log entry, and
+circuit-breaker protection around its external AI calls (OpenAI,
+Voyage AI, and now Neo4j).
 
 ```mermaid
 flowchart TD
+    CLIENT[Caller] -->|"intended door"| APIM["API Management<br/>(Consumption tier)"]
+    KV[(Key Vault)] -.->|"named value reads the<br/>secret via APIM's own<br/>managed identity"| APIM
+    APIM -->|"stamps X-Gateway-Secret,<br/>forwards"| REQ
+    CLIENT -.->|"also still works — no<br/>network-level restriction<br/>on Consumption tier"| REQ
+
     subgraph mw["Every request"]
         REQ[Request arrives] --> CID["Correlation ID middleware<br/>(outermost — always runs, even on rejection)"]
-        CID --> UID{"X-User-Id header<br/>present?"}
+        CID --> GW{"X-Gateway-Secret<br/>header correct?"}
+        GW -->|no| GWREJECT["401 + audit log entry<br/>(action: access_denied)"]
+        GW -->|yes| UID{"X-User-Id header<br/>present?"}
         UID -->|no| REJECT["401 + audit log entry<br/>(action: access_denied)"]
     end
 
@@ -148,7 +159,34 @@ replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
 rather than guessing if the answer isn't there.
 
-**What's new since the last update:** document-level access control
+**What's new since the last update:** an API Management gateway
+(build-order step 11) sits in front of the backend as the intended
+public entry point. It imports its picture of the API straight from
+FastAPI's own `/openapi.json` rather than duplicating the route list by
+hand, and its one policy stamps a shared secret — generated once,
+stored in Key Vault, read by APIM itself through a Key Vault-backed
+named value and its own managed identity — onto every request it
+forwards. A new `gateway_secret_middleware`, sitting between the
+correlation ID and identity middleware, rejects anything missing that
+exact header. The original design also called for a network-level
+lock, restricting the Container App to only accept traffic from APIM's
+own IP — but Consumption tier APIM has no static outbound IP at all,
+confirmed live (`az apim show` returned an empty list), so that half of
+the design doesn't exist: the backend's own direct URL still works,
+completely unrestricted, and the header secret is the one real
+mechanism deciding access today. Rate limiting was designed, attempted,
+and removed for the same reason — Consumption tier rejects the
+per-caller policy this needed outright, and the fallback Azure offers
+is scoped per-subscription, meaningless given `subscription_required =
+false` was deliberately left off. Verifying this feature live also
+surfaced a real, separate incident: the Azure Postgres database has
+never had its application tables created, so any rejected request
+against the deployed backend crashes trying to write its audit log
+entry — caught only because API Management's own request trace showed
+the gateway mechanism itself working correctly before that unrelated
+crash happened. See ADR-026.
+
+Document-level access control
 (build-order step 8) — every uploaded document is now visible only to
 users explicitly granted access, checked at retrieval time via a SQL
 join, not after results come back. A lightweight `X-User-Id` header
@@ -242,6 +280,24 @@ thresholded at 0.4 based on real measured scores (a true match scored
 See ADR-014.
 
 ## The main components
+
+**API Management gateway (`infra/apim.tf`)** — the intended front door
+onto the whole system, sitting in front of everything below it. Its one
+job is stamping a shared secret onto every request it forwards, so the
+backend can tell "came through the gateway" from "didn't." Talks to:
+Key Vault (reading the secret via its own managed identity), and the
+Container App (forwarding every request that reaches it — nothing
+filters *which* requests reach it, since the intended network-level
+restriction turned out not to be possible on this tier). If it
+disappeared, nothing about the backend's own behavior would change —
+callers would just need to know the direct Container App URL instead,
+which already works today regardless.
+
+```mermaid
+flowchart LR
+    APIM[API Management] -->|"reads via named value +<br/>own managed identity"| KV[(Key Vault)]
+    APIM -->|"stamps X-Gateway-Secret,<br/>forwards every request"| APP["Container App<br/>(no network restriction —<br/>direct URL also reachable)"]
+```
 
 **API route (`app/api/documents.py`)** — the "front door." Accepts an
 uploaded file over the network, rejects unsupported file types immediately,
@@ -668,6 +724,31 @@ more common `BaseHTTPMiddleware`, after live testing showed
 responses by running the wrapped app in a separate, buffered task. See
 ADR-017.
 
+API Management was chosen on Consumption tier for the same reason
+every other "cheapest managed option" in this project was — pay per
+call, no fixed monthly bill, appropriate for a project with no real
+production traffic yet. That choice was made before discovering it
+couldn't deliver the network-level half of the original two-lock
+design: Consumption tier has no static outbound IP at all, confirmed
+live rather than assumed, so the Container App can't actually be
+restricted to only accept APIM's traffic. Rather than leave in
+Terraform code that silently generated zero restriction rules while
+implying real protection, it was removed, and the gateway secret header
+was accepted as the one real lock — mirroring the same trade-off this
+project already made for MCP's single shared secret, proportionate to
+a project with no real external callers yet, not a permanent design.
+Real network isolation would need Developer or Premium tier's VNet
+integration, a genuine ongoing cost. Rate limiting was designed,
+attempted, and also removed: the per-caller policy the requirement
+actually needed isn't available on Consumption tier at all, and the
+fallback Azure offers there is scoped per-subscription — meaningless
+given subscriptions were deliberately left unrequired. See ADR-026,
+including a correction made during the feature's own interview-prep
+review: upgrading tier may restore real rate limiting *and* network
+isolation together, since the originally wanted policy never actually
+needed subscriptions in the first place, a claim not yet confirmed
+against Azure's own documentation.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address —
@@ -943,6 +1024,31 @@ probe against a real endpoint (Application Insights, hitting a `/health`
 route that doesn't exist yet) would catch it immediately; right now
 the only backstop is a human noticing a stale response. See ADR-022.
 
+**The API Management gateway's secret is the one thing standing between
+the backend and the public internet** — there's no network-level
+restriction behind it, since Consumption tier APIM has no static IP to
+restrict to. If that secret ever leaked, whoever holds it could call
+the backend's own direct URL, skipping API Management (and whatever
+rate limiting or logging it would otherwise provide) entirely. The
+header check has no way to tell "came through the real gateway" from
+"knows the right value" — same honest shape of risk this project
+already accepted for MCP's shared key. Closing it for real needs a
+VNet-capable tier, a genuine ongoing cost, not built here. See ADR-026.
+
+**The Azure Postgres database has no application tables in it at all**
+— found live, not by inspection, while verifying the API Management
+gateway: every prior "verified live" deployment check only ever hit
+`/docs`, which never touches the database, so this went unnoticed
+across several sessions. `create_tables.py` has never been run against
+it. Both `gateway_secret_middleware` and `user_id_middleware` write to
+`audit_log` on every rejection, so any rejected request against the
+real deployment crashes with `UndefinedTableError` today — meaning no
+feature that writes to the database (a real upload, a real query, a
+real permission grant) can currently succeed against the live backend,
+only against local Docker Postgres. Tracked as its own standalone item,
+not fixed yet, and not folded into whichever feature happened to
+surface it.
+
 ## Azure infrastructure overview
 
 The real backend is now genuinely running in Azure — not the
@@ -952,12 +1058,12 @@ directly, not assumed from a clean `terraform apply`: a `curl` against
 the app's real URL returned an actual `200` from `uvicorn`, serving
 FastAPI's Swagger UI, with a genuine `x-correlation-id` header on the
 response — Enterprise Requirement 3 working end to end in the deployed
-environment, not just in local dev. Build-order item 10 (Azure
+environment, not just in local dev. Build-order item 12 (Azure
 deployment) is now **fully complete** — both the manual deploy path
 and the automated one (GitHub Actions CI/CD) are verified live, the
 latter with a real, unassisted, successful end-to-end run. API
-Management (item 9) is the one piece of the original deployment work
-not started at all.
+Management (item 11) has since been built too — see the "What's new"
+section above and ADR-026 for what it does and doesn't actually close.
 
 Getting there took five separate phases, each documented in its own
 ADR: [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)
@@ -1089,17 +1195,22 @@ knowing these are two unrelated systems, not the same mechanism reused
 twice — confirmed the hard way this session, tracing an apparent
 permissions failure that turned out to be a red herring instead.
 
-One real, temporary compromise, named on purpose: the Container App's
-ingress is public-facing, meaning once actually deployed, the backend
-would be reachable directly from the internet with no gateway in front
-of it. Enterprise Requirement 1 says that should never happen — but
-Azure API Management (build-order item 9) doesn't exist yet, and
-there'd be no way to verify a deployment even happened without a
-reachable URL to test against in the meantime. Deliberately swapping
-the build order here — deploying the backend before building the
-gateway that's supposed to sit in front of it — since a gateway needs
-something real to route to. This is meant to be tightened the moment
-APIM exists, not left as a permanent state.
+One real compromise, named on purpose and still not fully closed: the
+Container App's ingress is public-facing, meaning the backend is
+reachable directly from the internet with no gateway actually forcing
+traffic through it. Enterprise Requirement 1 says that should never
+happen. Deploying the backend before building the gateway (item 12
+before item 11) was a deliberate build-order swap, since a gateway needs
+something real to route to — and API Management now exists, on the
+public route it's meant to be the front door for. But the compromise
+isn't actually tightened: Consumption tier APIM has no static outbound
+IP, so the Container App can't be network-restricted to only accept its
+traffic, and the direct URL still works exactly as before APIM existed.
+The one real change is that requests going through APIM now carry a
+secret the backend checks — real protection against a casual caller,
+not against anyone who already knows or guesses the direct URL and that
+header. Closing this for real needs a VNet-capable APIM tier, a genuine
+ongoing cost not taken on yet. See ADR-026.
 
 Getting the real infrastructure up took five distinct, real errors,
 each with a different root cause — a subscription-level regional
@@ -1114,9 +1225,11 @@ diagnosed from real evidence (`az` CLI output, official docs, or
 GitHub issue threads), not guessed at. Full details in
 [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
 
-Still ahead: Azure API Management (item 9), the one remaining piece,
-which is what finally closes the "public-facing ingress" gap named
-above.
+Still ahead, standalone and not yet started: creating the application's
+tables in the real Azure Postgres database, discovered live as a gap
+while verifying the gateway, and real per-caller rate limiting or
+network isolation, both blocked by the same Consumption-tier
+limitation.
 
 ## Glossary
 
@@ -1486,3 +1599,30 @@ can just as easily start with a digit — both real, silent failure
 modes for a naive CI deploy step. A short, letter-prefixed slice of
 the SHA (e.g. `run-` plus its first 8 characters) satisfies all three
 rules for any possible commit. See ADR-025.
+
+**API Management (APIM)** — Azure's managed API gateway product: a
+service that sits in front of a backend, forwarding requests through
+whatever checks its own policies define, rather than callers reaching
+the backend directly. This project uses it as the intended (though not
+network-enforced) public entry point. See ADR-026.
+
+**APIM Consumption tier** — the cheapest, pay-per-call APIM tier, with
+no fixed monthly cost. The real trade-off found live in this project:
+no VNet integration and no static outbound IP address at all, meaning
+a backend behind it can't be network-restricted to only accept its
+traffic, and several policies (including the per-caller rate-limiting
+one this project wanted) aren't available on it at all. Developer and
+Premium tiers remove these limits at a real, fixed monthly cost.
+
+**Named value (APIM)** — a slot inside API Management holding a config
+value referenced by name (`{{like-this}}`) from a policy, instead of
+that value being pasted directly into the policy's own text. Can pull
+its value live from Key Vault, through APIM's own managed identity,
+rather than storing a copy of a secret a second time.
+
+**Policy (APIM)** — instructions attached to an API (or one specific
+operation) telling API Management what to do to a request before
+forwarding it, and to the response before returning it — rate limiting,
+header injection, logging, and similar checks, written in an XML format
+with four sections (`inbound`, `backend`, `outbound`, `on-error`)
+corresponding to each stage of a request's round trip.

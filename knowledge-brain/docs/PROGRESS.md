@@ -1953,3 +1953,173 @@ even though the remaining ~78 hours across items 9, 14, 16–19, the
 frontend, and the test suite are unchanged in kind from this morning's
 estimate. At 3–4 hours/day, that's roughly 20–26 working days left,
 assuming no further scope changes.
+
+---
+
+## Session: 2026-08-15 — Feature 11: API Management gateway (partial — one working lock, not two)
+
+### What we built
+- **API Management gateway, build-order item 11** (see "What I struggled
+  with" below — this session also caught that this project's own docs
+  had been calling it "item 9" for many sessions running, a real
+  numbering drift against `CLAUDE.md`'s actual current list, not a
+  legitimate renumbering). Built in five taught chunks, each with an
+  explain-back: the APIM instance itself (Consumption tier, system
+  identity), an API definition importing FastAPI's own `/openapi.json`
+  rather than hand-declaring routes a second time, a randomly generated
+  gateway secret stored in Key Vault and read by APIM through a Key
+  Vault-backed named value, a policy stamping that secret onto every
+  forwarded request, and `gateway_secret_middleware` on the backend
+  checking it with a constant-time comparison — positioned between
+  `correlation_id_middleware` (outermost) and `user_id_middleware`
+  (innermost), a real extension of the "last-registered-wraps-outermost"
+  rule from the ACL session to a three-middleware stack for the first
+  time.
+- **The original two-lock design collapsed to one, discovered live, not
+  guessed at.** `az apim show ... publicIpAddresses` came back empty —
+  Consumption tier APIM has no static outbound IP at all, so the
+  planned network restriction on the Container App's ingress
+  (`dynamic "ip_security_restriction"`) generated zero rules despite a
+  clean `terraform apply`. Removed entirely rather than left in as dead
+  code implying protection it didn't provide. The gateway secret header
+  is the one real lock today — the same trade-off already accepted for
+  MCP's shared key, applied here for the same reason.
+- **Rate limiting designed, attempted, and also removed.**
+  `rate-limit-by-key` failed with `"Policy is not allowed in
+  'Consumption' sku"` — confirmed via the Portal's own policy editor
+  after Terraform's error came back too vague to act on. Azure's
+  offered alternative, plain `rate-limit`, is scoped per-subscription,
+  meaningless given `subscription_required = false` was deliberately
+  set. Removed rather than shipped in a form that looked like "100 per
+  tenant" but actually meant "100 total, for everyone." A real
+  correction surfaced later, during this feature's own interview-prep
+  review: upgrading tier likely restores `rate-limit-by-key` directly
+  without needing to touch `subscription_required` at all, since that
+  policy never depended on subscriptions in the first place — caught
+  and written into ADR-026 as a visible correction, not silently fixed.
+- **A real Terraform schema mistake, found and fixed live:** copied
+  `priority` from memory of App Service's `ip_restriction` block onto
+  Container Apps' `ip_security_restriction`, which doesn't support it
+  at all — `terraform plan` rejected it outright.
+- **The GitHub Actions smoke test rewritten**, since it curled the
+  backend's direct URL, which the new IP restriction (however briefly
+  it was going to exist) would have broken, and which isn't even a
+  real declared route through APIM. Now posts to `/v1/query` through
+  the real gateway and checks for the *specific* 401 `user_id_middleware`
+  returns — proving the whole chain, not just that something responded.
+- **Verified live through APIM's own Test-and-Trace tool**, not a plain
+  curl, after a plain curl returned an opaque `500`: the trace showed
+  the named value correctly resolving the secret, `set-header` correctly
+  stamping it, and the request correctly forwarded with it present —
+  the mechanism this feature built working exactly as designed.
+- **A second, unrelated real incident found the same way, not caused by
+  this feature:** the backend's `500` was `asyncpg.exceptions.UndefinedTableError:
+  relation "audit_log" does not exist` — the real Azure Postgres
+  database has never had `create_tables.py` run against it. Both
+  `gateway_secret_middleware` and `user_id_middleware` write to
+  `audit_log` on every rejection, so this crashes *any* rejected
+  request against the live deployment today, blocking a clean
+  end-to-end status-code test of this session's own feature — verified
+  instead via the trace evidence above. Explicitly scoped out as its own
+  standalone item, agreed with the user rather than assumed, since every
+  prior "verified live" Azure check only ever hit `/docs`, never
+  actually touching the database.
+- Checked real (approximate) Azure API Management Developer tier
+  pricing via web search, since Azure's own pricing page showed a
+  placeholder — roughly $48–50/month, ~₹4,000–4,400/month, explicitly
+  caveated as a third-party estimate, not confirmed against Azure's own
+  calculator with billing set to INR.
+- [`ADR-026`](adr/ADR-026-api-management-gateway.md) documents the whole
+  feature, both reversals, the MCP precedent it mirrors, and — updated
+  live during this session, not rewritten silently — the corrected
+  reasoning on what actually blocks real rate limiting.
+
+### What I struggled with
+- Missed one planted-error explain-back on the first pass: repeated as
+  true a false claim that Consumption tier "gives full VNet
+  integration" — caught only after a second, differently-framed
+  explanation (two separate buildings for the front desk). Caught two
+  other planted claims cleanly on the first attempt (the `service_url`
+  vs. `path` distinction; that a `depends_on` on one resource doesn't
+  grant a *different* identity read access).
+- Missed a CIDR `/32` planted claim on the first pass — read `/32` as
+  "the whole range" rather than one exact address — landed after a
+  street-address analogy on the second attempt.
+- Repeated as true a planted claim about three-middleware execution
+  order (said `user_id_middleware` would run before
+  `gateway_secret_middleware`) — landed only after a second, "wrapping
+  a gift" framing of the same last-registered-wraps-outermost rule
+  already taught during the ACL session.
+- Two genuinely good, unprompted corrections given during this session,
+  worth remembering as validated instincts, not just corrected mistakes:
+  that a VNet-tier upgrade reduces *operational* risk (one lock to
+  maintain instead of two independently drifting ones), not just cost;
+  and that upgrading tier likely fixes real rate limiting without
+  needing to reopen the subscription-key decision at all, since
+  `rate-limit-by-key` never depended on subscriptions in the first
+  place — a sharper answer than the one this session's own ADR draft
+  had led with, caught and fixed in the ADR rather than left standing.
+- Found, mid-`/end-session`, that this project's own docs had called
+  API Management "item 9" across many sessions and several files
+  (`PROGRESS.md`, `ARCHITECTURE.md`, `INTERVIEW_PREP.md`) — a genuine,
+  propagated numbering error against `CLAUDE.md`'s actual current list
+  (evaluation harness is 9, MCP is 10, API Management is 11, Azure
+  deployment is 12), not a legitimate reordering. Fixed everywhere it
+  appeared in `ARCHITECTURE.md` and `INTERVIEW_PREP.md` tonight
+  (living documents); left every past `PROGRESS.md` entry using the old
+  number untouched, since this file is a history log, not something to
+  rewrite.
+
+### Concepts to revisit
+- Whether `rate-limit-by-key` is genuinely available on Developer or
+  Premium tier — the correction above is a strong guess, not yet
+  confirmed against Azure's own current policy-availability
+  documentation.
+- Real Developer tier pricing in INR — only a third-party estimate
+  tonight, not checked against Azure's own calculator with billing
+  currency actually set to INR.
+- Why patching `pypdf.PdfReader` directly wouldn't have worked — still
+  unanswered, now many sessions running. Worth just answering it
+  directly next time rather than deferring again.
+
+### What's next
+- **Agreed with the user as the very next thing to tackle, standalone,
+  not folded into any other feature:** create the application's tables
+  in the real Azure Postgres database. Concretely: a temporary firewall
+  rule allowing the operator's own IP through Postgres's firewall (the
+  existing `0.0.0.0/0.0.0.0` rule only means "allow Azure's own
+  services," not a real caller), point a local `DATABASE_URL` at the
+  real Azure connection string, run `scripts/create_tables.py` against
+  it, then remove the temporary firewall rule.
+- Once that's done: actually get a clean end-to-end status-code
+  verification of tonight's gateway feature (the two curl commands
+  designed this session, blocked tonight by the missing-tables crash) —
+  and the rewritten GitHub Actions smoke test should be confirmed
+  passing on a real CI run too, not just locally.
+- Real per-caller rate limiting and network isolation remain deferred,
+  pending both a confirmed answer on `rate-limit-by-key`'s real tier
+  availability and a real decision about paying Developer tier's
+  ongoing cost.
+- Request/response logging into Application Insights and APIM's own
+  subscription-key concept remain named, deferred gaps, not started.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  no automated tests for ACL, MCP, or PII detection's internals; the
+  test suite still hasn't grown since PII detection; item 13 (frontend),
+  item 14 (auth/multi-tenancy), and the remaining build-order items are
+  all still open, next-session choices, not decided tonight.
+
+**Estimated completion: ~51% of the total project, by weighted
+effort** — up from ~49% earlier this week. 11 of 19 build-order items
+are fully done; item 11 (API Management) is genuinely built and its
+core mechanism verified live, but two of its four original
+requirements (network isolation, real rate limiting) were found to be
+blocked by the chosen tier and are tracked as deferred rather than
+done, so it's marked partial, not complete. The session also surfaced
+a new, standalone piece of required work (creating the Azure Postgres
+schema) not previously tracked anywhere. Rough remaining effort: ~72
+hours across that table-creation fix, real auth/multi-tenancy (item
+14), the frontend, guardrails (item 16), multi-agent federated
+retrieval (item 17), conversation history (item 18), streamed
+generation (item 19), and the still-growing test suite gap. At 3–4
+hours/day, that's roughly 18–24 working days left, assuming no further
+scope changes.

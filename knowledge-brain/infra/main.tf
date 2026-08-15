@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 2.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -232,6 +236,12 @@ resource "azurerm_container_app" "backend" {
     identity            = azurerm_user_assigned_identity.backend.id
   }
 
+  secret {
+    name                = "apim-gateway-secret"
+    key_vault_secret_id = azurerm_key_vault_secret.gateway_secret.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
   template {
     min_replicas = 1
     max_replicas = 1
@@ -286,6 +296,11 @@ resource "azurerm_container_app" "backend" {
         name  = "AZURE_LANGUAGE_ENDPOINT"
         value = var.azure_language_endpoint
       }
+
+      env {
+        name        = "APIM_GATEWAY_SECRET"
+        secret_name = "apim-gateway-secret"
+      }
     }
   }
 
@@ -298,6 +313,17 @@ resource "azurerm_container_app" "backend" {
       percentage      = 100
       latest_revision = true
     }
+
+    # No IP restriction here, deliberately, not an oversight: Consumption
+    # tier APIM (see apim.tf) doesn't expose a static, queryable outbound
+    # IP at all — confirmed live via `az apim show ... publicIpAddresses`,
+    # which came back empty. A network-level lock down to "only APIM can
+    # reach this" would need Developer/Premium tier's VNet integration
+    # instead, a real fixed monthly cost we chose not to take on right
+    # now. The gateway_secret_middleware app-level check (see
+    # app/core/middleware.py) is the one real lock protecting this
+    # backend today — accepted, named trade-off, same shape as the MCP
+    # server's single shared-secret gate.
   }
 
   tags = local.common_tags

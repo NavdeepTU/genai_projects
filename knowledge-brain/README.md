@@ -71,7 +71,7 @@ and why it was made that way.
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
   Container App, wired together with a Managed Identity instead of any
-  raw secret; Key Vault holds all 6 real secrets the app needs. Its
+  raw secret; Key Vault holds all 7 real secrets the app needs. Its
   public URL returns a real HTTP 200 with a genuine Swagger UI and a
   correlation ID header. See
   [`ADR-020`](docs/adr/ADR-020-azure-deployment-infrastructure.md),
@@ -89,10 +89,19 @@ and why it was made that way.
   real bugs — a missing CI test database, a GitHub OIDC subject claim
   mismatch, and an Azure revision-naming limit — found only once the
   pipeline actually ran).
+- **API Management gateway** *(partial — see below)* — Azure API
+  Management sits in front of the backend, importing its API definition
+  straight from FastAPI's own OpenAPI spec and stamping a Key
+  Vault-held secret onto every request it forwards; the backend rejects
+  anything missing it. Verified live via APIM's own request trace. Two
+  of the original design's four pieces aren't built: network-level
+  restriction and real per-caller rate limiting both turned out to be
+  unavailable on the Consumption tier chosen for cost — see
+  [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
 
-**Not built yet:** an API gateway, the frontend, and full
-auth/multi-tenancy (today's identity is a self-asserted header, not
-real authentication). See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** the frontend and full auth/multi-tenancy (today's
+identity is a self-asserted header, not real authentication). See
+`CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
@@ -107,6 +116,14 @@ real authentication). See `CLAUDE.md`'s build order for the full plan.
   [`ADR-009`](docs/adr/ADR-009-audit-logging-approach.md).
 - The circuit breaker's state lives in a single process's memory, so it
   doesn't share failure counts across multiple server instances yet.
+- The Container App's direct URL is still fully reachable, unrestricted
+  — the API Management gateway's secret header is the one real access
+  control today, not network isolation. See `ADR-026`.
+- The real Azure Postgres database has no application tables in it —
+  `create_tables.py` has never been run against it, so no
+  database-writing request can currently succeed against the live
+  deployment (local Docker Postgres is unaffected). Standalone, planned
+  next.
 
 ## How it works
 
@@ -181,7 +198,12 @@ not upfront.
    The `NEO4J_*` values already match `docker-compose.yml`'s defaults,
    so they work as-is for local development. Set `MCP_API_KEY` to any
    value of your choice — it's the shared secret MCP clients must send
-   back to use the `/mcp` endpoint. `AZURE_LANGUAGE_ENDPOINT` and
+   back to use the `/mcp` endpoint. Set `APIM_GATEWAY_SECRET` to any
+   value too — in Azure this is generated and stamped on automatically
+   by API Management (see [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md)),
+   but locally there's no gateway in front of the app, so every request
+   needs to send this same value back manually as an `X-Gateway-Secret`
+   header, or the backend rejects it with a 401. `AZURE_LANGUAGE_ENDPOINT` and
    `AZURE_LANGUAGE_KEY` need a real Azure AI Language resource (the
    free `F0` tier is enough) — create one in the
    [Azure Portal](https://portal.azure.com), search "Language service,"
@@ -207,15 +229,21 @@ without writing any `curl` commands by hand.
 ### Trying it manually
 
 Every request needs an `X-User-Id` header — any value you like, it's
-just a caller-supplied identity, not a real login:
+just a caller-supplied identity, not a real login — and an
+`X-Gateway-Secret` header matching whatever value you set for
+`APIM_GATEWAY_SECRET` in `.env` (see step 3 above; in Azure, API
+Management adds this header automatically, but locally you have to
+send it yourself):
 
 ```
 curl -X POST http://localhost:8000/documents/upload \
   -H "X-User-Id: you" \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -F "file=@/path/to/a/file.txt"
 
 curl -X POST http://localhost:8000/query \
   -H "X-User-Id: you" \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
 ```
