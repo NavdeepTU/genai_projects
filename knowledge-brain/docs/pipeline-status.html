@@ -863,7 +863,39 @@
     </div>
 
     <p class="caveat"><strong>Not built, deferred on purpose:</strong> network-level restriction (Consumption tier APIM has no static outbound IP at all, confirmed live — the Container App's direct URL still works, fully unrestricted) and real per-caller rate limiting (the wanted policy isn't available on this tier; the fallback Azure offers is scoped per-subscription, meaningless since subscriptions were deliberately left unrequired). Also deferred: request/response logging and APIM's own subscription-key concept. See ADR-026.</p>
-    <p class="caveat"><strong>Verified live, but not the way originally planned:</strong> API Management's own request trace confirmed the secret resolving correctly, being stamped onto the request, and being forwarded correctly to the backend — proving the mechanism works. A clean end-to-end status-code test is currently blocked by a separate, unrelated incident found the same way: the real Azure Postgres database has no application tables at all, so every rejected request crashes trying to write its audit log entry. Tracked as its own standalone item, not yet fixed.</p>
+    <p class="caveat"><strong>Verified live, fully, in two stages:</strong> API Management's own request trace first confirmed the secret resolving correctly, being stamped onto the request, and being forwarded correctly to the backend. A clean end-to-end status-code test was blocked at the time by a separate, unrelated incident found the same way — the real Azure Postgres database had no application tables at all, so every rejected request crashed trying to write its audit log entry. Fixed the following session (see ADR-027): a real request through APIM now returns the correct <code>401</code> instead of a <code>500</code>.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Azure Postgres schema creation <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">standalone fix · closes ADR-026's blocked verification</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Temporary firewall rule</span>
+        <span class="path mono">infra/main.tf · one operator IP, removed immediately after use</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">vector extension enabled</span>
+        <span class="path mono">CREATE EXTENSION, run directly against the real database</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Tables created</span>
+        <span class="path mono">scripts/create_tables.py · same script local dev already uses</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified end-to-end:</strong> <code>\dt</code> confirms all four application tables exist; a real request through the live API Management gateway now returns the correct <code>401</code> instead of the <code>500</code> this gap caused last session. See <a href="adr/ADR-027-azure-postgres-schema-creation.md">ADR-027</a>. Real, named gap left behind: no migration tool exists yet (no Alembic), so a future schema change needs this same manual process repeated, not something a <code>git push</code> alone will trigger.</p>
   </section>
 
   <footer class="roadmap">
@@ -877,7 +909,6 @@
       <li><span class="n mono">18</span>Conversation history &amp; context condensing</li>
       <li><span class="n mono">19</span>Streamed answer generation</li>
     </ul>
-    <p class="caveat" style="border-top: none; padding-top: 0;">Also standalone and not started: creating the application's tables in the real Azure Postgres database — discovered live as a gap while verifying the API Management gateway, blocking full end-to-end verification of any feature against the deployed backend.</p>
   </footer>
 
 </div>

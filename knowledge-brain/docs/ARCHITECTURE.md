@@ -179,12 +179,15 @@ and removed for the same reason — Consumption tier rejects the
 per-caller policy this needed outright, and the fallback Azure offers
 is scoped per-subscription, meaningless given `subscription_required =
 false` was deliberately left off. Verifying this feature live also
-surfaced a real, separate incident: the Azure Postgres database has
+surfaced a real, separate incident: the Azure Postgres database had
 never had its application tables created, so any rejected request
-against the deployed backend crashes trying to write its audit log
+against the deployed backend crashed trying to write its audit log
 entry — caught only because API Management's own request trace showed
 the gateway mechanism itself working correctly before that unrelated
-crash happened. See ADR-026.
+crash happened. Fixed the following session (see ADR-027); a real
+request through APIM now returns the correct `401` instead of a `500`,
+a clean end-to-end confirmation the trace evidence alone couldn't give
+at the time. See ADR-026.
 
 Document-level access control
 (build-order step 8) — every uploaded document is now visible only to
@@ -1035,19 +1038,25 @@ header check has no way to tell "came through the real gateway" from
 already accepted for MCP's shared key. Closing it for real needs a
 VNet-capable tier, a genuine ongoing cost, not built here. See ADR-026.
 
-**The Azure Postgres database has no application tables in it at all**
-— found live, not by inspection, while verifying the API Management
-gateway: every prior "verified live" deployment check only ever hit
-`/docs`, which never touches the database, so this went unnoticed
-across several sessions. `create_tables.py` has never been run against
-it. Both `gateway_secret_middleware` and `user_id_middleware` write to
-`audit_log` on every rejection, so any rejected request against the
-real deployment crashes with `UndefinedTableError` today — meaning no
-feature that writes to the database (a real upload, a real query, a
-real permission grant) can currently succeed against the live backend,
-only against local Docker Postgres. Tracked as its own standalone item,
-not fixed yet, and not folded into whichever feature happened to
-surface it.
+**The Azure Postgres database had no application tables in it at all,
+for several sessions, unnoticed** — found live, not by inspection,
+while verifying the API Management gateway: every prior "verified live"
+deployment check only ever hit `/docs`, which never touches the
+database. `create_tables.py` had never been run against it, so any
+rejected request against the real deployment crashed with
+`UndefinedTableError` trying to write its `audit_log` entry — meaning
+no feature that wrote to the database could actually succeed against
+the live backend, only against local Docker Postgres. Fixed the
+following session: the `vector` extension enabled and every table
+created directly against Azure Postgres, confirmed both by `\dt` and by
+a real request through the live APIM gateway returning the correct
+`401` instead of a `500`. See ADR-027. The real, still-open risk this
+incident points at: there's no migration tool (no Alembic, just
+`Base.metadata.create_all()`, an idempotent create-everything-once
+step) and nothing automates applying a *future* schema change to Azure
+the way CI/CD already automates deploying a new image — the next real
+column or table added will need this exact same manual process
+repeated, not something a `git push` alone will ever trigger.
 
 ## Azure infrastructure overview
 
@@ -1225,11 +1234,12 @@ diagnosed from real evidence (`az` CLI output, official docs, or
 GitHub issue threads), not guessed at. Full details in
 [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md).
 
-Still ahead, standalone and not yet started: creating the application's
-tables in the real Azure Postgres database, discovered live as a gap
-while verifying the gateway, and real per-caller rate limiting or
-network isolation, both blocked by the same Consumption-tier
-limitation.
+The real Azure Postgres database now has its schema — the `vector`
+extension and every application table were created directly against it
+the session after the gap was found, closing that standalone item. See
+ADR-027. Still ahead: real per-caller rate limiting and network
+isolation, both blocked by the same Consumption-tier limitation named
+in ADR-026.
 
 ## Glossary
 

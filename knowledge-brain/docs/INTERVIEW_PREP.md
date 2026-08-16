@@ -1573,7 +1573,13 @@ returning an error, so this crashes *any* rejected request today,
 blocking a clean end-to-end status-code test — but the trace evidence
 alone was sufficient to confirm the gateway mechanism itself works,
 gathered a different way than originally planned. Tracked as its own
-standalone follow-up, not folded into this feature.
+standalone follow-up, not folded into this feature. **Resolved the
+following session** (see [ADR-027](adr/ADR-027-azure-postgres-schema-creation.md)):
+the `vector` extension was enabled and every table created directly
+against the real Azure database, via a temporary, narrowly-scoped
+firewall rule removed immediately after. A real request through APIM
+now returns the correct `401` instead of a `500` — the clean
+end-to-end confirmation this feature couldn't get the first time.
 
 **What would you change here if this needed to run at genuine
 production scale, with real external users?**
@@ -1588,6 +1594,73 @@ something that should still be true the day this handles genuine
 external load either.
 
 *Further reading: [Microsoft's own API Management policy reference](https://learn.microsoft.com/en-us/azure/api-management/api-management-policies), covering exactly which policies are available on which tier — the source that should have been checked before assuming `rate-limit-by-key` would work on Consumption tier.*
+
+---
+
+## Feature 15: Creating the Azure Postgres Schema
+
+**What does this feature do, in one sentence?**
+Closes the gap ADR-026 found — enables the `vector` extension and
+creates every application table directly against the real Azure
+Postgres database, which had never had its schema applied, using a
+temporary, narrowly-scoped firewall opening and the exact same
+`create_tables.py` script local development already uses.
+
+```mermaid
+flowchart LR
+    IP[Get operator's<br/>current public IP] --> FW["Terraform: temporary<br/>firewall rule, one IP only"]
+    FW --> CONNECT["psql: connect directly,<br/>CREATE EXTENSION vector"]
+    CONNECT --> TABLES["create_tables.py, run against<br/>the real Azure DATABASE_URL"]
+    TABLES --> VERIFY["Verify: \dt, plus a real request<br/>through APIM returning the<br/>correct 401, not a 500"]
+    VERIFY --> REMOVE["Terraform: remove the<br/>firewall rule"]
+```
+
+**Why a firewall rule scoped to one specific IP, removed right after,
+instead of something broader or left in place?**
+This is a real opening in a production database's network perimeter,
+not a cosmetic one. The narrower and shorter-lived it is, the smaller
+the actual exposure — one IP, for the few minutes setup takes, then
+gone. Leaving it in, or scoping it to a wider range "just in case it's
+needed again," would trade a small amount of future convenience for a
+standing risk with no corresponding benefit once the one-time task is
+done.
+
+**Why reuse `create_tables.py` instead of writing the `CREATE TABLE`
+statements by hand for the real database?**
+One source of truth. `create_tables.py` calls
+`Base.metadata.create_all()`, reading directly from the same
+SQLAlchemy models (`Document`, `Chunk`, `AuditLog`,
+`DocumentPermission`) that define the schema everywhere else in this
+project. Hand-writing SQL a second time for Azure specifically would
+mean two places that could quietly drift apart the next time a model
+changes — exactly the kind of duplication this project avoids
+elsewhere (the API Management gateway importing FastAPI's own
+OpenAPI spec instead of hand-declaring routes is the same instinct,
+one feature earlier).
+
+**Why not build this into the GitHub Actions pipeline, so a schema
+change ships automatically the way a code change already does?**
+A real alternative, deliberately not taken yet: this project has no
+migration tool. `create_tables.py` only knows how to create tables
+that don't exist — it has no concept of *altering* a table that
+already exists to match a model that changed, which is exactly what
+the next real schema change would need. Automating today's
+create-everything-once script into CI would just automate running
+something that can't safely handle that next change anyway, without
+fixing the actual gap underneath it.
+
+**What would you change here if this needed to run at genuine
+production scale, with a real team?**
+Add a real migration tool — Alembic is the natural fit, given the
+project already uses SQLAlchemy models — wired into the same CI/CD
+pipeline that already deploys images automatically, so a schema
+change and a code change ship together, versioned, on every push to
+`main`. That closes both halves of the gap this incident exposed: no
+human touching the database's firewall by hand again, and a schema
+change that can no longer be forgotten the way this one was for
+several sessions running.
+
+*Further reading: [Alembic's own official tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html), covering exactly the versioned-migration model this project doesn't have yet.*
 
 ---
 

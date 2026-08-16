@@ -93,7 +93,8 @@ and why it was made that way.
   Management sits in front of the backend, importing its API definition
   straight from FastAPI's own OpenAPI spec and stamping a Key
   Vault-held secret onto every request it forwards; the backend rejects
-  anything missing it. Verified live via APIM's own request trace. Two
+  anything missing it. Verified live end-to-end: a real request through
+  the gateway returns the correct `401`. Two
   of the original design's four pieces aren't built: network-level
   restriction and real per-caller rate limiting both turned out to be
   unavailable on the Consumption tier chosen for cost — see
@@ -119,11 +120,12 @@ identity is a self-asserted header, not real authentication). See
 - The Container App's direct URL is still fully reachable, unrestricted
   — the API Management gateway's secret header is the one real access
   control today, not network isolation. See `ADR-026`.
-- The real Azure Postgres database has no application tables in it —
-  `create_tables.py` has never been run against it, so no
-  database-writing request can currently succeed against the live
-  deployment (local Docker Postgres is unaffected). Standalone, planned
-  next.
+- There's no migration tool (no Alembic) — the real Azure Postgres
+  schema was created by running `create_tables.py` directly against it
+  by hand (see [`ADR-027`](docs/adr/ADR-027-azure-postgres-schema-creation.md)),
+  and a future schema change would need that same manual process
+  repeated; nothing automates it the way CI/CD already automates
+  deploying a new image.
 
 ## How it works
 

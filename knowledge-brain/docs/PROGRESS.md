@@ -2123,3 +2123,115 @@ retrieval (item 17), conversation history (item 18), streamed
 generation (item 19), and the still-growing test suite gap. At 3–4
 hours/day, that's roughly 18–24 working days left, assuming no further
 scope changes.
+
+---
+
+## Session: 2026-08-16 — Azure Postgres schema created; API Management gateway verification finally closed out
+
+### What we built
+- **Closed the standalone gap ADR-026 left open**: the real Azure
+  Postgres database's `vector` extension enabled and every application
+  table (`documents`, `chunks`, `audit_log`, `document_permissions`)
+  created directly against it, via `scripts/create_tables.py` — the
+  exact same script local development already uses, pointed at the
+  real Azure connection string as a one-off `DATABASE_URL` override,
+  not a permanent `.env` change.
+- **A temporary, narrowly-scoped firewall rule** made the connection
+  possible in the first place: a new `operator_ip_address` Terraform
+  variable and an `allow_operator` firewall rule, scoped to exactly one
+  IP (the operator's own, looked up live via `curl ifconfig.me`),
+  applied just long enough to run the setup, then removed and
+  re-applied immediately after — confirmed by `git diff` showing zero
+  net change to the tracked Terraform files once both the add and the
+  removal landed.
+- **A real, expected hiccup along the way, not a new bug**: running
+  `create_tables.py` against Azure first failed with the exact same
+  class of error CI hit weeks ago — `Settings` requiring
+  `apim_gateway_secret`, which the operator's local `.env` didn't have
+  yet, since last session added that requirement after `.env` was last
+  touched. Fixed by adding one line to `.env`, matching last session's
+  own documented setup instructions.
+- **Verified two ways, not just trusted the script's own output**:
+  `psql ... -c "\dt"` confirmed all four tables exist, and — the real
+  payoff — a live `curl` through the actual API Management gateway now
+  returns `401 {"detail":"X-User-Id header is required"}` instead of
+  last session's `500`. This is the clean, end-to-end status-code proof
+  ADR-026 was explicitly blocked from getting; the gateway feature is
+  now verified the way it was originally meant to be, not just via
+  trace evidence.
+- Wrote [`ADR-027`](adr/ADR-027-azure-postgres-schema-creation.md) for
+  the fix itself, including the real, deliberately-not-taken
+  alternative (automating this into CI/CD) and why: this project has no
+  migration tool yet, so automating today's create-everything-once
+  script wouldn't actually solve the underlying gap for the *next*
+  schema change, only this one.
+- Updated `ARCHITECTURE.md` (the "what could go wrong" entry reframed
+  from an active risk to a resolved incident with its still-open
+  lesson kept), `INTERVIEW_PREP.md` (Feature 14's own Q&A corrected in
+  place per the "stay in sync" rule, plus a new Feature 15 section for
+  this fix itself), `pipeline-status.html`, and `README.md`.
+- Also answered several real conceptual questions along the way,
+  outside any specific feature build: how Postgres's `ts_rank`
+  full-text relevance scoring actually works (frequency, count, and
+  proximity of matching terms, not just yes/no matching), a worked
+  numeric example of Reciprocal Rank Fusion using this project's real
+  `RRF_K = 60` constant, the precise blast radius of a leaked gateway
+  secret (real access to run the pipeline under a fabricated identity
+  — genuinely costly on its own — versus the separate, additional risk
+  of impersonating a *specific* real user, which needs a second piece
+  of leaked information), and a correction to an initially-plausible
+  but backwards causal claim about *why* both APIM and the backend
+  cache the gateway secret rather than fetching it fresh per request.
+
+### What I struggled with
+- Correctly self-assessed understanding of the RRF/relevance-ranking
+  explanation and explicitly declined the offered check question rather
+  than working through it — a judgment call to respect this time, since
+  it was pure conceptual review, not a new code chunk being built.
+- One real, corrected misconception, caught cleanly on request: reasoned
+  that APIM caches the gateway secret specifically *because* it lacks
+  environment variables, when the real shared reason both APIM and the
+  backend cache it is avoiding a live Key Vault round-trip on every
+  request — env vars vs. named values are just each system's own native
+  place to hold that cached copy, not evidence of one system "missing"
+  something the other has.
+- A good, precise follow-up question, answered correctly and fully:
+  pressed on whether a leaked gateway secret alone grants access to any
+  user's documents — correctly distinguished "reaches real application
+  logic under a made-up identity" (yes, genuinely costly) from "can
+  impersonate a *specific* real, already-granted user" (needs
+  additional leaked/guessed information, not automatic).
+
+### Concepts to revisit
+- Whether `rate-limit-by-key` is genuinely available on Developer or
+  Premium tier — still not confirmed against Azure's own current
+  policy-availability documentation, carried over from last session.
+- No migration tool exists yet for schema changes (Alembic is the
+  named candidate) — a real, growing gap now that the database has real
+  structure to evolve, not just create once.
+
+### What's next
+- Real per-caller rate limiting and network isolation remain deferred,
+  same as last session — pending confirmation on `rate-limit-by-key`'s
+  tier availability and a real decision about Developer tier's ongoing
+  cost.
+- A real migration tool (Alembic, per ADR-027's own recommendation) is
+  now a named, standalone future item — not urgent today, but the
+  longer schema changes stay manual, the more likely a change gets
+  applied to one environment and forgotten in another.
+- Item 13 (frontend), item 14 (auth/multi-tenancy), and the rest of the
+  build order remain open, next-session choices, not decided tonight.
+- The test suite still hasn't grown since PII detection — carried over
+  unchanged, now spanning many sessions.
+
+**Estimated completion: ~52% of the total project, by weighted
+effort** — up slightly from ~51%. No new build-order item flipped to
+"done" tonight (the Azure Postgres fix isn't one of the 19 numbered
+items, and item 11's own status is unchanged — still partial, since
+rate limiting and network isolation remain unbuilt), but a real,
+previously-blocking gap closed, and item 11's verification is now
+genuinely complete rather than partial-with-a-caveat. Rough remaining
+effort: ~70 hours, essentially unchanged from last session's ~72-hour
+estimate minus the small amount of real work this session took. At
+3–4 hours/day, that's still roughly 18–23 working days left, assuming
+no further scope changes.
