@@ -2235,3 +2235,165 @@ effort: ~70 hours, essentially unchanged from last session's ~72-hour
 estimate minus the small amount of real work this session took. At
 3–4 hours/day, that's still roughly 18–23 working days left, assuming
 no further scope changes.
+
+---
+
+## Session: 2026-08-17 — Feature 16: Frontend foundation (shell + Document Library, partial)
+
+### What we built
+- **Started build-order item 13 for real** — the single largest
+  untouched piece of this project, named as such across many prior
+  sessions. Scaffolded `frontend/` (Next.js App Router, TypeScript,
+  Tailwind, no `src/` directory) and initialized Shadcn/UI, choosing
+  **Base UI** as the component primitive library — the CLI's own
+  current "(Recommended)" default, taken deliberately over defaulting
+  to Radix from memory, the same evidence-over-assumption instinct
+  this project has applied to Azure quirks all along.
+- **A real design decision, not a name picked blind:** rejected
+  Shadcn's bundled presets (pre-decided color palette + font pairing)
+  in favor of "Custom," per the `frontend-design` skill's guidance
+  against accepting a pre-built aesthetic identity without deliberate
+  choice. Explored the actual builder UI live (browser automation) and
+  picked a real palette (Base color Neutral, accent Indigo — chosen
+  specifically to avoid the three "default AI look" clichés the design
+  skill warns about) and type style ("Mira," a geometric sans with real
+  character, compared visually against alternatives before choosing).
+- **The shared shell, built and taught in three coupled pieces:**
+  `theme-provider.tsx` (wraps `next-themes`), the `attribute="class"` +
+  `suppressHydrationWarning` wiring in `layout.tsx`, and
+  `theme-toggle.tsx`. Explain-back correctly caught that
+  `suppressHydrationWarning` only suppresses the mismatch on the exact
+  element it's placed on, not the whole page. Then `navbar.tsx` —
+  mobile-first per `CLAUDE.md`'s own rule, a hamburger + slide-out
+  `Sheet` below the `md` breakpoint, inline links above it — with a
+  correctly-caught explain-back on `hidden md:flex`'s actual direction
+  (hidden by default, visible from `md` up, not the reverse).
+- **A real incident, found only by running the app:** Next.js's dev
+  overlay reported 5 hydration issues on first load. Traced to
+  `<DropdownMenuTrigger asChild><Button>...</Button></DropdownMenuTrigger>`
+  — the standard Radix composition pattern, written from memory — never
+  working on Base UI at all. Confirmed directly from Base UI's own
+  installed TypeScript types: no `asChild` prop exists; the real
+  mechanism is a `render` prop. Fixed in three places
+  (`theme-toggle.tsx`, `navbar.tsx`'s `SheetTrigger` and `SheetClose`),
+  bringing the issue count from 5 to 1 (the last one confirmed to be an
+  unrelated browser extension injecting a DOM attribute, not our code).
+  Verified live in the browser at both desktop and mobile widths — dark
+  mode toggling correctly, the mobile sheet opening, a link click both
+  navigating and closing the sheet in one action.
+- **Feature 16, the Document Library page — but first, a real backend
+  gap found before any frontend design started:** checked
+  `documents.py`'s actual routes before designing anything, and found
+  no way to list documents existed at all. Built `GET /documents`
+  deliberately permission-filtered from the start (the same
+  `document_permissions` join `find_by_keyword` already uses),
+  motivated directly by this project's own `ADR-019`, which already
+  named the exact risk of a new data-reading path skipping an ACL every
+  other path already enforces. Correctly reasoned, unprompted, that a
+  correlation ID belongs in the JSON response body (not just the
+  header) for tracing, while distinguishing that from a *separate*,
+  reasonable question — whether it should be visibly shown in the UI
+  (no).
+- **A second real architectural fork, decided deliberately:** the
+  backend has no CORS configuration, and the frontend runs on a
+  different origin. Rather than add `CORSMiddleware`, fetched from a
+  Next.js Server Component instead — a server-to-server request, where
+  CORS (a browser-only restriction) never applies. Named the real
+  future cost of this choice: the upcoming upload flow needs genuine
+  client-side interactivity a Server Component can't provide, which
+  will force a real CORS-vs-proxy decision in that chunk, not deferred
+  silently.
+- **A temporary, explicit auth placeholder** — `CURRENT_USER_ID =
+  "dev-user"` in `lib/config.ts`, the same self-asserted-identity
+  pattern the backend has accepted project-wide since ACL first
+  shipped, now extended to the frontend rather than inventing a
+  different scheme.
+- **The Document Library page itself**, built with all three states
+  `CLAUDE.md` requires explicitly: `loading.tsx` (an automatic skeleton
+  grid, a Next.js file convention, not manually wired), `error.tsx` (a
+  human-readable retry screen), and a designed empty state. Verified
+  live: real `200` from the backend, empty list, correct empty-state UI
+  rendered — full proof the whole chain works end to end.
+- **A second real incident, found by questioning a debug-overlay label
+  instead of dismissing it:** the dev overlay reported "Route: Static"
+  for the Document Library page. Checked this project's actual active
+  caching model directly (`cacheComponents` is *not* enabled in
+  `next.config.ts`, confirmed before reading the wrong doc) rather than
+  assuming: any `fetch()` reachable before a request-time API
+  (`cookies()`/`headers()`/`searchParams`) is cached by default, and
+  this page used none of those — meaning a real production build would
+  have frozen this page as a stale, un-refreshing snapshot at build
+  time, invisible in dev, where pages always render on-demand
+  regardless of this classification. Fixed with `dynamic =
+  "force-dynamic"`, confirmed live by watching the dev overlay's own
+  route classification flip from "Static" to "Dynamic." Correctly
+  explained back afterward, unprompted, what this would have meant for
+  a real user (stale data until a full rebuild) — and separately,
+  correctly reasoned through why dynamic rendering and document-level
+  ACL are two independent mechanisms, neither substituting for the
+  other, when asked whether another user's upload would leak through.
+- Two new ADRs:
+  [`ADR-028`](adr/ADR-028-frontend-stack-and-base-ui.md) (the stack
+  choice and the Base UI incident) and
+  [`ADR-029`](adr/ADR-029-document-library-page.md) (the missing
+  endpoint, the CORS/Server-Component decision, and the static-rendering
+  trap).
+
+### What I struggled with
+- Declined to answer one offered check question (on RRF/relevance
+  ranking review, not new code) — a reasonable judgment call to accept,
+  since it was pure conceptual review from an earlier chunk, not a new
+  code walkthrough.
+- One real, corrected misconception, caught cleanly on request:
+  reasoned that APIM caches the gateway secret specifically because it
+  lacks environment variables, when the real shared reason both APIM
+  and the backend cache it is avoiding a live Key Vault round-trip per
+  request — env vars vs. named values are just each system's own native
+  place to hold that cached copy, not evidence of one system missing
+  something the other has. (Carried over from the previous session's
+  tail end, resolved at the start of this one.)
+- Every explain-back this session on genuinely new frontend material
+  (`suppressHydrationWarning`'s scope, `hidden md:flex`'s direction,
+  the freshness-vs-ACL distinction) was caught correctly, several on
+  the first attempt — a notably strong session for retention on brand
+  new material (Next.js, Tailwind, Shadcn, Base UI), not just review of
+  already-familiar backend patterns.
+
+### Concepts to revisit
+- Whether `rate-limit-by-key` is genuinely available on Developer or
+  Premium tier for APIM — still not confirmed, carried over unchanged.
+- No migration tool exists yet for the database schema — carried over
+  unchanged from last session.
+- The CORS-vs-Route-Handler-proxy decision for the upload flow — named
+  as a real, deliberate fork to make next session, not resolved tonight.
+
+### What's next
+- **The upload flow** — drag-and-drop, wired to `POST /documents/upload`,
+  is the natural next chunk for the Document Library page, and the
+  first place the CORS-vs-proxy decision above actually has to be made.
+- Four more planned pages remain entirely unbuilt: Dashboard, Query,
+  Analytics, Admin.
+- `dynamic = "force-dynamic"` needs to become a default habit applied
+  to every future page reading per-user or frequently-changing data,
+  not something to rediscover per page.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real per-caller rate limiting/network isolation for APIM, the missing
+  migration tool, the test suite still not grown since PII detection,
+  item 14 (auth/multi-tenancy) and the rest of the build order all
+  still open, next-session choices.
+
+**Estimated completion: ~55% of the total project, by weighted
+effort** — up from ~52%. Item 13 (frontend) moves from entirely
+untouched to genuinely started and marked partial — real, working
+shell infrastructure and one of five pages fully built and verified
+live, not a scaffold-only start. The jump reflects that the frontend
+was explicitly named, across many prior sessions, as one of the two
+largest remaining chunks in the whole project (alongside Azure
+deployment, now complete) — real progress on it moves the needle more
+than a flat step count would suggest. Rough remaining effort: ~64
+hours across the rest of the frontend (upload flow + four more pages),
+real auth/multi-tenancy (item 14), APIM's remaining gaps, the missing
+migration tool, guardrails (item 16), multi-agent federated retrieval
+(item 17), conversation history (item 18), streamed generation (item
+19), and the still-growing test suite gap. At 3–4 hours/day, that's
+roughly 16–21 working days left, assuming no further scope changes.

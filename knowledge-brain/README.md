@@ -99,10 +99,20 @@ and why it was made that way.
   restriction and real per-caller rate limiting both turned out to be
   unavailable on the Consumption tier chosen for cost — see
   [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
+- **Frontend** *(just started — see below)* — a separate Next.js
+  project (`frontend/`, Tailwind, Shadcn/UI on Base UI) with a shared
+  shell (navigation, dark mode, a responsive mobile menu) and the first
+  of five planned pages, the Document Library — backed by a new,
+  permission-filtered `GET /documents` endpoint. Fetches server-side
+  from a Next.js Server Component rather than the browser, avoiding the
+  backend needing any CORS configuration. See
+  [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md) and
+  [`ADR-029`](docs/adr/ADR-029-document-library-page.md).
 
-**Not built yet:** the frontend and full auth/multi-tenancy (today's
-identity is a self-asserted header, not real authentication). See
-`CLAUDE.md`'s build order for the full plan.
+**Not built yet:** the upload flow and four more planned frontend pages
+(Dashboard, Query, Analytics, Admin), and full auth/multi-tenancy
+(today's identity is a self-asserted header, not real authentication).
+See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
@@ -176,11 +186,13 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **SQLAlchemy (async) + `uv`** — ORM and dependency management
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
+- **Next.js + Tailwind + Shadcn/UI (on Base UI)** — the frontend
+  (`frontend/`), just started: a shared shell and one of five planned
+  pages so far (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
 
-The full planned stack (Kafka, Qdrant, Redis, Azure, Terraform, a
-Next.js frontend) is documented in `CLAUDE.md` — most of it isn't built
-yet, and is being added deliberately, one justified decision at a time,
-not upfront.
+The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in
+`CLAUDE.md` — most of it isn't built yet, and is being added
+deliberately, one justified decision at a time, not upfront.
 
 ## Run it locally
 
@@ -267,6 +279,38 @@ any MCP-compatible client (e.g. Claude Desktop) — every request must
 include both the shared secret you set as `MCP_API_KEY` in an
 `X-API-Key` header, and an `X-User-Id` header, same as the REST
 endpoints.
+
+### Running the frontend
+
+The backend needs to already be running (see above). From a separate
+terminal:
+
+```
+cd frontend
+npm install
+```
+
+Create `frontend/.env.local` with one line, matching whatever
+`APIM_GATEWAY_SECRET` is set to in the backend's own `.env`:
+
+```
+BACKEND_GATEWAY_SECRET=your-apim-gateway-secret-here
+```
+
+Then start it:
+
+```
+npm run dev
+```
+
+Visit `http://localhost:3000`. Only the shared shell and the Document
+Library page (`/documents`) exist so far — everything else in the nav
+is a placeholder route. The frontend currently sends a hardcoded
+`X-User-Id: dev-user` on every request (see
+[`ADR-029`](docs/adr/ADR-029-document-library-page.md)), which won't
+match whatever user ID you've used in manual `curl` tests — they're
+treated as two unrelated identities until real auth (build-order item
+14) exists.
 
 ### Running the evaluation harness
 

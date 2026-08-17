@@ -323,7 +323,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 11 of 19 features complete · 1 partial</p>
+      <p class="eyebrow">Knowledge Brain · 11 of 19 features complete · 2 partial</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -898,10 +898,50 @@
     <p class="caveat"><strong>Verified end-to-end:</strong> <code>\dt</code> confirms all four application tables exist; a real request through the live API Management gateway now returns the correct <code>401</code> instead of the <code>500</code> this gap caused last session. See <a href="adr/ADR-027-azure-postgres-schema-creation.md">ADR-027</a>. Real, named gap left behind: no migration tool exists yet (no Alembic), so a future schema change needs this same manual process repeated, not something a <code>git push</code> alone will trigger.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 16 — Frontend foundation <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
+      <span class="count">shell + 1 of 5 pages built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Next.js + Tailwind + Shadcn scaffold</span>
+        <span class="path mono">frontend/ · Base UI foundation, custom design tokens</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Shared shell</span>
+        <span class="path mono">navbar.tsx · dark mode via next-themes · responsive mobile menu</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">GET /documents</span>
+        <span class="path mono">app/api/documents.py · permission-filtered, new this session</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Document Library page</span>
+        <span class="path mono">documents/page.tsx · loading/error/empty states, force-dynamic</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Not built yet:</strong> the upload flow itself (drag-and-drop, wired to <code>POST /documents/upload</code>) and the other four planned pages (Dashboard, Query, Analytics, Admin).</p>
+    <p class="caveat"><strong>Two real bugs found and fixed live, not by review:</strong> Base UI (Shadcn's newer foundation) uses a <code>render</code> prop for composition, not Radix's <code>asChild</code> — the latter was silently ignored, producing real nested <code>&lt;button&gt;</code> elements and a hydration error. Separately, this page was silently eligible for build-time static prerendering (no <code>cookies()</code>/<code>headers()</code>/<code>searchParams</code> used), which would have frozen it as a stale snapshot in production — invisible in dev, where pages always render fresh. Fixed with <code>dynamic = "force-dynamic"</code>. See <a href="adr/ADR-028-frontend-stack-and-base-ui.md">ADR-028</a> and <a href="adr/ADR-029-document-library-page.md">ADR-029</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">13</span>Frontend dashboard</li>
       <li><span class="n mono">14</span>Auth &amp; multi-tenancy hardening</li>
       <li><span class="n mono">15</span>LLM/RAG observability</li>
       <li><span class="n mono">16</span>Real-time answer guardrails</li>

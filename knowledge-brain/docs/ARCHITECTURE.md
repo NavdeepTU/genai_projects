@@ -159,7 +159,30 @@ replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
 rather than guessing if the answer isn't there.
 
-**What's new since the last update:** an API Management gateway
+**What's new since the last update:** the frontend (build-order step 13)
+now exists, started for real — a separate `frontend/` project (Next.js,
+Tailwind, Shadcn/UI on Base UI) sitting alongside the Python backend,
+not inside it. So far it has a shared shell (navigation, dark mode,
+a responsive mobile menu) and the Document Library page, the first of
+five planned pages. The library page needed a real backend addition
+first — `GET /documents` didn't exist — built permission-filtered from
+the start, the same `document_permissions` join every other retrieval
+path already uses. The page itself fetches from a Next.js Server
+Component rather than the browser directly, sidestepping the backend's
+complete lack of CORS configuration entirely, at the cost of a
+temporary hardcoded `X-User-Id` placeholder until real auth exists.
+Two real bugs were found and fixed by actually running the app, not by
+review: Shadcn's newer Base UI foundation uses a `render` prop for
+composition, not Radix's `asChild`, which produced real nested
+`<button>` elements until caught via a live hydration error; and this
+page was silently eligible for Next.js's static prerendering (no
+`cookies()`/`headers()`/`searchParams` used), which would have frozen
+it as a stale, un-refreshing snapshot the moment it reached a real
+production build — invisible in dev, where pages always render fresh
+regardless. Fixed with `dynamic = "force-dynamic"`. See ADR-028 and
+ADR-029.
+
+An API Management gateway
 (build-order step 11) sits in front of the backend as the intended
 public entry point. It imports its picture of the API straight from
 FastAPI's own `/openapi.json` rather than duplicating the route list by
@@ -283,6 +306,45 @@ thresholded at 0.4 based on real measured scores (a true match scored
 See ADR-014.
 
 ## The main components
+
+**Frontend (`frontend/`)** — a separate Next.js project, not part of the
+Python backend at all, talking to it purely over HTTP. `app/layout.tsx`
+is the shared shell every page sits inside: navigation, dark mode
+(via `next-themes`, toggling a `dark` class that every color in
+`globals.css` is keyed off through CSS variables), and a hamburger menu
+below the `md` breakpoint. `lib/api.ts` and `lib/config.ts` hold the one
+place that knows how to reach the backend — the base URL, the temporary
+`dev-user` identity placeholder, and the gateway secret local dev needs
+to send by hand. Talks to: the FastAPI backend, over plain HTTP, from
+the Next.js server itself rather than the browser (see the Document
+Library entry below for why). If it disappeared, the backend and its
+API would still work exactly as before — MCP and direct `curl`/API
+access would be unaffected, only the human-facing UI would be gone.
+
+```mermaid
+flowchart LR
+    BROWSER[Browser] -->|"renders shell,<br/>navigates"| SHELL["layout.tsx<br/>Navbar + dark mode + mobile menu"]
+    SHELL --> PAGE["A page, e.g.<br/>app/documents/page.tsx<br/>(Server Component)"]
+    PAGE -->|"fetch, server-to-server —<br/>no CORS involved"| API["lib/api.ts"]
+    API -->|"X-User-Id: dev-user<br/>X-Gateway-Secret: ..."| BACKEND["FastAPI backend<br/>(app/api/documents.py)"]
+```
+
+**Document Library (`frontend/app/documents/page.tsx`)** — the first of
+five planned frontend pages, and the first real proof the frontend can
+talk to the backend end to end. An `async` Server Component: fetches
+the calling user's documents once, server-side, before the page ever
+reaches the browser. Explicitly marked `dynamic = "force-dynamic"` —
+without it, Next.js would treat the page as eligible for build-time
+static prerendering (nothing in it reads `cookies()`, `headers()`, or
+`searchParams`), freezing it as a stale snapshot in production, a real
+bug caught live, not by review. Handles all three states `CLAUDE.md`
+requires explicitly: `loading.tsx` (a skeleton grid, shown automatically
+by Next.js while the fetch is in flight), `error.tsx` (a human-readable
+retry screen, not a raw stack trace), and a designed empty state (not a
+blank page) when the list comes back genuinely empty. Talks to:
+`GET /documents` on the backend. If it disappeared, there would be no
+way to see what's already been uploaded — uploads (once that flow
+exists) would still succeed, just invisibly.
 
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
@@ -419,7 +481,10 @@ graph context) does the same — deliberately not centralized behind one
 shared check, since each query needs the join applied to its own SQL.
 `find_by_keyword_unrestricted` exists specifically *without* that join,
 for the one caller (reference-building) that needs to see every
-document regardless of ownership.
+document regardless of ownership. `list_documents_for_user` (added for
+the Document Library page) is the same pattern applied to browsing
+instead of search — a document with no matching permission row for the
+calling user simply never appears in the result.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — still the
 conductor for answering questions. `answer_question` builds a small
@@ -752,6 +817,19 @@ isolation together, since the originally wanted policy never actually
 needed subscriptions in the first place, a claim not yet confirmed
 against Azure's own documentation.
 
+The frontend fetches from a Next.js Server Component rather than the
+browser, specifically to avoid the backend needing any CORS
+configuration at all — the request happens server-to-server, where the
+browser's cross-origin restriction never applies in the first place.
+Chosen over adding `CORSMiddleware` to the backend, since the backend
+would need no change at all for something driven entirely by a
+temporary, pre-auth identity placeholder. This has a real limit: it
+only works for data a Server Component can fetch before rendering — the
+upcoming upload flow needs genuine client-side interactivity (a file
+picker, drag-and-drop, progress feedback), which will force a real
+choice between adding CORS for that one path or proxying uploads
+through a Next.js Route Handler instead. See ADR-029.
+
 ## How data moves through the system
 
 **Uploading a document:** a user sends a file to the upload address —
@@ -1057,6 +1135,38 @@ step) and nothing automates applying a *future* schema change to Azure
 the way CI/CD already automates deploying a new image — the next real
 column or table added will need this exact same manual process
 repeated, not something a `git push` alone will ever trigger.
+
+**A frontend page can look completely correct in dev and still be
+silently broken in production** — witnessed directly building the
+Document Library page: it rendered its empty state correctly, no
+console errors, nothing visibly wrong. The Next.js dev overlay's "Route:
+Static" label was the only signal, easy to dismiss as cosmetic. The real
+mechanism: this Next.js version caches any `fetch()` reachable before a
+request-time API (`cookies()`, `headers()`, `searchParams`) is used, and
+this page used none of those — so in a real production build, it would
+have been rendered once at build time and served as a frozen snapshot
+to every visitor, indefinitely, never showing a newly uploaded document
+without a full redeploy. Dev mode hides this completely, since pages
+always render on-demand there regardless of static/dynamic
+classification — this class of bug is specifically invisible to local
+testing alone. Fixed with `export const dynamic = "force-dynamic"` on
+any page whose data is inherently per-user or frequently changing —
+now a pattern to apply by default to every future page (Query history,
+Analytics, Admin), not a one-off fix. See ADR-029.
+
+**A composition pattern that looks right can render as invalid,
+nested HTML** — `<DropdownMenuTrigger asChild><Button>...</Button></DropdownMenuTrigger>`
+is the standard Radix pattern for "let this trigger render as my own
+custom element instead of its own." Shadcn's newer default foundation,
+Base UI, has no `asChild` prop at all — confirmed directly from its
+installed TypeScript types — so it was silently ignored, and the
+trigger rendered its own native `<button>` with the child `Button`
+(also a `<button>`) nested inside it, an HTML violation that produced a
+real hydration error. The fix, Base UI's actual composition mechanism,
+is a `render` prop: `<DropdownMenuTrigger render={<Button>...</Button>} />`.
+Caught only by running the app and reading a real browser error, not by
+reviewing the component source, which looked equally plausible either
+way. See ADR-028.
 
 ## Azure infrastructure overview
 
@@ -1636,3 +1746,61 @@ forwarding it, and to the response before returning it — rate limiting,
 header injection, logging, and similar checks, written in an XML format
 with four sections (`inbound`, `backend`, `outbound`, `on-error`)
 corresponding to each stage of a request's round trip.
+
+**Next.js App Router** — the routing convention this frontend uses:
+a file named `page.tsx` inside a folder automatically becomes that
+folder's URL (`app/documents/page.tsx` → `/documents`), with no router
+configuration written by hand. `layout.tsx` files wrap every page
+beneath them in shared UI. The older alternative, the "Pages Router,"
+isn't used here.
+
+**Server Component vs. Client Component** — the default in the App
+Router is a Server Component: code that runs only on the server, never
+shipped to the browser, which is what lets `app/documents/page.tsx`
+fetch data directly and safely (no API keys or backend URLs exposed to
+users). A Client Component (marked `"use client"` at the top of the
+file, like `theme-toggle.tsx` or `navbar.tsx`) is needed for anything
+requiring browser-only behavior — click handlers, hooks like
+`usePathname()`, reading `localStorage`.
+
+**Static vs. dynamic rendering (Next.js)** — whether a page's output is
+computed once (at build time, then reused for every visitor until a
+redeploy) or freshly on every single request. A page defaults to static
+eligibility unless it reads something request-specific
+(`cookies()`, `headers()`, `searchParams`) or is explicitly marked
+`export const dynamic = "force-dynamic"`. Dev mode always renders
+on-demand regardless of this classification, which is exactly why this
+distinction is easy to miss without deliberately checking it.
+
+**Tailwind CSS** — a utility-first styling approach: elements are
+styled with small, pre-defined class names directly in the markup
+(`className="flex gap-4 rounded-lg"`) instead of separate `.css` files
+with hand-invented class names.
+
+**Shadcn/UI** — unlike most component libraries, its CLI copies actual
+component *source code* into this project's own `components/ui/`
+folder rather than installing an opaque npm package — every component
+is fully owned and editable, not used as a black box.
+
+**Base UI** — the headless (unstyled, accessibility-and-behavior-only)
+primitive library Shadcn's components in this project are built on,
+chosen over the older, more commonly-documented Radix per the CLI's own
+current recommendation. Its composition API is a `render` prop, not
+Radix's `asChild` — a real, breaking difference discovered live. See
+ADR-028.
+
+**CSS custom property (CSS variable)** — a named value (`--primary`,
+`--background`) defined once and referenced everywhere
+(`var(--primary)`), the mechanism this project's dark mode depends on:
+every color is defined twice, once under `:root` and once under
+`.dark`, same names, different values, so a component using `bg-primary`
+never needs to know which mode is active.
+
+**CORS (Cross-Origin Resource Sharing)** — a browser security rule
+blocking JavaScript on one origin (`localhost:3000`) from reading a
+response from a different origin (`localhost:8000`) unless the server
+explicitly allows it. Only applies to requests made *from a browser* —
+a server-to-server request (like a Next.js Server Component fetching
+the backend directly) is never subject to it, which is why this
+project's frontend fetches server-side instead of configuring CORS on
+the backend. See ADR-029.

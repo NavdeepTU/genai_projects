@@ -39,9 +39,15 @@ Close out the current working session on this project:
    would actually need: new setup/run steps, a status change (e.g. the
    project just became runnable), or an outdated instruction. Keep it
    minimal — don't turn it into a second architecture doc.
-9. Stage and commit all of the above plus the session's code changes,
-   then push to the remote. If no remote is configured, ask me for the
-   repository URL first.
-10. Confirm the commit and push actually happened by checking `git status`
+9. Check `git status`'s untracked-files list against `.gitignore` before
+   staging anything: flag anything that shouldn't be pushed (stray env
+   files, build/cache output, editor/OS junk, credentials, large data
+   files) and add a pattern for it to `.gitignore` rather than staging
+   it. If everything untracked is legitimately new project content,
+   no `.gitignore` change is needed.
+10. Stage and commit all of the above plus the session's code changes,
+    then push to the remote. If no remote is configured, ask me for the
+    repository URL first.
+11. Confirm the commit and push actually happened by checking `git status`
     and `git log` — don't assume.
-11. Give a short summary (5–10 lines) of what was updated and pushed.
+12. Give a short summary (5–10 lines) of what was updated and pushed.

@@ -9,7 +9,12 @@ from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
 from app.core.graph_database import get_graph_session
 from app.core.middleware import get_correlation_id, get_current_user_id
-from app.models.document import DocumentStatus, DocumentUploadResponse
+from app.models.document import (
+    DocumentListItem,
+    DocumentListResponse,
+    DocumentStatus,
+    DocumentUploadResponse,
+)
 from app.models.document_permission import GrantAccessRequest, GrantAccessResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
@@ -67,6 +72,19 @@ async def upload_document(
         filename=document.filename,
         status=document.status,
         correlation_id=correlation_id,
+    )
+
+
+@router.get("", response_model=DocumentListResponse)
+async def list_documents(
+    db: AsyncSession = Depends(get_db),
+) -> DocumentListResponse:
+    """Return every document the calling user has access to, newest first."""
+    user_id = get_current_user_id()
+    documents = await DocumentRepository(db).list_documents_for_user(user_id)
+    return DocumentListResponse(
+        documents=[DocumentListItem.model_validate(doc) for doc in documents],
+        correlation_id=get_correlation_id(),
     )
 
 

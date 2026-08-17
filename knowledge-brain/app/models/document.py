@@ -71,3 +71,22 @@ class DocumentUploadResponse(BaseModel):
     filename: str
     status: DocumentStatus
     correlation_id: str
+
+
+class DocumentListItem(BaseModel):
+    """One document's summary, as shown in the document library."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    status: DocumentStatus
+    uploaded_at: datetime
+    pii_detected: bool
+
+
+class DocumentListResponse(BaseModel):
+    """What the API sends back for a request to list a user's documents."""
+
+    documents: list[DocumentListItem]
+    correlation_id: str

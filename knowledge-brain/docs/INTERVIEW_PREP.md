@@ -1664,6 +1664,143 @@ several sessions running.
 
 ---
 
+## Feature 16: Frontend Foundation — Shell, Dark Mode, and the Document Library
+
+**What does this feature do, in one sentence?**
+Starts build-order item 13 for real: a separate Next.js project talking
+to the FastAPI backend over HTTP, with a shared navigation shell, dark
+mode, a responsive mobile menu, and the first of five planned pages —
+the Document Library — backed by a new, permission-filtered
+`GET /documents` endpoint that didn't exist before this session.
+
+```mermaid
+flowchart LR
+    BROWSER[Browser] --> SHELL["layout.tsx<br/>Navbar + dark mode + mobile menu"]
+    SHELL --> PAGE["documents/page.tsx<br/>Server Component"]
+    PAGE -->|"fetch, server-to-server"| BACKEND["GET /documents<br/>(permission-filtered)"]
+    BACKEND --> DB[(Postgres)]
+```
+
+**Why Next.js's App Router, Tailwind, and Shadcn/UI specifically —
+what does each one actually buy you?**
+Next.js turns a file's location into its URL automatically (no router
+config), and its Server Components let data fetching happen on the
+server, never shipping API keys or backend URLs to the browser.
+Tailwind styles elements with small utility classes directly in the
+markup instead of separate stylesheets. Shadcn is unusual among
+component libraries: its CLI copies actual component *source* into the
+project instead of installing an opaque package — every component is
+fully owned and editable from day one, not fought against from outside.
+
+**Shadcn's CLI asked which "component library" to build on — Base UI,
+React Aria, or Radix. Why Base UI, and what actually broke because of
+that choice?**
+Took the CLI's own current "(Recommended)" default rather than
+defaulting to Radix from memory — the same instinct this project has
+applied to real Azure quirks, now applied to frontend tooling. It broke
+the very next chunk: `<DropdownMenuTrigger asChild><Button>...</Button></DropdownMenuTrigger>`
+is the standard Radix pattern for "render this trigger as my own custom
+element." Base UI has no `asChild` prop at all — confirmed directly
+from its installed TypeScript types, not guessed — so it was silently
+ignored, and the trigger rendered its own native `<button>` with the
+child `Button` (also a `<button>`) nested inside it, producing a real
+HTML-nesting hydration error. The actual fix was Base UI's real
+composition mechanism, a `render` prop:
+`<DropdownMenuTrigger render={<Button>...</Button>} />`. Caught by
+running the app and reading a real browser error, not by reviewing the
+component source, which looked equally plausible either way.
+
+**Walk me through how dark mode actually works, mechanically — not
+"there's a toggle," the real chain from click to repainted page.**
+Every color in `globals.css` is a CSS variable, defined twice — once
+under `:root` (light values), once under `.dark` (dark values), same
+names throughout. Components reference the name (`bg-primary`), never
+the value, so they never need to know which mode is active. `next-themes`
+is what flips a `dark` class on `<html>` when the toggle is clicked
+(configured via `attribute="class"`, which has to match the exact class
+`globals.css`'s `@custom-variant dark (&:is(.dark *))` is watching
+for) — and it persists that choice and can default to the OS's own
+preference. One necessary side effect: the server has no way to know a
+visitor's saved preference before JavaScript runs, so the very first
+paint can briefly mismatch what the client then applies — `suppressHydrationWarning`
+on `<html>` tells React that one specific, expected mismatch is fine,
+without silencing hydration warnings anywhere else on the page.
+
+**The backend had no way to list documents at all before this session.
+Why build that as its own step before any frontend design, and why
+permission-filter it from the start rather than filtering client-side
+after the fact?**
+Designing a page around data that can't actually be fetched yet is
+backwards — checking the real routes in `documents.py` first is what
+surfaced the gap. Permission-filtering happened at the query itself
+(the same `document_permissions` join every other retrieval path
+already uses) because this project's own `ADR-019` already named this
+exact risk: a new path reading data can silently bypass an ACL that
+protects every *other* path, unless it deliberately applies the same
+check itself. Filtering "after the fact" in the frontend would mean the
+backend response itself already leaked which documents exist and their
+status to a caller who was never granted access — the frontend filtering
+it out afterward wouldn't undo that the data already left the server.
+
+**Why does the frontend fetch from a Server Component instead of the
+browser calling the backend directly — what would go wrong with the
+simpler-sounding approach?**
+The backend has no CORS configuration, and the frontend runs on a
+different origin (`localhost:3000` vs `localhost:8000`) — a browser
+would block that response outright. A Server Component's fetch happens
+server-to-server, where CORS (a purely browser-enforced rule) never
+applies at all. Chosen over adding `CORSMiddleware` to the backend since
+it needed zero backend change for something currently driven by a
+temporary, pre-auth placeholder identity — a real trade-off, though,
+since the upcoming upload flow needs genuine browser-side interactivity
+(drag-and-drop, a file picker) that a Server Component alone can't
+provide, which will force a real CORS-vs-proxy decision in that next
+chunk.
+
+**A real incident: the page rendered its empty state correctly, no
+console errors — what was actually wrong, and how was it found?**
+The Next.js dev overlay labeled the route "Static," easy to dismiss as
+cosmetic. The real mechanism: this Next.js version caches any `fetch()`
+reachable before a request-time API (`cookies()`, `headers()`,
+`searchParams`) is used, and this page used none of those — so in a
+real production build, it would have rendered once at build time and
+served that same frozen snapshot to every visitor indefinitely, never
+showing a newly uploaded document without a full redeploy. Dev mode
+hides this completely, since pages there always render on-demand
+regardless of static/dynamic classification — this class of bug is
+specifically invisible to local testing. Fixed with
+`export const dynamic = "force-dynamic"`, confirmed by watching the dev
+overlay's own classification flip from "Static" to "Dynamic" afterward.
+
+**If another user uploads a document, does dynamic rendering mean the
+current placeholder user would see it?**
+No — dynamic rendering and document-level ACL solve two unrelated
+problems. Dynamic rendering only controls *when* the query reruns
+(fresh every request, versus a frozen build-time snapshot); it says
+nothing about *what* that query is allowed to return. The ACL join
+inside `list_documents_for_user` is what decides *which* documents come
+back for a given identity, and uploading only grants access to the
+uploader. So the placeholder user gets a perfectly fresh, correctly
+*empty-of-that-document* result, every time — freshness without
+authorization would leak; authorization without freshness would just be
+correctly-scoped but stale. Same shape of lesson as API Management's
+two independent locks a few sessions back.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The static-rendering trap generalizes past this one page: at real
+traffic, that mistake wouldn't just show one visitor stale data, it
+would serve the *same* frozen snapshot to every visitor from a CDN edge
+cache globally, until a redeploy — catching it now, at zero users, is
+strictly cheaper than catching it after a real launch. The `dev-user`
+placeholder is also a named, temporary gap: every page built before
+real auth (item 14) exists carries the same limitation, tracked
+explicitly rather than hidden inside one config file.
+
+*Further reading: [Next.js's own documentation on Server and Client Components](https://nextjs.org/docs/app/getting-started/server-and-client-components), covering the rendering model this entire session's architecture decisions were built on.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

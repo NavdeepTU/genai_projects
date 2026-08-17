@@ -193,6 +193,26 @@ class DocumentRepository:
             raise
         return result.scalar_one_or_none()
 
+    async def list_documents_for_user(self, user_id: str) -> list[Document]:
+        """Return every document this user has been granted access to, newest first.
+
+        Same permission join as find_by_keyword/find_similar_chunks — a
+        document with no matching document_permissions row for this user
+        never appears, the same rule applied to browsing instead of search.
+        """
+        stmt = (
+            select(Document)
+            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
+            .where(DocumentPermission.user_id == user_id)
+            .order_by(Document.uploaded_at.desc())
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to list documents for user %s", user_id)
+            raise
+        return list(result.scalars().all())
+
     async def get_first_chunk_text(self, document_id: uuid.UUID, user_id: str) -> str | None:
         """Return a referenced document's first chunk as a representative snippet.
 
