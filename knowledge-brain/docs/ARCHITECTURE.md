@@ -45,17 +45,30 @@ flowchart TD
     UID -->|yes| Q[POST /query]
 
     subgraph ingest["Getting a document in"]
-        UP --> CREATE[Create document row]
-        CREATE --> GRANT["Auto-grant uploader access<br/>(document_permissions) — unconditional,<br/>survives ready/failed/pending_review alike"]
-        GRANT --> EXTRACT[Extract text<br/>PDF / .txt]
-        EXTRACT --> PIICHECK{"PII check<br/>(Azure AI Language, via circuit breaker)"}
+        UP --> CREATE["Create document row + grant access<br/>(synchronous — fast enough to finish<br/>before the response goes out)"]
+        CREATE --> RESP0["Response returns immediately:<br/>document id, status = pending"]
+        CREATE -.->|"scheduled as a<br/>FastAPI BackgroundTask"| BG["Background: process_document<br/>(own fresh DB + Neo4j sessions)"]
+        BG --> STATUS0["status → processing"]
+        STATUS0 --> EXTRACT["stage: extracting<br/>Extract text (PDF / .txt)"]
+        EXTRACT --> PIICHECK{"stage: checking_pii<br/>(Azure AI Language, via circuit breaker)"}
         PIICHECK -->|PII found| FLAG["Status: pending_review<br/>pii_detected = true — stop, never embedded"]
         PIICHECK -->|Azure unavailable| FAILCLOSED["Status: failed<br/>(fail closed — not embedded unchecked)"]
-        PIICHECK -->|clean| CHUNK[Chunk text]
-        CHUNK --> EMBED["Embed chunks<br/>(OpenAI, via circuit breaker)"]
-        EMBED --> SAVE[Save to Postgres<br/>documents + chunks]
-        SAVE --> BUILDREFS["Extract references & write to Neo4j<br/>(system-wide lookup, not permission-scoped —<br/>a fact about documents, not this user's view)"]
+        PIICHECK -->|clean| CHUNK["stage: chunking<br/>Chunk text"]
+        CHUNK --> EMBED["stage: embedding<br/>Embed chunks (OpenAI, via circuit breaker)"]
+        EMBED --> SAVESTAGE["stage: saving"]
+        SAVESTAGE --> SAVE[Save to Postgres<br/>documents + chunks]
+        SAVE --> READY["status → ready"]
+        READY --> BUILDREFS["Extract references & write to Neo4j<br/>(system-wide lookup, not permission-scoped —<br/>a fact about documents, not this user's view)"]
     end
+
+    POLL["Frontend: GET /documents/id/status<br/>every 2s while processing"] -.->|"permission-checked read"| STATUSREAD[("documents.status +<br/>documents.processing_stage")]
+    STATUS0 -.writes.-> STATUSREAD
+    EXTRACT -.writes.-> STATUSREAD
+    PIICHECK -.writes.-> STATUSREAD
+    CHUNK -.writes.-> STATUSREAD
+    EMBED -.writes.-> STATUSREAD
+    SAVESTAGE -.writes.-> STATUSREAD
+    READY -.writes.-> STATUSREAD
 
     subgraph retrieve["Asking a question — LangGraph query pipeline"]
         Q --> QEMBED[Embed the question]
@@ -92,31 +105,48 @@ flowchart TD
 endpoint or through MCP, both funnel into the exact same pipeline —
 and before anything else, the request has to carry a `X-User-Id`
 header identifying who's asking; missing it means an immediate
-rejection, logged as its own audit event. Once a document row exists,
-its uploader is automatically granted access to it — regardless of
-what happens next, so a document that later fails or gets held for
-review is still visible to the person who uploaded it. The file's raw
-text is then pulled out, and before anything else happens, that text
-is checked for personal information (names, phone numbers,
-government IDs, that kind of thing) by Azure AI Language. If it finds
-any, the document stops right there: it's marked `pending_review` with
-`pii_detected = true`, and nothing about it is ever chunked or
-embedded — its raw text never reaches the vector index. If Azure
-itself is unavailable, the document fails closed the same way any
-other ingestion failure does, rather than skipping the check and
-embedding something unverified. Only once a document is confirmed
-clean does the rest of the pipeline run: that text is cut into small
-overlapping pieces, each piece is turned into a list of numbers that
-represents its meaning, and those pieces and their numbers are saved
-in the database. If anything else goes wrong along the way, the
+rejection, logged as its own audit event. The REST endpoint's own work
+now stops almost immediately: it creates the document row, grants the
+uploader access to it, writes the audit log entry, and returns —
+`pending` — without waiting for anything else. Everything from text
+extraction onward runs afterward, as a FastAPI background task, in its
+own fresh database and Neo4j sessions (the request's own sessions are
+already gone by the time a background task actually executes). The
+moment that task starts, status moves to `processing`, and a second,
+purpose-built field, `processing_stage`, is updated before each real
+step — `extracting`, `checking_pii`, `chunking`, `embedding`, `saving`
+— purely so a frontend progress bar has something fine-grained to
+poll, never read by anything else in the system. The file's raw text
+is pulled out, and before anything else happens, that text is checked
+for personal information (names, phone numbers, government IDs, that
+kind of thing) by Azure AI Language. If it finds any, the document
+stops right there: it's marked `pending_review` with `pii_detected =
+true`, and nothing about it is ever chunked or embedded — its raw text
+never reaches the vector index. If Azure itself is unavailable, the
+document fails closed the same way any other ingestion failure does,
+rather than skipping the check and embedding something unverified.
+Only once a document is confirmed clean does the rest of the pipeline
+run: that text is cut into small overlapping pieces, each piece is
+turned into a list of numbers that represents its meaning, and those
+pieces and their numbers are saved in the database, and only then does
+status move to `ready`. If anything else goes wrong along the way, the
 document is marked failed, with a recorded reason, rather than left in
-limbo. If it succeeds, one more thing happens before the response goes
-out: an LLM reads the document's text looking for specific, named
-things it mentions (an error code, a ticket number), and for each one,
-checks whether any *other* already-stored document actually contains
-it — if so, that connection gets written to Neo4j as an explicit link
-between the two documents. This step is best-effort: if it fails, the
-upload still succeeds, it just won't have graph links yet.
+limbo. If it succeeds, one more thing happens, still inside the
+background task: an LLM reads the document's text looking for
+specific, named things it mentions (an error code, a ticket number),
+and for each one, checks whether any *other* already-stored document
+actually contains it — if so, that connection gets written to Neo4j as
+an explicit link between the two documents. This step is best-effort:
+if it fails, the upload still succeeds, it just won't have graph links
+yet. MCP's `upload_document` tool calls the exact same two split
+methods (`create_document`, then `process_document`), just back to
+back in one call rather than one scheduled after the other returns —
+MCP has no "return now, poll later" concept the way an HTTP response
+does, a tool call gives one final result, so it stays fully
+synchronous by design, not backgrounded. Splitting the service into
+two methods this session broke that call site outright (it still
+called the now-deleted `ingest_document`) until this was caught
+reviewing this very document and fixed.
 
 **Asking a question:** a user sends a question, again carrying their
 `X-User-Id` → it's turned into a meaning-vector, and two independent
@@ -159,7 +189,39 @@ replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
 rather than guessing if the answer isn't there.
 
-**What's new since the last update:** the frontend (build-order step 13)
+**What's new since the last update:** document uploads through the REST
+endpoint no longer block the caller for the pipeline's full duration.
+Extending ADR-001's own stated next step, `POST /documents/upload` now
+only does the fast, synchronous part — create the row, grant access,
+audit-log the action — and returns immediately with the document's real
+`status` (`pending`) at that moment; the rest of the pipeline runs as a
+FastAPI background task afterward, in its own fresh database and Neo4j
+sessions, since the request's own sessions are already gone by the time
+a background task executes. A new `processing_stage` field (values:
+`queued`, `extracting`, `checking_pii`, `chunking`, `embedding`,
+`saving`) tracks progress through that background run — deliberately
+kept as its own column, separate from `status`, since `status` is
+load-bearing everywhere (permissions, the document list, business
+rules) while this field exists purely for a progress bar and nothing
+else in the system ever reads it. A new `GET
+/documents/{id}/status` endpoint, permission-checked the same way every
+other retrieval path is, lets the frontend poll it. Two new Next.js
+Route Handlers proxy the upload and the status poll server-to-server,
+resolving the exact CORS-vs-proxy choice the previous session's update
+flagged as still open — the browser now calls only same-origin Next.js
+paths, so `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript
+and the backend still needs no CORS configuration at all. A new
+`UploadDropzone` client component handles drag-and-drop, kicks off the
+upload, then polls status every 2 seconds and renders a per-stage
+progress bar until the document reaches a terminal state, at which
+point it refreshes the document list and removes itself. Splitting
+`IngestionService.ingest_document` into two methods
+(`create_document`, `process_document`) to make this possible had one
+real, unintended consequence: it broke MCP's `upload_document` tool,
+which still called the now-deleted method — caught and fixed the same
+session, before it shipped, not after. See ADR-030.
+
+The frontend (build-order step 13)
 now exists, started for real — a separate `frontend/` project (Next.js,
 Tailwind, Shadcn/UI on Base UI) sitting alongside the Python backend,
 not inside it. So far it has a shared shell (navigation, dark mode,
@@ -343,8 +405,30 @@ by Next.js while the fetch is in flight), `error.tsx` (a human-readable
 retry screen, not a raw stack trace), and a designed empty state (not a
 blank page) when the list comes back genuinely empty. Talks to:
 `GET /documents` on the backend. If it disappeared, there would be no
-way to see what's already been uploaded — uploads (once that flow
-exists) would still succeed, just invisibly.
+way to see what's already been uploaded — uploads would still succeed,
+just invisibly.
+
+**Upload dropzone (`frontend/components/upload-dropzone.tsx`) and its
+proxy routes (`frontend/app/api/documents/upload/route.ts`,
+`frontend/app/api/documents/[id]/status/route.ts`)** — the client-side
+half of getting a document in, added with ADR-030. The dropzone is a
+`"use client"` component: handles drag-and-drop and click-to-browse,
+uploads via `POST /api/documents/upload` (a same-origin Next.js path,
+not the backend directly), then polls `GET
+/api/documents/{id}/status` every 2 seconds and renders a progress bar
+keyed off `processing_stage`, until the document reaches a terminal
+status, at which point it calls `router.refresh()` (so the Document
+Library list picks up the newly-finished document) and removes its own
+card. The two Route Handlers exist for exactly one reason: keeping
+`BACKEND_GATEWAY_SECRET` out of client-side JavaScript entirely — the
+browser only ever talks to these same-origin paths, which then make the
+real, secret-bearing calls to the backend server-to-server, the same
+reasoning the Document Library page's own server-side fetch already
+established, just triggered by a user action instead of a page render.
+Talks to: `POST /documents/upload` and `GET
+/documents/{id}/status` on the backend, from the Next.js server, never
+from the browser. If it disappeared, uploading would still be possible
+through `curl` or MCP, just not through the UI.
 
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
@@ -365,9 +449,17 @@ flowchart LR
 ```
 
 **API route (`app/api/documents.py`)** — the "front door." Accepts an
-uploaded file over the network, rejects unsupported file types immediately,
-and hands the file off to the ingestion service. Talks to: the ingestion
-service. If it disappeared, there'd be no way to get a file into the system
+uploaded file over the network, rejects unsupported file types
+immediately, creates the document row and grants access synchronously,
+schedules the rest of the pipeline as a background task, and returns
+without waiting for it. Also owns `_process_uploaded_document`, the
+background task function itself — it opens its own fresh database and
+Neo4j sessions (the request's are already gone by the time it runs),
+calls `IngestionService.process_document`, and then best-effort builds
+the reference graph if the document reached `ready`. Also exposes `GET
+/{document_id}/status`, permission-checked, for the frontend to poll.
+Talks to: the ingestion service. If it disappeared, there'd be no way
+to get a file into the system, or to check on one already uploading,
 at all.
 
 **Identity middleware (`app/core/middleware.py`)** — the newest
@@ -403,17 +495,27 @@ flowchart LR
 ```
 
 **Ingestion service (`app/services/ingestion_service.py`)** — the
-conductor. Knows the *order* the pipeline steps must run in (extract,
-check for PII, then chunk, then embed, then save), and marks the
-document ready, pending review, or failed at the end. Talks to:
+conductor, split into two methods since ADR-030. `create_document` is
+just the fast part: insert the row, grant the uploader access — small
+on purpose, since it has to finish before an HTTP response goes out.
+`process_document` is everything else: knows the *order* the pipeline
+steps must run in (extract, check for PII, then chunk, then embed,
+then save), updates `processing_stage` before each one, sets `status`
+to `processing` at the start and `ready`/`pending_review`/`failed` at
+the end. It takes a `document_id`, not a `Document` object — by the
+time it runs, the caller usually only has the id, not an
+already-loaded ORM object from a different session. Talks to:
 extraction, PII detection, chunking, embedding, and the repository. If
 it disappeared, each individual step would still work, but nothing
 would tie them together. Deliberately does *not* know about the
 relationship graph below — building references is a separate concern,
-run afterward, not folded into this service's own responsibility. This
-is also the one place both the REST upload route and MCP's
-`upload_document` tool both call — anything added here, like the PII
-check below, protects both automatically.
+run afterward, not folded into this service's own responsibility. Both
+methods are called from two places: the REST route (`create_document`
+synchronously, `process_document` as a background task) and MCP's
+`upload_document` tool (both called back to back, synchronously — MCP
+has no notion of "return now, poll later"). Anything added inside
+`process_document`, like the PII check below, protects both callers
+automatically.
 
 **PII detection (`app/services/pii_detection.py`)** — a single
 function, `detect_pii`, that sends a document's text to Azure AI
@@ -484,7 +586,17 @@ for the one caller (reference-building) that needs to see every
 document regardless of ownership. `list_documents_for_user` (added for
 the Document Library page) is the same pattern applied to browsing
 instead of search — a document with no matching permission row for the
-calling user simply never appears in the result.
+calling user simply never appears in the result. `get_document_for_user`
+(added for status polling, ADR-030) is the same join narrowed to one
+document by id, returning `None` identically whether the document
+doesn't exist or the caller just lacks access — the two cases are
+deliberately indistinguishable from outside. `get_by_id` is the
+one exception to "every read checks permissions" — a plain
+primary-key lookup with no join at all, for the background task's own
+internal use deciding whether to build graph references, mirroring
+`find_by_keyword_unrestricted`'s reasoning: system-level code, not a
+user-facing read. `update_processing_stage` mirrors `update_status`'s
+exact shape, writing to the new progress-tracking column instead.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — still the
 conductor for answering questions. `answer_question` builds a small
@@ -823,43 +935,70 @@ configuration at all — the request happens server-to-server, where the
 browser's cross-origin restriction never applies in the first place.
 Chosen over adding `CORSMiddleware` to the backend, since the backend
 would need no change at all for something driven entirely by a
-temporary, pre-auth identity placeholder. This has a real limit: it
-only works for data a Server Component can fetch before rendering — the
-upcoming upload flow needs genuine client-side interactivity (a file
-picker, drag-and-drop, progress feedback), which will force a real
-choice between adding CORS for that one path or proxying uploads
-through a Next.js Route Handler instead. See ADR-029.
+temporary, pre-auth identity placeholder. This had a real limit,
+noted at the time: it only worked for data a Server Component could
+fetch before rendering, and the upload flow needed genuine client-side
+interactivity — a file picker, drag-and-drop, live progress. That was
+resolved by proxying uploads through a Next.js Route Handler rather
+than adding CORS: the browser calls a same-origin `/api/documents/...`
+path, which then makes the real, secret-bearing call to the backend
+server-to-server, same reasoning as the Server Component fetch, just
+triggered by a client action instead of a page render. See ADR-029 and
+ADR-030.
+
+Document processing was made asynchronous with FastAPI's own
+`BackgroundTasks`, not Kafka, extending rather than reversing ADR-001 —
+the concrete trigger ADR-001 named for reaching for a real queue
+(sustained concurrent uploads exhausting the connection pool) still
+hasn't happened; what changed is a slow *single* upload blocking a real
+UI became a real, observed problem the moment the frontend existed to
+notice it. Progress tracking got its own separate `processing_stage`
+column rather than adding finer-grained values to `DocumentStatus`
+itself, since status is a small, stable set every permission check and
+business rule already depends on, while the new field is meaningful
+only for the lifetime of one background run and read by nothing outside
+the progress bar. See ADR-030.
 
 ## How data moves through the system
 
-**Uploading a document:** a user sends a file to the upload address —
-either the REST endpoint or MCP's `upload_document`, both reach the
-same code from here on — carrying an `X-User-Id` header identifying
-who they are; missing it, the request is rejected before any of this
-runs. The system checks the file type is supported, creates a database
-record for the document immediately (marked "pending"), and
-immediately grants the uploader access to it — regardless of what
-happens during the rest of ingestion, so a document that later fails or
-gets held for review is still visible to whoever uploaded it. It then
-extracts the document's text. Before anything else, that text is
-checked for personal information by Azure AI Language, scoped to a
-specific 14-category allowlist. If any is found, the document stops
-here: marked "pending review," `pii_detected` set permanently to true,
-and nothing further happens to it — no chunking, no embedding. If
-Azure itself can't be reached, the document fails closed the same way
-any other failure does, with the reason recorded, rather than skipping
-the check. Only a document confirmed clean continues: its text is
-split into chunks, each chunk becomes a meaning-vector, and everything
-is saved to the database. If every step succeeds, the document is
-marked "ready." If any step fails, the document is marked "failed"
-instead of being left stuck partway through. If it succeeds, one more
-thing happens: an LLM reads the document's own text for specific
+**Uploading a document through the REST endpoint:** a user sends a
+file, carrying an `X-User-Id` header identifying who they are; missing
+it, the request is rejected before any of this runs. The system checks
+the file type is supported, creates a database record for the document
+immediately (marked "pending"), immediately grants the uploader access
+to it, writes an audit log entry, schedules the rest of the work as a
+background task, and returns right there — the caller gets the
+document's id back well before any real processing has happened. From
+this point on, everything runs in the background, in its own fresh
+database and Neo4j connections: status moves to "processing," and a
+separate progress field is updated before each real step, purely so a
+frontend polling `GET /documents/{id}/status` can show which one is
+currently happening. The document's text is extracted, then checked
+for personal information by Azure AI Language, scoped to a specific
+14-category allowlist. If any is found, the document stops here:
+marked "pending review," `pii_detected` set permanently to true, and
+nothing further happens to it — no chunking, no embedding. If Azure
+itself can't be reached, the document fails closed the same way any
+other failure does, with the reason recorded, rather than skipping the
+check. Only a document confirmed clean continues: its text is split
+into chunks, each chunk becomes a meaning-vector, and everything is
+saved to the database — only then does status move to "ready." If any
+step fails, the document is marked "failed" instead of being left
+stuck partway through. If it succeeds, one more thing happens, still in
+the background: an LLM reads the document's own text for specific
 things it names — an error code, a ticket ID — and for each one, the
 existing keyword search checks whether any other stored document
 actually contains it. Real matches get written to Neo4j as an explicit
 link. This step can't fail the upload; if Neo4j or the extraction call
 is unavailable, the document is still "ready," it just has no graph
 links.
+
+**Uploading a document through MCP:** the same journey, with one
+difference — there's no separate response-then-background split, since
+a tool call only ever produces one final result. `create_document` and
+everything `process_document` does above all run synchronously, back
+to back, in the same call, and the tool's return value describes the
+document's actual final state, not an in-progress one.
 
 **Asking a question:** a user sends a question to the query address,
 again carrying their `X-User-Id`. The question is turned into a
@@ -968,6 +1107,20 @@ Reranking and Neo4j are now the two dependencies in this system where a
 failure degrades *quality*, not *availability* — everything else
 (OpenAI's embedding and generation calls) still fails the request
 outright today, just cleanly, as a `503`. See ADR-015.
+
+**A server crash or restart mid-upload silently orphans the document** —
+`BackgroundTasks` runs inside the same process that handled the
+original request, with no persistence and no retry: if the server
+restarts while a document is partway through `process_document`, that
+task is simply gone. The document is left stuck at whatever
+`processing_stage` it last reached, with `status` never reaching a
+terminal value — no failure is recorded, and nothing retries it
+automatically. A message-queue-backed worker (Kafka, per ADR-001's
+original alternative) wouldn't have this gap, since an unacknowledged
+message gets redelivered; this is the concrete, named reason a real
+queue would eventually be needed, alongside the connection-pool
+exhaustion trigger ADR-001 already named. Not built here — acceptable
+at today's traffic, a real gap once this runs unattended. See ADR-030.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
@@ -1804,3 +1957,30 @@ a server-to-server request (like a Next.js Server Component fetching
 the backend directly) is never subject to it, which is why this
 project's frontend fetches server-side instead of configuring CORS on
 the backend. See ADR-029.
+
+**Next.js Route Handler** — a `route.ts` file inside `app/` that
+defines a plain HTTP endpoint (`GET`, `POST`, etc.) served by the
+Next.js server itself, distinct from a `page.tsx` file, which renders
+UI. This project uses two of them purely as a same-origin proxy —
+the browser calls the Route Handler, which then calls the real
+backend server-to-server — so a secret header never has to reach
+client-side JavaScript, and no CORS configuration is needed for a
+client-triggered action the way a Server Component's render-time fetch
+already avoided it. See ADR-030.
+
+**Background task (FastAPI `BackgroundTasks`)** — a function scheduled
+to run *after* an HTTP response has already been sent, inside the same
+server process that handled the request. Cheaper than a real message
+queue (no broker, no separate worker process) but has no persistence
+or retry — a scheduled task is simply gone if the process restarts
+before it runs, unlike a queued message, which gets redelivered. See
+ADR-030.
+
+**Two-phase write pattern (create, then process)** — splitting a
+database-writing operation into a small, fast piece that must finish
+before a response goes out (here, creating a document row) and a
+larger, slower piece that can safely happen afterward (here, the whole
+ingestion pipeline). The fast piece hands the slow piece just an id,
+not an in-memory object, since the object it created lived in a
+database session that's gone by the time the slow piece actually runs.
+See ADR-030.

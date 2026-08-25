@@ -74,8 +74,10 @@ async def upload_document(filename: str, content_base64: str) -> str:
     user_id = get_current_user_id()
 
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
-        service = IngestionService(DocumentRepository(db), PermissionRepository(db))
-        document = await service.ingest_document(filename, content, user_id)
+        repository = DocumentRepository(db)
+        service = IngestionService(repository, PermissionRepository(db))
+        document = await service.create_document(filename, user_id)
+        await service.process_document(document.id, filename, content)
 
         correlation_id = get_correlation_id()
         await AuditRepository(db).log_action(

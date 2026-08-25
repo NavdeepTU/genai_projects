@@ -15,6 +15,7 @@ async def test_ingest_document_succeeds(db_session):
     service = IngestionService(repository, PermissionRepository(db_session))
     fake_embedding = [0.1] * 1536
 
+    document = await service.create_document("notes.txt", "test-user")
     with (
         patch("app.services.ingestion_service.detect_pii", new=AsyncMock(return_value=[])),
         patch(
@@ -22,7 +23,7 @@ async def test_ingest_document_succeeds(db_session):
             new=AsyncMock(return_value=[fake_embedding]),
         ),
     ):
-        document = await service.ingest_document("notes.txt", b"hello world", "test-user")
+        await service.process_document(document.id, "notes.txt", b"hello world")
 
     assert document.status == DocumentStatus.READY
 
@@ -37,6 +38,7 @@ async def test_ingest_document_marks_failed_on_embedding_error(db_session):
     repository = DocumentRepository(db_session)
     service = IngestionService(repository, PermissionRepository(db_session))
 
+    document = await service.create_document("notes.txt", "test-user")
     with (
         patch("app.services.ingestion_service.detect_pii", new=AsyncMock(return_value=[])),
         patch(
@@ -45,12 +47,12 @@ async def test_ingest_document_marks_failed_on_embedding_error(db_session):
         ),
         pytest.raises(RuntimeError),
     ):
-        await service.ingest_document("notes.txt", b"hello world", "test-user")
+        await service.process_document(document.id, "notes.txt", b"hello world")
 
     result = await db_session.execute(select(Document).where(Document.filename == "notes.txt"))
-    document = result.scalar_one()
-    assert document.status == DocumentStatus.FAILED
-    assert document.failure_reason == "RuntimeError: OpenAI is down"
+    refreshed = result.scalar_one()
+    assert refreshed.status == DocumentStatus.FAILED
+    assert refreshed.failure_reason == "RuntimeError: OpenAI is down"
 
 
 async def test_ingest_document_flags_pii_for_review(db_session):
@@ -58,6 +60,7 @@ async def test_ingest_document_flags_pii_for_review(db_session):
     repository = DocumentRepository(db_session)
     service = IngestionService(repository, PermissionRepository(db_session))
 
+    document = await service.create_document("notes.txt", "test-user")
     with (
         patch(
             "app.services.ingestion_service.detect_pii",
@@ -65,7 +68,7 @@ async def test_ingest_document_flags_pii_for_review(db_session):
         ),
         patch("app.services.ingestion_service.embed_chunks", new=AsyncMock()) as mock_embed,
     ):
-        document = await service.ingest_document("notes.txt", b"John Doe, SSN 123-45-6789", "test-user")
+        await service.process_document(document.id, "notes.txt", b"John Doe, SSN 123-45-6789")
 
     assert document.status == DocumentStatus.PENDING_REVIEW
     assert document.pii_detected is True

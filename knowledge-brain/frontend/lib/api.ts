@@ -2,12 +2,36 @@ import { BACKEND_GATEWAY_SECRET, BACKEND_URL, CURRENT_USER_ID } from "@/lib/conf
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed" | "pending_review";
 
+export type ProcessingStage =
+  | "queued"
+  | "extracting"
+  | "checking_pii"
+  | "chunking"
+  | "embedding"
+  | "saving";
+
 export type DocumentListItem = {
   id: string;
   filename: string;
   status: DocumentStatus;
   uploaded_at: string;
   pii_detected: boolean;
+};
+
+export type DocumentUploadResponse = {
+  id: string;
+  filename: string;
+  status: DocumentStatus;
+  correlation_id: string;
+};
+
+export type DocumentStatusResponse = {
+  id: string;
+  status: DocumentStatus;
+  processing_stage: ProcessingStage;
+  pii_detected: boolean;
+  failure_reason: string | null;
+  correlation_id: string;
 };
 
 type DocumentListResponse = {

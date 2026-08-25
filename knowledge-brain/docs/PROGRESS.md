@@ -2397,3 +2397,142 @@ migration tool, guardrails (item 16), multi-agent federated retrieval
 (item 17), conversation history (item 18), streamed generation (item
 19), and the still-growing test suite gap. At 3–4 hours/day, that's
 roughly 16–21 working days left, assuming no further scope changes.
+
+## Session: 2026-08-25 — Background upload processing with per-stage progress (Feature 16 continued)
+
+### What we built
+- The upload flow — the exact fork named as open at the end of last
+  session, now resolved. Extended ADR-001's own stated next step: the
+  REST upload endpoint no longer blocks for the whole pipeline. It now
+  only creates the document row, grants access, and audit-logs the
+  action — fast, synchronous — then schedules the rest as a FastAPI
+  `BackgroundTasks` job and returns immediately, carrying the
+  document's real `status` (`pending`) at that moment, not a value the
+  background task hasn't actually written yet.
+- `IngestionService.ingest_document` split into `create_document` (the
+  fast part) and `process_document` (the pipeline itself, now taking a
+  `document_id` rather than a `Document` object, since the caller only
+  has the id by the time it's called from a scheduled background task).
+- A new `processing_stage` column and `ProcessingStage` enum
+  (`queued`/`extracting`/`checking_pii`/`chunking`/`embedding`/`saving`),
+  updated before each real pipeline step — deliberately kept as its
+  own field, separate from the load-bearing `DocumentStatus`, since
+  nothing outside a progress bar ever needs to read it. Migrated by
+  hand against the live local database (no Alembic yet, same gap named
+  every session since it first came up): `CREATE TYPE processingstage
+  AS ENUM (...)` then `ALTER TABLE documents ADD COLUMN
+  processing_stage ... DEFAULT 'QUEUED'`, both run by me, not Claude,
+  per this project's own external-tools rule.
+- A new `GET /documents/{document_id}/status` endpoint, permission-
+  checked the same way every other retrieval path already is —
+  returns 404 identically whether the document doesn't exist or the
+  caller simply lacks access, so the endpoint can't be used to
+  fingerprint documents outside a caller's own access. Two new
+  repository methods: `get_document_for_user` (the permission-checked
+  read) and `get_by_id` (no check, for the background task's own
+  internal use, mirroring `find_by_keyword_unrestricted`'s reasoning).
+- Two new Next.js Route Handlers
+  (`app/api/documents/upload/route.ts`,
+  `app/api/documents/[id]/status/route.ts`) resolving the CORS-vs-proxy
+  fork named open at the end of last session: the browser calls only
+  same-origin `/api/documents/...` paths, which then make the real,
+  secret-bearing calls to the backend server-to-server — no CORS
+  configuration needed, `BACKEND_GATEWAY_SECRET` never reaches
+  client-side JavaScript.
+- A new `UploadDropzone` client component: drag-and-drop plus
+  click-to-browse, restricted to `.pdf`/`.txt`, uploads via the proxy,
+  then polls the status proxy every 2 seconds and renders a per-stage
+  progress bar until the document reaches a terminal status, at which
+  point it refreshes the document list and removes its own card.
+  Wired into the Document Library page above the existing list.
+- A real regression, introduced by this session's own refactor and
+  caught before it shipped: splitting `ingest_document` into two
+  methods broke MCP's `upload_document` tool, which still called the
+  now-deleted method directly — would have thrown `AttributeError` on
+  the next MCP upload. Caught while writing this session's own
+  architecture documentation, not by running MCP itself — describing
+  what MCP's path does surfaced that the code no longer matched the
+  claim being written. Fixed by keeping MCP fully synchronous on
+  purpose (`create_document` then `process_document`, back to back,
+  same call): a tool call has no "return now, poll later" concept the
+  way an HTTP response does.
+- Verified live, both via direct `curl` against the backend and
+  through the frontend proxy: a real upload moves through every real
+  `processing_stage` value and reaches `ready`; a user with no access
+  gets a 404 from the status endpoint; a rejected file extension
+  returns 400; the drag-and-drop flow completes correctly in an actual
+  browser, in both light and dark mode.
+- One new ADR: [`ADR-030`](adr/ADR-030-background-upload-processing.md)
+  (BackgroundTasks vs. Kafka, the two-column status/stage split, and
+  why the response returns the real, not-yet-written status).
+
+### What I struggled with
+- One real technical slip, caught and corrected mid-lesson: claimed
+  `update_processing_stage` and `update_status` update both fields
+  together, when in fact they're two fully independent setters — each
+  only ever touches its own column. Caught it myself immediately after
+  the explain-back exposed the wrong conclusion it would have implied,
+  corrected it before moving on, and it didn't recur.
+- Two correct, unprompted explain-backs on genuinely subtle points:
+  that a background-task crash mid-pipeline leaves `status` stuck at
+  `processing` with `processing_stage` frozen wherever it last was
+  (not reset to some "failed" value, since `mark_failed` never touches
+  that field), and that the outer `try/except` in `process_document`
+  protects all six new stage-update calls, not just the four original
+  pipeline steps, since a `commit()` failure inside
+  `update_processing_stage` propagates the same way any other
+  exception does.
+- The session's own protocol shifted mid-build: `CLAUDE.md` was edited
+  (by me, outside this conversation) partway through, moving from
+  "teach every chunk before writing the next" to "build the whole
+  feature, then give one architect-level summary." The frontend half
+  (Route Handlers, dropzone, wiring) was built in one continuous pass
+  under the new rule, without the chunk-by-chunk explain-back the
+  backend half had already gone through — a genuinely different
+  teaching cadence within one single feature, not a mistake, but worth
+  naming since it means the frontend half wasn't verified for
+  understanding the same way the backend half was.
+
+### Concepts to revisit
+- The MCP regression this session caught is a live example of a
+  broader risk worth keeping in mind for future refactors: splitting
+  or renaming a method that more than one caller uses needs every
+  caller checked, not just the one caller being actively edited.
+- No migration tool exists yet for the database schema — carried over
+  unchanged, now with a third hand-run migration behind it
+  (`pii_detected`, the Azure Postgres schema creation, and now
+  `processing_stage`).
+- `BackgroundTasks` has no persistence or retry — a process crash or
+  restart mid-task silently orphans whatever document was processing,
+  with no alert. Named explicitly in ADR-030 as the concrete trigger,
+  alongside connection-pool exhaustion, for eventually moving to a
+  real queue (Kafka) — not a problem today, worth watching for once
+  this runs unattended.
+
+### What's next
+- Four more planned frontend pages remain entirely unbuilt: Dashboard,
+  Query, Analytics, Admin — the Query interface (a chat-like UI with
+  streaming answers, per `CLAUDE.md`'s frontend standards) is the
+  largest of the four.
+- MCP's upload path now runs the same two-method split synchronously;
+  worth a deliberate look at whether MCP callers would ever benefit
+  from their own progress-visibility mechanism, or whether "one final
+  result" is simply correct for that door and nothing more is needed.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real per-caller rate limiting/network isolation for APIM, real
+  auth/multi-tenancy (item 14), the still-growing test suite gap, and
+  the rest of the build order beyond the frontend.
+
+**Estimated completion: ~57% of the total project, by weighted
+effort** — up from ~55%. A real, working piece of the frontend's
+largest remaining page category (upload UX, not just read-only
+display) is now live and verified, plus a genuine backend
+architecture change (the first real move off fully-synchronous
+processing) that several future features benefit from, not just this
+one page. Rough remaining effort: ~60 hours across the rest of the
+frontend (four more pages), real auth/multi-tenancy (item 14), APIM's
+remaining gaps, the missing migration tool, guardrails (item 16),
+multi-agent federated retrieval (item 17), conversation history (item
+18), streamed generation (item 19), and the still-growing test suite
+gap. At 3–4 hours/day, that's roughly 15–20 working days left,
+assuming no further scope changes.

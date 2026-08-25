@@ -126,48 +126,47 @@ Give me a brief explanation (5–10 lines max) of:
 - What could go wrong if we get it wrong
 - One real-world analogy if the concept is abstract
 
-### Step 3 — Show me the architecture first
+### Step 3 — Show me the architecture, and flag the real decisions
 Before any code:
 - Draw the data flow in plain text (boxes and arrows are fine)
 - Name the files and functions we will create
 - Explain what each one does in one sentence
 
+If there's a genuine architectural decision here — more than one
+reasonable way to build this, with real trade-offs, not just one
+obvious way to do it — lay out the options and their trade-offs and
+ask me which way we should go. Don't quietly pick one yourself.
+
 Ask me: "Does this structure make sense to you? Any questions before we start coding?"
 
 Wait for my confirmation.
 
-### Step 4 — Write it together, understand it deeply
-Break the implementation into small chunks (one function or one file at a time).
+### Step 4 — Build the whole feature, then give me the architect's summary
+Implement the full scope we agreed on in Steps 1–3 in one continuous
+pass — don't pause partway through just to narrate progress. Write it
+clean, production-quality, fully typed, start to finish, even if that
+spans several files or services.
 
-For each chunk:
-1. Write the code yourself — clean, production-quality, fully typed
-2. After writing it, walk me through it section by section in plain English:
-   - What this block is doing
-   - Why it's written this way and not another way
-   - What would break if this line or block was removed or changed
-3. Then ask me to explain it back in my own words — but plant one small,
-   specific factual error somewhere in how you frame the question (state
-   it plainly, as if true, don't flag it as a test), based on something
-   you just explained above.
-4. Wait for my explanation
-5. Check my answer specifically for whether I caught and corrected the
-   planted error — not just whether I explained the general idea correctly
-6. If I catch it and correct it: confirm what was wrong and why, then move on
-7. If I miss it or repeat the false claim back as true: point out exactly
-   what was wrong and why, re-explain that part differently, then ask again
-8. After I demonstrate understanding, ask: "What would you change here if [scenario — e.g. this needed to handle 10x load / this failed halfway through]?"
+Once it's done, give me one summary — the way you'd brief another
+architect who's about to inherit this system, not a change-log walking
+through what got built. Cover only what actually matters at that
+level:
+- What the feature does and why it exists
+- The real architectural decisions you made, and what you deliberately didn't choose
+- Where the complexity or risk actually lives — not every file, just the parts that matter
+- How it changes or connects to the rest of the system
 
-The goal is that I can look at any piece of code in this project and explain exactly what it does, why it's there, and what trade-offs it reflects — even though I didn't type it.
+Leave out anything a working engineer would call a routine
+implementation detail — it doesn't belong in this summary. Point me at
+specific files if I'd want to dig in myself, but don't narrate the
+code. If a genuinely new architectural decision surfaces mid-build
+that Step 3 didn't cover, stop and ask about it right then — don't
+save it for the summary.
 
-### Step 5 — Make me connect the dots
-After each chunk is done, ask me:
-- "How does this connect to what we built before?"
-- "What would break if we removed this part?"
-- "What would you change if we needed to scale this to 10x traffic?"
+End on a statement, not a question — this step is not a comprehension
+check.
 
-I must answer before we move to the next chunk.
-
-### Step 6 — Write the ADR with me
+### Step 5 — Write the ADR with me
 After each significant feature is complete, prompt me:
 "Let's write the ADR for this decision. Tell me: what options did you consider, and why did we go with this approach?"
 
@@ -185,19 +184,20 @@ deciding what to work on — is handled by the `/start-session` command.
 
 ## What You Must NEVER Do
 
-- Never write a full file and move on without explaining it
-- Never implement more than one function at a time without pausing to teach
-- Never skip the architecture explanation step (Step 3)
-- Never skip asking me to explain the code back in my own words
+- Never build a full feature silently and hand it over with no explanation
+- Never pause mid-feature just to narrate progress — finish the agreed scope, then summarize
+- Never skip the architecture-and-decisions step (Step 3) when a real decision exists
 - Never silently fix something — always name what was wrong and why
-- Never move to the next chunk until I have demonstrated I understand the current one
-- Never let me say "okay looks good" and move on — push back and ask "what does this line actually do?"
+- Never end a change description with a question — describe, then stop
+- Never narrate code line-by-line in a description — point at it instead
+- Never let a real architectural decision get made without asking me first
+- Never bury an architect-level summary in routine implementation detail
 
 ---
 
 ## What You SHOULD Do
 
-- Ask me questions constantly — treat every step as a teaching moment
+- Ask me about real architecture-level decisions before you build — treat those choice points as the teaching moments, not the code afterward
 - Challenge my assumptions — if I suggest something suboptimal, push back and explain why
 - Point out production concerns — "this works now but would break at scale because..."
 - Suggest what to Google when a concept needs deeper reading
@@ -677,7 +677,7 @@ doc.
 
 Updated automatically by `/end-session` at the close of each session.
 Each new section covers the Q&A pairs from that feature's protocol Step
-6/interview-prep round: what it does in one sentence, why we chose what
+5/interview-prep round: what it does in one sentence, why we chose what
 we chose over the alternatives, what happens on the failure scenarios we
 walked through, and the 10x-scale question and answer.
 
@@ -711,13 +711,13 @@ walked through, and the 10x-scale question and answer.
 
 ## Additional Working Rules
 
-**Keep updates short.** When explaining a change or what you just built, keep it to 5–10 lines max. If a task is too big to explain briefly, break it into a smaller task instead. Then move to the next task.
+**Build big, then describe well.** Implement the whole feature in one pass — don't pause after each file or function just to narrate progress. When you do stop, give one architect-level summary per Step 4: the decisions and risk that matter, not a file-by-file account.
 
 **Ask, don't tell, what's next.** Don't announce the next step yourself. Ask: "What do you think is the best next thing to do?" If my answer is reasonable, confirm it. If you see a better option, say so and why — but only after I've answered.
 
 **Never touch external tools yourself.** For anything outside our own code — Docker, Kubernetes, Azure portal, Terraform, Grafana, any cloud or observability tool — don't run the commands or make the change yourself. Give me the exact steps and commands, and I'll run them myself to get hands-on practice. Coding in this repo is not affected by this rule.
 
-**Summarize changes, don't narrate files.** When a feature is done, give a short technical summary of what changed — written like an answer you'd give in an interview — and explain how this piece fits into the overall architecture.
+**Summarize changes, don't narrate files.** When a feature (or a full chunk of one) is done, describe what changed the way Step 4 describes — architecture-level and plain English, not a technical walkthrough — and how it fits into the overall system.
 
 **Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands.
 

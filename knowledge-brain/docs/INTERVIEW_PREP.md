@@ -1752,10 +1752,11 @@ server-to-server, where CORS (a purely browser-enforced rule) never
 applies at all. Chosen over adding `CORSMiddleware` to the backend since
 it needed zero backend change for something currently driven by a
 temporary, pre-auth placeholder identity — a real trade-off, though,
-since the upcoming upload flow needs genuine browser-side interactivity
-(drag-and-drop, a file picker) that a Server Component alone can't
-provide, which will force a real CORS-vs-proxy decision in that next
-chunk.
+since the upload flow needs genuine browser-side interactivity
+(drag-and-drop, a file picker, live progress) that a Server Component
+alone can't provide. That forced choice landed the following session:
+a Next.js Route Handler proxying the browser's request server-to-server,
+not CORS — see Feature 17.
 
 **A real incident: the page rendered its empty state correctly, no
 console errors — what was actually wrong, and how was it found?**
@@ -1798,6 +1799,139 @@ real auth (item 14) exists carries the same limitation, tracked
 explicitly rather than hidden inside one config file.
 
 *Further reading: [Next.js's own documentation on Server and Client Components](https://nextjs.org/docs/app/getting-started/server-and-client-components), covering the rendering model this entire session's architecture decisions were built on.*
+
+---
+
+## Feature 17: Background Upload Processing with Per-Stage Progress
+
+**What does this feature do, in one sentence?**
+Extends ADR-001's own stated next step: the REST upload endpoint now
+returns almost immediately instead of blocking for the whole pipeline,
+running extraction, PII detection, chunking, embedding, and saving as a
+FastAPI background task, while a new `processing_stage` field and a
+polling status endpoint let the frontend show a live, per-step progress
+bar instead of a spinner with no information behind it.
+
+```mermaid
+flowchart LR
+    UP["POST /documents/upload"] --> CREATE["create_document<br/>(fast, synchronous)"]
+    CREATE --> RESP["Response returns:<br/>id, status=pending"]
+    CREATE -.->|"scheduled"| BG["Background task:<br/>process_document"]
+    BG --> STAGE["status→processing,<br/>processing_stage updated<br/>before each pipeline step"]
+    STAGE --> DONE["status→ready/failed/pending_review"]
+    POLL["Frontend polls<br/>GET /documents/id/status<br/>every 2s"] -.-> DONE
+```
+
+**Why FastAPI `BackgroundTasks` instead of finally reaching for Kafka,
+given it's been sitting in the planned tech stack the whole time?**
+ADR-001 named the exact condition for reaching for Kafka — enough
+concurrent uploads to exhaust the database connection pool, roughly 15
+at once, since a synchronous upload holds its connection for the whole
+pipeline's duration. That number was never actually observed. What
+*did* become real is a much smaller problem: one person watching one
+upload button freeze for the length of a PDF's embedding calls, once a
+real frontend existed to make that freeze visible. `BackgroundTasks`
+fixes exactly that, with zero new infrastructure — no broker, no
+worker process, nothing new to operate. Reaching for Kafka here would
+have been solving a scale problem that hasn't happened yet, at the cost
+of solving today's actual, smaller problem more slowly.
+
+**Why does `processing_stage` get its own column instead of just adding
+more values to the existing `DocumentStatus` enum?**
+`DocumentStatus` is load-bearing — permission checks, the document
+list, and "only a `ready` document is a valid citation source" all
+switch on it, and it needs to stay a small, stable set for that to keep
+working cleanly. `processing_stage` only means anything for the
+lifetime of one background run and is read by exactly one consumer, a
+progress bar — nothing else in the system ever needs to branch on
+whether a document is currently `chunking` versus `embedding`. Keeping
+them separate means every piece of code that already switches on
+`DocumentStatus` needed zero changes.
+
+**Walk me through what happens, concretely, if the server crashes right
+after `processing_stage` moves to `chunking` but before `chunk_text()`
+returns.**
+Nothing catches it. `BackgroundTasks` has no persistence and no retry —
+it's a function call scheduled inside the same process that's about to
+die, not a message sitting in a queue waiting to be redelivered. The
+document is left permanently at `status = processing`,
+`processing_stage = chunking`, with no `failure_reason`, and nothing
+retries it. Contrast that with the normal in-process failure path: if
+`chunk_text()` throws while the server stays alive, that exception is
+caught by `process_document`'s own `try/except`, and `mark_failed` runs
+— `status` reaches `failed` cleanly, with a reason recorded. A process
+crash is the one failure mode that path can't catch, because the code
+that would catch it never gets to run either. This is the concrete,
+named reason a real message queue would eventually replace this: an
+unacknowledged Kafka message gets redelivered to another worker; an
+in-process background task scheduled on a process that just died simply
+doesn't exist anymore.
+
+**The background task needs to touch the database and Neo4j — why can't
+it just reuse the sessions the original request already had open?**
+Both sessions are scoped to the request/response cycle and are already
+torn down by the time a background task actually executes — a
+background task runs *after* the response has been sent, not before,
+so "the request's session" doesn't meaningfully exist anymore at that
+point. The fix was opening brand new sessions directly inside the
+background function itself (`AsyncSessionLocal()` for Postgres, the raw
+Neo4j driver's `.session()` for the graph), independent of whatever the
+original request used.
+
+**A subtle one: why is `correlation_id` passed into the background
+task as a plain function argument instead of just calling
+`get_correlation_id()` from inside it, the way every other log call in
+this codebase does?**
+`get_correlation_id()` reads a `ContextVar` that the correlation-ID
+middleware resets back to empty the moment the response leaves the
+endpoint — and a background task, by definition, runs after that
+already happened. Calling it from inside the task wouldn't error, it
+would just silently return an empty string, breaking Enterprise
+Requirement 3's "every log line includes a real correlation ID" without
+looking broken at all — no exception, no obviously wrong output, just a
+blank field. Capturing the value in the endpoint, while the `ContextVar`
+is still genuinely valid, and passing it down explicitly avoids that
+trap entirely.
+
+**Splitting `ingest_document` into two methods broke something. What,
+and how was it caught?**
+MCP's `upload_document` tool still called the old, now-deleted
+`ingest_document` method directly — a real regression, not a
+pre-existing gap, introduced by this session's own refactor. It would
+have thrown `AttributeError` on the very next MCP upload. It was caught
+while writing this project's own architecture documentation for the
+feature — describing what MCP's path does surfaced that the code no
+longer matched the claim being written down. The fix keeps MCP fully
+synchronous, on purpose: a tool call only ever produces one final
+result, there's no "return now, poll later" concept the way an HTTP
+response has, so MCP now calls `create_document` and `process_document`
+back to back in the same call, rather than backgrounding anything.
+
+**The status endpoint returns 404 for both "this document doesn't
+exist" and "you have no access to it." Why not tell those apart?**
+So the endpoint can't be used to fingerprint documents a caller was
+never granted access to. If a wrong-but-plausible document id
+returned a different error than a right-but-forbidden one, an attacker
+polling ids could learn which ones are real without ever seeing their
+content — a real information leak through an error code alone. Making
+the two cases indistinguishable from outside closes that, at the minor
+cost of a slightly less specific error message for a legitimate caller
+who mistyped an id.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The concrete trigger ADR-001 already named — sustained concurrent
+uploads exhausting the connection pool — is still the real number to
+watch for reaching for Kafka. What this session adds to that picture is
+a second, related failure mode worth naming in the same breath: once
+background tasks are real and running unattended, a worker restart
+mid-task silently orphans whatever it was doing, with no alert and no
+automatic recovery. A queue-backed worker doesn't have that gap. Until
+either number is actually observed, adding that infrastructure now
+would be solving a problem that doesn't exist yet, at real,
+avoidable operational cost.
+
+*Further reading: [FastAPI's own documentation on Background Tasks](https://fastapi.tiangolo.com/tutorial/background-tasks/), covering exactly this mechanism — how it's scheduled, and its explicit note that heavier background processing should eventually move to a real task queue like Celery.*
 
 ---
 

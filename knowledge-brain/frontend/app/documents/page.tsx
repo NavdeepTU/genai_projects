@@ -3,6 +3,7 @@ import { FileText, ShieldAlert } from "lucide-react";
 import { getDocuments, type DocumentListItem, type DocumentStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { UploadDropzone } from "@/components/upload-dropzone";
 import { cn } from "@/lib/utils";
 
 // This page's data is inherently per-user and changes on every upload —
@@ -95,7 +96,11 @@ export default async function DocumentsPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
-      <h1 className="mb-8 text-2xl font-semibold">Documents</h1>
+      <h1 className="mb-6 text-2xl font-semibold">Documents</h1>
+
+      <div className="mb-8">
+        <UploadDropzone />
+      </div>
 
       {documents.length === 0 ? (
         <EmptyState />

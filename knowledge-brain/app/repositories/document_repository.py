@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.document import Chunk, Document, DocumentStatus
+from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
 from app.models.document_permission import DocumentPermission
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,19 @@ class DocumentRepository:
             await self.session.commit()
         except SQLAlchemyError:
             logger.exception("Failed to update status for document %s", document_id)
+            raise
+
+    async def update_processing_stage(self, document_id: uuid.UUID, stage: ProcessingStage) -> None:
+        """Move a document to a new step within the processing pipeline."""
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.processing_stage = stage
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to update processing stage for document %s", document_id)
             raise
 
     async def flag_for_review(self, document_id: uuid.UUID) -> None:
@@ -212,6 +225,37 @@ class DocumentRepository:
             logger.exception("Failed to list documents for user %s", user_id)
             raise
         return list(result.scalars().all())
+
+    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
+        """Return a document by id with no permission check — internal use only.
+
+        Same reasoning as find_by_keyword_unrestricted: for system-level
+        code (here, the background job deciding whether to build graph
+        references) that isn't answering on behalf of a particular user.
+        Never call this to serve a user-facing request.
+        """
+        return await self.session.get(Document, document_id)
+
+    async def get_document_for_user(self, document_id: uuid.UUID, user_id: str) -> Document | None:
+        """Return one document if this user has been granted access to it, else None.
+
+        Same permission join as list_documents_for_user — a document with no
+        matching document_permissions row for this user is invisible, whether
+        someone is browsing the full list or polling one document directly
+        by id.
+        """
+        stmt = (
+            select(Document)
+            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
+            .where(Document.id == document_id, DocumentPermission.user_id == user_id)
+            .limit(1)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to fetch document %s for user %s", document_id, user_id)
+            raise
+        return result.scalar_one_or_none()
 
     async def get_first_chunk_text(self, document_id: uuid.UUID, user_id: str) -> str | None:
         """Return a referenced document's first chunk as a representative snippet.

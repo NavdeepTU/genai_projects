@@ -27,6 +27,23 @@ class DocumentStatus(str, Enum):
     PENDING_REVIEW = "pending_review"
 
 
+class ProcessingStage(str, Enum):
+    """Which step of the pipeline a PROCESSING document is currently on.
+
+    Only meaningful while status is PROCESSING — once a document reaches
+    a terminal status (READY, FAILED, PENDING_REVIEW), the frontend stops
+    polling and stops reading this field, so it's left wherever the
+    pipeline last set it rather than reset to some "done" value.
+    """
+
+    QUEUED = "queued"
+    EXTRACTING = "extracting"
+    CHECKING_PII = "checking_pii"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
+    SAVING = "saving"
+
+
 class Document(Base):
     """A single uploaded file and where it is in the ingestion pipeline."""
 
@@ -36,6 +53,9 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[DocumentStatus] = mapped_column(
         SQLEnum(DocumentStatus), default=DocumentStatus.PENDING
+    )
+    processing_stage: Mapped[ProcessingStage] = mapped_column(
+        SQLEnum(ProcessingStage), default=ProcessingStage.QUEUED
     )
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -89,4 +109,17 @@ class DocumentListResponse(BaseModel):
     """What the API sends back for a request to list a user's documents."""
 
     documents: list[DocumentListItem]
+    correlation_id: str
+
+
+class DocumentStatusResponse(BaseModel):
+    """What the API sends back when the frontend polls a document's progress."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: DocumentStatus
+    processing_stage: ProcessingStage
+    pii_detected: bool
+    failure_reason: str | None
     correlation_id: str

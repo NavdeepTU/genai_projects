@@ -14,7 +14,13 @@ and why it was made that way.
 **Built and verified end-to-end:**
 - **Document ingestion** — upload a PDF or `.txt` file → text is
   extracted → split into chunks → each chunk is embedded → everything is
-  stored in Postgres.
+  stored in Postgres. The REST upload endpoint returns immediately
+  (extending [`ADR-001`](docs/adr/ADR-001-synchronous-ingestion.md)'s
+  own stated next step); the pipeline runs afterward as a background
+  task, with a `GET /documents/{id}/status` endpoint reporting which
+  step it's currently on. MCP's `upload_document` tool stays fully
+  synchronous, since a tool call only ever returns one final result.
+  See [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md).
 - **Retrieval + hybrid search + answer generation** — ask a question →
   a vector search (meaning) and a keyword search (exact terms, via
   Postgres full-text search) run and get merged with Reciprocal Rank
@@ -105,14 +111,19 @@ and why it was made that way.
   of five planned pages, the Document Library — backed by a new,
   permission-filtered `GET /documents` endpoint. Fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
-  backend needing any CORS configuration. See
-  [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md) and
-  [`ADR-029`](docs/adr/ADR-029-document-library-page.md).
+  backend needing any CORS configuration. Drag-and-drop upload is built
+  too, with a live per-stage progress bar — the browser talks only to
+  two same-origin Next.js Route Handlers, which proxy the real,
+  secret-bearing calls to the backend server-to-server, so
+  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript. See
+  [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
+  [`ADR-029`](docs/adr/ADR-029-document-library-page.md), and
+  [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md).
 
-**Not built yet:** the upload flow and four more planned frontend pages
-(Dashboard, Query, Analytics, Admin), and full auth/multi-tenancy
-(today's identity is a self-asserted header, not real authentication).
-See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** four more planned frontend pages (Dashboard, Query,
+Analytics, Admin), and full auth/multi-tenancy (today's identity is a
+self-asserted header, not real authentication). See `CLAUDE.md`'s build
+order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
@@ -260,6 +271,18 @@ curl -X POST http://localhost:8000/query \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
+```
+
+The upload call returns immediately with `status: "pending"` — the file
+hasn't actually been processed yet. Take the `id` it returns and poll
+the status endpoint (the frontend does this automatically, every 2
+seconds) to watch it move through `processing`/`processing_stage` and
+on to `ready`:
+
+```
+curl http://localhost:8000/documents/<document-id>/status \
+  -H "X-User-Id: you" \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here"
 ```
 
 Uploading a document automatically grants you access to it. To share a
