@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from neo4j import AsyncSession as Neo4jAsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,7 +8,7 @@ from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
 from app.core.graph_database import get_graph_session
 from app.core.middleware import get_correlation_id, get_current_user_id
-from app.models.query import QueryRequest, QueryResponse
+from app.models.query import QueryRequest, QueryResponse, QuerySource
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
@@ -22,11 +24,12 @@ async def query(
     graph_session: Neo4jAsyncSession = Depends(get_graph_session),
 ) -> QueryResponse:
     """Answer a question using retrieval-augmented generation."""
-    service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
+    repository = DocumentRepository(db)
+    service = RetrievalService(repository, GraphRepository(graph_session))
     user_id = get_current_user_id()
 
     try:
-        answer = await service.answer_question(request.question, user_id)
+        state = await service.run_query(request.question, user_id)
     except CircuitOpenError:
         raise HTTPException(
             status_code=503,
@@ -48,4 +51,25 @@ async def query(
         user_id=user_id,
     )
 
-    return QueryResponse(answer=answer, correlation_id=correlation_id)
+    filenames: dict[uuid.UUID, str] = {}
+    sources: list[QuerySource] = []
+    for chunk in state["reranked_chunks"]:
+        if chunk.document_id not in filenames:
+            document = await repository.get_by_id(chunk.document_id)
+            filenames[chunk.document_id] = document.filename if document else "Unknown document"
+        sources.append(
+            QuerySource(
+                document_id=chunk.document_id,
+                filename=filenames[chunk.document_id],
+                chunk_text=chunk.text,
+            )
+        )
+
+    confidence = None if state["reranker_unavailable"] else state["top_relevance_score"]
+
+    return QueryResponse(
+        answer=state["answer"],
+        sources=sources,
+        confidence=confidence,
+        correlation_id=correlation_id,
+    )

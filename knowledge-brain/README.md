@@ -105,22 +105,29 @@ and why it was made that way.
   restriction and real per-caller rate limiting both turned out to be
   unavailable on the Consumption tier chosen for cost — see
   [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
-- **Frontend** *(just started — see below)* — a separate Next.js
+- **Frontend** *(in progress — see below)* — a separate Next.js
   project (`frontend/`, Tailwind, Shadcn/UI on Base UI) with a shared
-  shell (navigation, dark mode, a responsive mobile menu) and the first
-  of five planned pages, the Document Library — backed by a new,
-  permission-filtered `GET /documents` endpoint. Fetches server-side
+  shell (navigation, dark mode, a responsive mobile menu) and two of
+  five planned pages. The Document Library — backed by a new,
+  permission-filtered `GET /documents` endpoint — fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
-  too, with a live per-stage progress bar — the browser talks only to
-  two same-origin Next.js Route Handlers, which proxy the real,
-  secret-bearing calls to the backend server-to-server, so
-  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript. See
+  too, with a live per-stage progress bar. The Query page is a real
+  chat interface: `/query`'s response now carries `sources` (the
+  chunks that actually informed the answer, with filenames) and
+  `confidence` alongside the answer text, not just the answer alone —
+  the answer renders all at once, not token-by-token, since real
+  streaming (build-order item 19) doesn't exist yet. Every
+  client-triggered action talks only to same-origin Next.js Route
+  Handlers, which proxy the real, secret-bearing calls to the backend
+  server-to-server, so `BACKEND_GATEWAY_SECRET` never reaches
+  client-side JavaScript. See
   [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
-  [`ADR-029`](docs/adr/ADR-029-document-library-page.md), and
-  [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md).
+  [`ADR-029`](docs/adr/ADR-029-document-library-page.md),
+  [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md), and
+  [`ADR-031`](docs/adr/ADR-031-query-page.md).
 
-**Not built yet:** four more planned frontend pages (Dashboard, Query,
+**Not built yet:** three more planned frontend pages (Dashboard,
 Analytics, Admin), and full auth/multi-tenancy (today's identity is a
 self-asserted header, not real authentication). See `CLAUDE.md`'s build
 order for the full plan.
@@ -198,7 +205,7 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
 - **Next.js + Tailwind + Shadcn/UI (on Base UI)** — the frontend
-  (`frontend/`), just started: a shared shell and one of five planned
+  (`frontend/`), in progress: a shared shell and two of five planned
   pages so far (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
 
 The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in
@@ -284,6 +291,12 @@ curl http://localhost:8000/documents/<document-id>/status \
   -H "X-User-Id: you" \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here"
 ```
+
+The `/query` response above carries more than just `answer`: a
+`sources` array (the chunks actually used, each with its source
+document's filename) and a `confidence` number — the reranker's own
+relevance score on the best chunk, or `null` if reranking itself was
+unavailable for that request.
 
 Uploading a document automatically grants you access to it. To share a
 document with someone else (or test what happens when you *don't* have

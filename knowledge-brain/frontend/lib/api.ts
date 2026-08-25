@@ -39,6 +39,40 @@ type DocumentListResponse = {
   correlation_id: string;
 };
 
+export type QuerySource = {
+  document_id: string;
+  filename: string;
+  chunk_text: string;
+};
+
+export type QueryResponse = {
+  answer: string;
+  sources: QuerySource[];
+  confidence: number | null;
+  correlation_id: string;
+};
+
+// Called from the browser (a Client Component's submit handler), so this
+// hits the same-origin Next.js proxy at /api/query, never the backend
+// directly — the proxy is what attaches X-User-Id and the gateway secret
+// server-side. Unlike getDocuments below, this can't take BACKEND_URL as
+// a parameter, since a browser fetch to a different origin would need
+// CORS the backend doesn't have configured.
+export async function postQuery(question: string): Promise<QueryResponse> {
+  const response = await fetch("/api/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.detail ?? `Query failed (status ${response.status})`);
+  }
+
+  return data;
+}
+
 export async function getDocuments(): Promise<DocumentListItem[]> {
   const response = await fetch(`${BACKEND_URL}/documents`, {
     headers: {

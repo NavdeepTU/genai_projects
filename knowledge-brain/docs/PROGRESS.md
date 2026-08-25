@@ -2536,3 +2536,110 @@ multi-agent federated retrieval (item 17), conversation history (item
 18), streamed generation (item 19), and the still-growing test suite
 gap. At 3–4 hours/day, that's roughly 15–20 working days left,
 assuming no further scope changes.
+
+## Session: 2026-08-25 (continued) — Query page: chat UI, sources, and confidence (Feature 16 continued)
+
+### What we built
+- The Query page — the second of five planned frontend pages, and the
+  first real proof the frontend can drive the LangGraph retrieval
+  pipeline end to end, not just display data. A `"use client"` page
+  with a scrolling transcript of question/answer turns, an input box
+  pinned at the bottom, a loading skeleton per turn while waiting, and
+  a human-readable error state on failure.
+- The one real backend change: `/query` used to return only `answer`
+  and `correlation_id`, discarding data the pipeline already computed.
+  It now calls `RetrievalService.run_query()` instead of
+  `answer_question()` to get the full `QueryState`, and returns
+  `sources` (the actual chunks used, each with its document's
+  filename) and `confidence` (the reranker's own top relevance score)
+  alongside the answer — nothing newly computed, just finally exposed.
+  `confidence` is `null`, not `0.0`, specifically when the reranker was
+  unavailable — reusing the exact distinction `_rerank_safely` already
+  drew internally, just not surfaced past the service boundary before
+  now.
+- Two forks named explicitly before writing any code, both resolved by
+  deliberately cutting scope rather than faking it: the answer renders
+  all at once (a loading skeleton, not a typewriter effect), since real
+  token streaming is build-order item 19 and doesn't exist yet; and
+  there's no sidebar of past conversations, since that needs real
+  storage and context-condensing, item 18, also not built. Both named
+  in ADR-031 as deferred, not discovered as gaps later.
+- A new `POST /api/query` Route Handler, same proxy pattern ADR-030
+  already established for uploads — the browser only ever calls this
+  same-origin path, keeping `BACKEND_GATEWAY_SECRET` out of
+  client-side JavaScript for this client-triggered action too.
+- Caught and fixed, while updating `ARCHITECTURE.md` (not by running
+  the app): the "Asking a question via MCP" section claimed MCP and
+  REST "behave identically regardless of which door the request came
+  through," which stopped being true the moment `/query`'s response
+  shape diverged from MCP's `ask_knowledge_base` (still a plain string,
+  by design — an MCP result is read by another AI, not rendered with
+  source cards). Corrected in place, not left describing stale
+  behavior next to the new feature's own section.
+- Verified live: a real question against real ingested documents (a
+  `.txt` fixture and a multi-page PDF) returned a correct answer, real
+  per-chunk sources with real filenames, and a real confidence score
+  (0.777) — through both a direct `curl` against the backend and the
+  frontend's own proxy route. The Chrome browser tool was disconnected
+  for this feature's build, so I could not click through the actual UI
+  myself — said so explicitly instead of silently claiming success, and
+  asked for a manual check instead. Confirmed directly: "yes its
+  working well."
+- One new ADR: [`ADR-031`](adr/ADR-031-query-page.md) (the
+  streaming/history scope cuts, and why `QueryResponse` was extended
+  in place rather than adding a second endpoint).
+
+### What I struggled with
+- No corrections needed this session — both interview-prep questions
+  I answered myself were confirmed correct on the first pass (why
+  `confidence` is `null` not `0.0`; why extending `QueryResponse` beats
+  a second endpoint), and the one question I answered myself (why the
+  answer doesn't stream) was accepted without pushback.
+- The session's own protocol continues to run in "build the whole
+  feature, then summarize" mode (per the mid-session `CLAUDE.md` change
+  from the previous session) — Step 1's three understanding questions
+  and Step 3's architecture confirmation still ran as their own
+  back-and-forth before any code, but the actual implementation (both
+  backend and frontend) was written in one continuous pass afterward,
+  same cadence as the background-upload feature before it.
+
+### Concepts to revisit
+- Same two gaps named in ADR-031, now doubly relevant: real streaming
+  (item 19) and conversation history with condensing (item 18) are
+  both direct prerequisites the Query page's own spec already assumed
+  — worth treating as strong candidates for what comes right after the
+  remaining three frontend pages, not indefinitely deferred.
+- The MCP/REST response-shape divergence found this session (MCP stays
+  plain-string, REST now returns structured sources/confidence) is a
+  reasonable, deliberate choice today, but worth remembering as a
+  precedent: future features that extend one entry point's response
+  shape should explicitly decide whether the other entry point needs
+  the same treatment, not leave it to be noticed by accident again.
+
+### What's next
+- Three more planned frontend pages remain entirely unbuilt: Dashboard,
+  Analytics, Admin.
+- Real streaming (item 19) and conversation history (item 18) are now
+  named in two places (ADR-030 and ADR-031) as the concrete unlocks for
+  making both Feature 16 pages match their own original spec — a
+  reasonable pair to consider building next, together, since streaming
+  and condensed follow-up questions both touch the same Query page.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real per-caller rate limiting/network isolation for APIM, real
+  auth/multi-tenancy (item 14), the still-growing test suite gap
+  (no tests yet for `/query`'s new sources/confidence fields), the
+  missing migration tool, and the rest of the build order beyond the
+  frontend.
+
+**Estimated completion: ~58% of the total project, by weighted
+effort** — up from ~57%. A second frontend page is now real and
+verified at the API layer, and — more valuable than the page itself —
+the backend's query response finally carries the citation data the
+whole project's premise (grounded answers, not just answers) depends
+on being visible, not just computed internally. Rough remaining
+effort: ~58 hours across the rest of the frontend (three more pages),
+real auth/multi-tenancy (item 14), APIM's remaining gaps, the missing
+migration tool, guardrails (item 16), multi-agent federated retrieval
+(item 17), conversation history (item 18), streamed generation (item
+19), and the still-growing test suite gap. At 3–4 hours/day, that's
+roughly 15–19 working days left, assuming no further scope changes.

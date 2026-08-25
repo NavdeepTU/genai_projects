@@ -1935,6 +1935,101 @@ avoidable operational cost.
 
 ---
 
+## Feature 18: The Query Page — Chat UI, Sources, and Confidence
+
+**What does this feature do, in one sentence?**
+A real chat interface at `/query` that runs a question through the
+existing LangGraph retrieval pipeline unchanged, and — the one real
+backend addition — exposes data the pipeline already computed but
+previously threw away: which chunks actually informed the answer, with
+their source filenames, and a confidence score.
+
+```mermaid
+flowchart LR
+    UI["query/page.tsx<br/>Client Component"] -->|"POST /api/query"| PROXY["Route Handler<br/>(secret stays server-side)"]
+    PROXY -->|"POST /query"| API["app/api/query.py"]
+    API --> RUN["RetrievalService.run_query()<br/>(unchanged pipeline)"]
+    RUN --> STATE["QueryState:<br/>reranked_chunks, top_relevance_score"]
+    STATE --> BUILD["Build sources[] + confidence<br/>(null if reranker_unavailable)"]
+    BUILD --> RESP["QueryResponse"]
+    RESP --> UI
+```
+
+**CLAUDE.md's own spec for this page describes streaming text and a
+sidebar of past conversations. Neither is built. Why not, and was that
+a shortcut?**
+Not a shortcut — a scope decision made explicit before writing any
+code. Both depend on real backend features that don't exist yet and
+sit later in the build order: token streaming is item 19, with its own
+Enterprise Requirement covering SSE transport and sentence-chunked
+guardrail checks; conversation history is item 18 in the *build order*
+(a different numbering than this doc's own feature list), needing a
+real conversations/turns schema and a context-condensing step. Building
+either as part of "just a page" would mean either faking them (a
+client-side typewriter effect that looks like streaming but isn't a
+real SSE connection) or quietly pulling a much bigger feature forward
+out of order, which this project's own rules say not to do.
+
+**Why does `confidence` come back as `null` instead of `0.0` when the
+reranker is unavailable?**
+Because `0.0` would claim something false — that the system searched
+and found nothing worth trusting — when what actually happened is
+different: real chunks were retrieved and used, the system just
+couldn't compute a *relevance score* for them, since that score only
+exists if Voyage's reranker actually ran. Not being able to score
+confidence and not having relevant chunks are two separate failure
+modes, and collapsing them into the same `0.0` would hide which one
+happened. `null` says "no score was computed," which is the true
+statement; `0.0` would say "computed a bad score," which isn't.
+
+**Why extend the existing `/query` response instead of adding a second
+endpoint just for sources and confidence?**
+Both values already exist inside the exact same `QueryState` object
+the answer text itself comes from — `reranked_chunks` and
+`top_relevance_score`, sitting in memory the moment the answer is
+generated. A second endpoint would need to either re-run the whole
+pipeline a second time (a second embedding call, a second hybrid
+search, a second rerank call, just to reconstruct data already computed
+once) or introduce new cached state somewhere to hand it back later.
+Extending the one response that's already being built costs nothing
+extra — it's pure output shaping, not a second computation.
+
+**If a user asks why the answer doesn't stream in like a modern chatbot,
+what's the honest one-sentence answer?**
+The backend's generation call itself waits for the LLM to produce the
+entire answer before returning anything at all — there's no
+token-by-token transport wired between the model and the browser yet;
+that's a separate feature (Server-Sent Events, build-order item 19)
+that hasn't been built, not a missing setting in today's code.
+
+**MCP's `ask_knowledge_base` tool answers the same questions. Does it
+also return sources and confidence now?**
+No, and that's deliberate, not a gap that was missed. It still calls
+`answer_question()`, the thin wrapper that only unpacks the plain
+answer string from the same `QueryState` — an MCP tool result is read
+by another AI program, not rendered as a UI with source cards and a
+confidence badge, so there was nothing to gain by extending it the same
+way. Both REST and MCP still run through the exact same
+`RetrievalService`; they just ask it for different amounts of what one
+pipeline run already produces.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The real cost isn't in what got built, it's in what's still missing:
+without item 18's context-condensing, every question pays for a full
+embedding call, full hybrid search, and full rerank — even an obvious
+follow-up like "what about the other one" — since the system has no
+memory of the previous turn to shortcut against. Without item 19, a
+slow generation call (large context, a circuit breaker cooldown-retry)
+shows a bare loading skeleton with zero feedback for however long it
+takes. Neither is a surprise found after the fact — both were named as
+explicit, deferred scope in ADR-031, not discovered as a regression
+later.
+
+*Further reading: [MDN's guide to Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events), the mechanism build-order item 19 will eventually need to make real token streaming work — worth reading now, before that feature's own session, since this one's ADR explicitly named SSE as the reason today's answer doesn't stream.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

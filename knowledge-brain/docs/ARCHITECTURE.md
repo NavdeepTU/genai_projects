@@ -84,6 +84,7 @@ flowchart TD
         REWRITE --> QEMBED
         CHECK -->|no| GRAPHCTX["Fetch graph context, same permission join —<br/>a referenced document this user can't see<br/>never contributes a snippet (one hop,<br/>via circuit breaker)"]
         GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM, via circuit breaker)"]
+        GEN --> SOURCES["Build sources + confidence from<br/>the same reranked chunks/score —<br/>confidence = null if reranker was unavailable"]
     end
 
     BUILDREFS -.writes.-> NEO4J[(Neo4j)]
@@ -98,7 +99,8 @@ flowchart TD
     GEN --> AUDIT2[Audit log:<br/>query_made]
 
     AUDIT1 --> RESP1[Response +<br/>correlation ID]
-    AUDIT2 --> RESP2[Response +<br/>correlation ID]
+    AUDIT2 --> RESP2[Response: answer + sources +<br/>confidence + correlation ID]
+    SOURCES -.-> RESP2
 ```
 
 **Getting a document in:** a user uploads a file — through the REST
@@ -187,9 +189,39 @@ final chunks, the graph snippets, plus the *original* question (never
 the rewritten one — the rewrite is only a search tool, not a
 replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
-rather than guessing if the answer isn't there.
+rather than guessing if the answer isn't there. The response sent back
+carries more than just that answer text: each chunk that actually
+informed it, with its source document's filename, plus a confidence
+number — the same relevance score reranking already computed on the
+best chunk, or nothing at all if reranking itself was unavailable for
+this request, since a real low score and "no score was computed" must
+never look identical to whoever's reading it.
 
-**What's new since the last update:** document uploads through the REST
+**What's new since the last update:** the Query page (build-order item
+13's second page) now exists — a real chat interface at `/query`, a
+Client Component with a scrolling transcript, an input box pinned at
+the bottom, and per-turn loading and error states. It calls the exact
+same LangGraph pipeline described above through a new same-origin proxy
+(`POST /api/query`), same reasoning as the upload flow's own proxy
+routes. The one real backend change: `/query` used to return only
+`answer` and `correlation_id`, throwing away data the pipeline already
+computed. It now also returns `sources` (the actual chunks the answer
+drew from, with filenames) and `confidence` (the reranker's own
+relevance score on the best chunk) — both pulled from `QueryState`,
+nothing newly computed. `confidence` is `null`, not `0.0`, specifically
+when the reranker was unavailable and the pipeline fell back to hybrid
+search's own ordering — reusing the exact distinction
+`_rerank_safely` already drew internally (a real low score must never
+look identical to "no score exists"), just finally surfaced past the
+service boundary. Two things CLAUDE.md's own page spec calls for were
+deliberately not built yet, both named rather than silently skipped:
+the answer renders all at once, not token-by-token, since real
+streaming is build-order item 19 with its own Enterprise Requirement
+that doesn't exist yet; and there's no sidebar of past conversations,
+since that needs real storage and context-condensing, build-order item
+18, also not built. See ADR-031.
+
+**What's new before that:** document uploads through the REST
 endpoint no longer block the caller for the pipeline's full duration.
 Extending ADR-001's own stated next step, `POST /documents/upload` now
 only does the fast, synchronous part — create the row, grant access,
@@ -430,6 +462,25 @@ Talks to: `POST /documents/upload` and `GET
 from the browser. If it disappeared, uploading would still be possible
 through `curl` or MCP, just not through the UI.
 
+**Query page (`frontend/app/query/page.tsx`) and its proxy route
+(`frontend/app/api/query/route.ts`)** — the chat interface, added with
+ADR-031. A `"use client"` component holding one array of past
+question/answer turns in React state (nothing persisted — gone on
+reload, since real conversation history is build-order item 18, not
+built); a scrolling transcript above an input box pinned to the
+bottom. Submitting a question posts to `POST /api/query`, the same
+same-origin-proxy pattern as the upload routes and for the same
+reason — keeping `BACKEND_GATEWAY_SECRET` out of client-side
+JavaScript for this client-triggered action. Each turn shows a loading
+skeleton while waiting, then the complete answer at once (not
+token-by-token — real streaming is item 19, also not built), a
+confidence badge, and a card per source chunk with its document's
+filename. Talks to: `POST /query` on the backend, from the Next.js
+server, never from the browser. If it
+disappeared, the same question could still be asked through `curl` or
+MCP's `ask_knowledge_base`, just not through the UI, and without the
+per-source citations the REST response now carries.
+
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
 job is stamping a shared secret onto every request it forwards, so the
@@ -599,15 +650,23 @@ user-facing read. `update_processing_stage` mirrors `update_status`'s
 exact shape, writing to the new progress-tracking column instead.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — still the
-conductor for answering questions. `answer_question` builds a small
-LangGraph graph (in `__init__`) and hands the question to it; the
-actual step logic lives in six methods on this class (`_retrieve_node`,
+conductor for answering questions. `__init__` builds a small LangGraph
+graph once (`self._graph = build_query_graph(self)`); the actual step
+logic lives in six methods on this class (`_retrieve_node`,
 `_rerank_node`, `_rewrite_node`, `_should_retry`, `_graph_context_node`,
 `_generate_node`), each a graph node, all reusing the exact same
 search/rerank/graph-lookup helpers hardened in ADR-012, ADR-013, and
 ADR-015 — nothing about the existing partial-failure or
-reranker-fallback behavior changed to add graph context on top. Talks
-to: embedding, the repository, hybrid search, reranking, query
+reranker-fallback behavior changed to add graph context on top. Two
+public entry points sit on top of the same graph invocation: `run_query`
+returns the full final `QueryState` (chunks actually used, the
+reranker's relevance score, the answer) — what `/query`'s REST route
+(ADR-031) and the evaluation harness both need; `answer_question` is a
+thin wrapper around it that unpacks just the answer string — what MCP's
+`ask_knowledge_base` needs, since an MCP tool result is read by another
+AI, not rendered with source cards. Neither path duplicates pipeline
+logic; they just ask for different amounts of the same run's output.
+Talks to: embedding, the repository, hybrid search, reranking, query
 rewriting, the graph repository, and generation.
 
 **Query graph (`app/services/query_graph.py`)** — defines the shape of
@@ -959,6 +1018,30 @@ business rule already depends on, while the new field is meaningful
 only for the lifetime of one background run and read by nothing outside
 the progress bar. See ADR-030.
 
+The Query page's answer renders all at once, not token-by-token, and
+carries no conversation history — both a deliberate scope cut, not an
+oversight. CLAUDE.md's own page spec describes both a streaming answer
+and a sidebar of past conversations, but each depends on a real backend
+feature that doesn't exist yet: SSE streaming is item 19, conversation
+storage and context-condensing is item 18, each later in the build
+order than this page and each with its own detailed Enterprise
+Requirement still unbuilt. A client-side typewriter effect (revealing
+an already-complete answer a few characters at a time) was considered
+and rejected specifically because it would look identical to real
+streaming on screen while being architecturally nothing like it — no
+SSE, no real time-to-first-token improvement — and would need tearing
+out rather than extending once item 19 is real. `QueryResponse` was
+extended in place with `sources` and `confidence`, rather than adding a
+second endpoint, since both values already exist inside the same
+`QueryState` the answer itself comes from — a second endpoint would
+mean paying for a second pipeline run, or introducing new cached state,
+for data that was already sitting in memory one line away. `confidence`
+is typed `float | None`, not defaulted to `0.0`, reusing the exact
+distinction `_rerank_safely` already drew internally for its own
+`reranker_unavailable` flag: a real low score and "no score was
+computed at all" must never look the same to whoever reads the number.
+See ADR-031.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -1022,19 +1105,30 @@ only — and pulls in a snippet from each, subject to the same permission
 check: a referenced document this user can't see contributes no
 snippet. Those chunks, the graph snippets, and the *original* question
 are sent to an LLM, which writes an answer grounded only in that
-retrieved text.
+retrieved text. The REST response returns that answer alongside the
+chunks that actually informed it (each with its source document's
+filename) and a confidence number pulled straight from reranking's own
+best score — or `null` if reranking was unavailable for this request,
+rather than a `0.0` that would look like a real, low score.
 
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
 a human hitting `/query` or `/documents/upload` directly. The gate
 checks that secret first — wrong or missing, the request stops there
-with a 401, nothing else runs. Once past the gate, the request follows
-the exact same two journeys described above: `ask_knowledge_base` and
-`upload_document` are thin wrappers calling the same
-`RetrievalService` and `IngestionService`, so everything from that
-point on — the LangGraph retry loop, graph context, the audit log
-entry — behaves identically regardless of which door the request came
-through.
+with a 401, nothing else runs. Once past the gate, the request runs the
+exact same underlying pipeline described above: `ask_knowledge_base`
+and `upload_document` are thin wrappers calling the same
+`RetrievalService` and `IngestionService`, so the LangGraph retry loop,
+graph context, and the audit log entry all behave identically
+regardless of which door the request came through. What differs is the
+*shape* of what comes back: `ask_knowledge_base` calls
+`answer_question()`, which only ever returns the plain answer string —
+an MCP tool result is meant to be read by another AI, not rendered as a
+UI with source cards and a confidence badge, so it was never extended
+to return `sources`/`confidence` the way `/query`'s REST response now
+does. Both call sites reuse the exact same `RetrievalService`; they
+just ask it for different amounts of what one pipeline run already
+produced.
 
 ## What could go wrong and how we handle it
 
@@ -1121,6 +1215,28 @@ message gets redelivered; this is the concrete, named reason a real
 queue would eventually be needed, alongside the connection-pool
 exhaustion trigger ADR-001 already named. Not built here — acceptable
 at today's traffic, a real gap once this runs unattended. See ADR-030.
+
+**Every question pays the full pipeline's cost, even an obvious
+follow-up** — without conversation history and context-condensing
+(item 18), "what about the other one" gets embedded and searched
+exactly like a completely unrelated question, since the system has no
+memory of what was asked before it. There's no cheaper path for a
+short, dependent follow-up — every question, regardless of how it
+relates to the last one, pays for a fresh embedding call, a full hybrid
+search, and a full reranking pass. Not a bug, a named scope limit — the
+condensing step that would fix this is a real feature with its own
+schema and caching design, not a small addition to the query endpoint.
+See ADR-031.
+
+**A slow answer shows nothing until the whole thing resolves** —
+without real token streaming (item 19), the Query page's only feedback
+during a slow generation call (a large retrieved context, a circuit
+breaker's cooldown-then-retry cycle) is a loading skeleton with no
+further detail — no partial text, no indication of which pipeline step
+is currently running, unlike the upload flow's own `processing_stage`
+polling. Acceptable at today's response times; a real, felt limitation
+once documents and questions get large enough that a full generation
+call takes several seconds. See ADR-031.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
