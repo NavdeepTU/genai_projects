@@ -73,6 +73,32 @@ export async function postQuery(question: string): Promise<QueryResponse> {
   return data;
 }
 
+export type RecentQuery = {
+  question: string;
+  asked_at: string;
+};
+
+export type DashboardResponse = {
+  document_count: number;
+  recent_queries: RecentQuery[];
+  correlation_id: string;
+};
+
+export async function getDashboard(): Promise<DashboardResponse> {
+  const response = await fetch(`${BACKEND_URL}/dashboard`, {
+    headers: {
+      "X-User-Id": CURRENT_USER_ID,
+      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to load dashboard (status ${response.status})`);
+  }
+
+  return response.json();
+}
+
 export async function getDocuments(): Promise<DocumentListItem[]> {
   const response = await fetch(`${BACKEND_URL}/documents`, {
     headers: {

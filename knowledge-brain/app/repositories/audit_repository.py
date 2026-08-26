@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,10 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class AuditRepository:
-    """Writes to the append-only audit log.
+    """Writes to, and reads from, the append-only audit log.
 
-    Deliberately has no update or delete methods — the only thing you can
-    do to the audit log is add to it.
+    Deliberately has no update or delete methods — the only things you
+    can do to the audit log are add to it and read from it.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -45,3 +46,24 @@ class AuditRepository:
         except SQLAlchemyError:
             logger.exception("Failed to write audit log entry for action %s", action)
             raise
+
+    async def get_recent_queries_for_user(self, user_id: str, limit: int = 5) -> list[AuditLog]:
+        """Return this user's most recent query_made entries, newest first.
+
+        Scoped to user_id in the query itself, not filtered afterward —
+        the audit log holds every user's activity, and there's no reason
+        one person's dashboard should ever pull rows belonging to
+        someone else's questions across the network to filter client-side.
+        """
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.action == "query_made", AuditLog.user_id == user_id)
+            .order_by(AuditLog.timestamp.desc())
+            .limit(limit)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to fetch recent queries for user %s", user_id)
+            raise
+        return list(result.scalars().all())

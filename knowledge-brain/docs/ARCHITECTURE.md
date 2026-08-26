@@ -197,7 +197,36 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the Query page (build-order item
+**What's new since the last update:** the Dashboard page (build-order
+item 13's third page) now exists at the app's root, `/` — replacing an
+unmodified `create-next-app` boilerplate that had sat there since the
+very first frontend session, since the navbar's "Dashboard" link has
+always pointed at `/`, not a nested route (caught live, after first
+building it at the wrong path). It's a real digest, not a new data
+source: total documents comes from a new `count_documents_for_user`
+(a `COUNT(*)`, not a fetch-and-`len()`), and recent queries comes from
+the audit log's `query_made` entries, already written by every `/query`
+call — the audit repository's first read method, which doesn't touch
+its append-only guarantee at all, since that guarantee was always
+specifically "no `UPDATE`/`DELETE`." Two of the spec's four widgets —
+retrieval accuracy trend and cost per query — got an honest "not
+tracked yet" state instead of a number, the same move already made
+twice for the Query page: accuracy has no ground-truth signal for a
+real question (only the offline eval harness has that), and cost needs
+token-level instrumentation across every LLM call site, squarely
+build-order item 15's territory. See ADR-032.
+
+While preparing this session's tests, a real scaffolding violation from
+the *previous* session was found and fixed: `/query`'s sources/
+confidence-building logic was sitting directly in the route handler,
+not a service, breaking this project's own "routes stay thin" rule.
+Extracted into `RetrievalService.build_sources_and_confidence`, which
+also made it independently testable — this project has never used an
+HTTP test client, so business logic living inside a route handler was
+effectively untestable at all. Verified live that extracting it changed
+nothing about `/query`'s actual response. See ADR-032.
+
+**What's new before that:** the Query page (build-order item
 13's second page) now exists — a real chat interface at `/query`, a
 Client Component with a scrolling transcript, an input box pinned at
 the bottom, and per-turn loading and error states. It calls the exact
@@ -481,6 +510,21 @@ disappeared, the same question could still be asked through `curl` or
 MCP's `ask_knowledge_base`, just not through the UI, and without the
 per-source citations the REST response now carries.
 
+**Dashboard page (`frontend/app/page.tsx`) and its endpoint
+(`app/api/dashboard.py`)** — the first thing anyone sees, added with
+ADR-032, at the app's root rather than a nested route since that's
+where the navbar's "Dashboard" link has always pointed. A Server
+Component, same pattern as the Document Library page: fetches once,
+server-side, `dynamic = "force-dynamic"` from the start. Four tiles —
+total documents (a real `COUNT(*)`), recent queries (a real list from
+the audit log's own `query_made` entries), and two deliberately honest
+"not tracked yet" placeholders for retrieval accuracy and cost per
+query, neither of which this system has ever measured for a real
+question. Talks to: `GET /dashboard` on the backend, from the Next.js
+server. If it disappeared, every number on it would still be
+individually reachable — the document list, the query history in the
+audit log — just not summarized in one place.
+
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
 job is stamping a shared secret onto every request it forwards, so the
@@ -665,8 +709,14 @@ reranker's relevance score, the answer) — what `/query`'s REST route
 thin wrapper around it that unpacks just the answer string — what MCP's
 `ask_knowledge_base` needs, since an MCP tool result is read by another
 AI, not rendered with source cards. Neither path duplicates pipeline
-logic; they just ask for different amounts of the same run's output.
-Talks to: embedding, the repository, hybrid search, reranking, query
+logic; they just ask for different amounts of the same run's output. A
+third method, `build_sources_and_confidence` (added with ADR-032),
+turns a finished `QueryState` into what `/query`'s REST response
+actually shows — deduped per-document filename lookups and the
+`confidence = None`-when-unavailable rule — moved here from the route
+handler it originally shipped in, both to respect this project's own
+"routes stay thin" rule and to make it directly unit-testable without
+a running HTTP server. Talks to: embedding, the repository, hybrid search, reranking, query
 rewriting, the graph repository, and generation.
 
 **Query graph (`app/services/query_graph.py`)** — defines the shape of
@@ -1042,6 +1092,21 @@ distinction `_rerank_safely` already drew internally for its own
 computed at all" must never look the same to whoever reads the number.
 See ADR-031.
 
+The Dashboard's two data-less widgets — retrieval accuracy trend and
+cost per query — got the same honest-placeholder treatment as the
+Query page's streaming and history gaps, for the same reason: neither
+has real data behind it yet, and a fabricated or approximate number
+would look authoritative while being wrong. A live-confidence-as-proxy
+option for the accuracy widget was considered and rejected specifically
+because confidence and accuracy are different claims — a reranker's
+relevance judgment carries no ground truth, and can be high on a wrong
+answer or low on a right one; labeling it "accuracy" would overstate
+what it actually measures. Document counting uses a dedicated
+`COUNT(*)` query rather than reusing the existing list-and-`len()`
+pattern, since the dashboard never needs the actual rows, only the
+number — a real, if currently small, difference in how much data
+crosses the network for no reason. See ADR-032.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -1237,6 +1302,16 @@ is currently running, unlike the upload flow's own `processing_stage`
 polling. Acceptable at today's response times; a real, felt limitation
 once documents and questions get large enough that a full generation
 call takes several seconds. See ADR-031.
+
+**Neither retrieval quality nor spend has any visibility beyond a
+human manually checking** — the Dashboard's two honest placeholders
+mean, concretely, that there is still no way to know whether answer
+quality has quietly regressed for real users, or how much a given
+month's usage actually cost, without running the evaluation harness by
+hand or reading an OpenAI/Voyage billing dashboard directly. Not a new
+gap this page introduced — both were already true before this page
+existed — but now visibly named on the page a user would actually look
+at first, rather than left implicit. See ADR-032.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection

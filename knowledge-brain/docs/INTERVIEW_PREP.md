@@ -2030,6 +2030,97 @@ later.
 
 ---
 
+## Feature 19: The Dashboard Page — Real Digest, Honest Placeholders
+
+**What does this feature do, in one sentence?**
+A summary page at the app's root showing two real, existing numbers
+(total documents, recent queries — both pulled from data already
+stored, nothing new computed) and two deliberately honest "not tracked
+yet" states for retrieval accuracy and cost per query, which this
+system has never measured for a real question.
+
+```mermaid
+flowchart LR
+    UI["app/page.tsx<br/>Server Component"] -->|"GET /dashboard"| API["app/api/dashboard.py"]
+    API --> COUNT["count_documents_for_user()<br/>(COUNT, not fetch-and-len)"]
+    API --> RECENT["get_recent_queries_for_user()<br/>(audit log's first read method)"]
+    COUNT --> RESP["DashboardResponse"]
+    RECENT --> RESP
+    RESP --> UI
+```
+
+**Why not just persist the live confidence score `/query` already
+returns and plot it as the accuracy trend? It's real data, sitting
+right there.**
+Because confidence and accuracy are different claims. Confidence is
+the reranker's own relevance judgment between a question and the
+chunks it found — a real number, but one with no ground truth behind
+it. It can be high on an answer that's actually wrong, or low on one
+that happens to be right; it measures "how sure the reranker is,"
+not "was this correct." Labeling that trend "accuracy" would make a
+number look more authoritative than what it actually proves. Real
+accuracy needs the evaluation harness's ground-truth-checked results,
+captured over time — a real feature (wiring the harness to run and
+store results regularly), not something to fake with a proxy metric
+that happens to already exist.
+
+**Why does `count_documents_for_user` run its own `COUNT(*)` query
+instead of reusing `list_documents_for_user` and taking `len()` of
+what comes back?**
+Because the dashboard never needs the actual document rows — filename,
+status, upload date, all of it — only the number. Fetching every row
+just to discard its data and keep a count means transferring an entire
+table's worth of data across the network for no reason. Small and
+harmless today at a handful of documents; a real, avoidable cost once
+a user has thousands.
+
+**While writing this feature's tests, a scaffolding problem from the
+*previous* session's feature was found. What was it, and why did
+writing tests specifically surface it?**
+`/query`'s logic for building `sources` and `confidence` from a
+finished `QueryState` — deduped filename lookups, the
+`confidence = None`-when-unavailable rule — was sitting directly
+inside the route handler in `app/api/query.py`, not in a service. This
+project's own scaffolding rule says routes stay thin; business logic
+lives in services. It surfaced specifically while writing tests
+because this project has never used an HTTP test client — every
+existing test calls a service or repository method directly, against a
+real test database. Logic living inside a route handler had no way to
+be exercised by a test without introducing a whole new testing pattern
+just for one feature. The fix — moving it into
+`RetrievalService.build_sources_and_confidence` — solved both problems
+at once: it's back where the project's own convention says it belongs,
+and now it's a method that can be called and asserted on directly,
+the same way every other service method already is.
+
+**How did you verify the extraction didn't change `/query`'s actual
+behavior?**
+Ran the exact same live question against the backend before and after
+moving the code, and diffed the response shape by hand — same answer
+length, same five sources, same confidence score
+(`0.77734375`, unchanged to the same number of decimal places). The
+new unit tests cover the logic's *correctness* going forward; that
+live before/after comparison covered whether *this specific refactor*
+changed anything, which a test written after the fact can't retroactively
+confirm on its own.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The real answer isn't really about this page — it's about what it's
+honestly reporting doesn't exist yet. At real scale, "no accuracy
+tracking" and "no cost tracking" stop being acceptable gaps and become
+operational blind spots: a bad model swap or a prompt regression could
+degrade every answer with nothing catching it, and a runaway cost
+spike would only surface on a billing statement, well after the fact.
+Both are already named, scoped, future features (the eval harness
+running on a schedule; token/cost instrumentation, item 15) — this
+page just made the absence of both visible in the one place a user
+would actually look first, rather than leaving it implicit.
+
+*Further reading: [Google's SRE book, "Monitoring Distributed Systems"](https://sre.google/sre-book/monitoring-distributed-systems/) — its core argument, that a monitoring signal should measure a real, well-defined thing or not exist at all, is exactly the reasoning behind choosing an honest placeholder over a proxy metric that would look like accuracy without actually being it.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

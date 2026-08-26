@@ -107,8 +107,12 @@ and why it was made that way.
   [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
 - **Frontend** *(in progress — see below)* — a separate Next.js
   project (`frontend/`, Tailwind, Shadcn/UI on Base UI) with a shared
-  shell (navigation, dark mode, a responsive mobile menu) and two of
-  five planned pages. The Document Library — backed by a new,
+  shell (navigation, dark mode, a responsive mobile menu) and three of
+  five planned pages. The Dashboard, at the app's root, is a real
+  digest — total documents and recent queries are pulled from data
+  that already exists, with two data-less widgets (retrieval accuracy,
+  cost per query) showing an honest "not tracked yet" state instead of
+  a fabricated number. The Document Library — backed by a new,
   permission-filtered `GET /documents` endpoint — fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
@@ -124,21 +128,23 @@ and why it was made that way.
   client-side JavaScript. See
   [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
   [`ADR-029`](docs/adr/ADR-029-document-library-page.md),
-  [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md), and
-  [`ADR-031`](docs/adr/ADR-031-query-page.md).
+  [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md),
+  [`ADR-031`](docs/adr/ADR-031-query-page.md), and
+  [`ADR-032`](docs/adr/ADR-032-dashboard-page.md).
 
-**Not built yet:** three more planned frontend pages (Dashboard,
-Analytics, Admin), and full auth/multi-tenancy (today's identity is a
-self-asserted header, not real authentication). See `CLAUDE.md`'s build
-order for the full plan.
+**Not built yet:** two more planned frontend pages (Analytics, Admin),
+and full auth/multi-tenancy (today's identity is a self-asserted
+header, not real authentication). See `CLAUDE.md`'s build order for
+the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
-  chunking, extraction, and PII detection's "flag and stop" branch —
-  it does not yet cover hybrid search, the circuit breaker, the audit
-  log, LangGraph's retry logic, the Neo4j graph feature, MCP, PII
-  detection's own splitting/batching logic, or any part of access
-  control.
+  chunking, extraction, PII detection's "flag and stop" branch, the
+  dashboard's two new repository methods, and the query pipeline's
+  source/confidence-building logic — it does not yet cover hybrid
+  search, the circuit breaker, the audit log's write path, LangGraph's
+  retry logic, the Neo4j graph feature, MCP, PII detection's own
+  splitting/batching logic, or any part of access control.
 - The audit log's "nobody can edit or delete an entry" guarantee is
   enforced at the code level only — the local database connection is a
   superuser and could bypass a real database-level restriction. See
@@ -205,7 +211,7 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
 - **Next.js + Tailwind + Shadcn/UI (on Base UI)** — the frontend
-  (`frontend/`), in progress: a shared shell and two of five planned
+  (`frontend/`), in progress: a shared shell and three of five planned
   pages so far (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
 
 The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in

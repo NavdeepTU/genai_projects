@@ -7,6 +7,7 @@ from app.core.circuit_breaker import CircuitOpenError
 from app.core.config import get_settings
 from app.core.middleware import get_correlation_id
 from app.models.document import Chunk
+from app.models.query import QuerySource
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
 from app.services.embedding import embed_chunks
@@ -66,6 +67,32 @@ class RetrievalService:
             "answer": "",
         }
         return await self._graph.ainvoke(initial_state)
+
+    async def build_sources_and_confidence(
+        self, state: QueryState
+    ) -> tuple[list[QuerySource], float | None]:
+        """Turn a finished QueryState into what the REST response actually shows.
+
+        Lives here, not in the route, so it's testable without a running
+        HTTP server — the route should stay a thin translation from
+        QueryState to QueryResponse, not the place this logic runs.
+        """
+        filenames: dict[uuid.UUID, str] = {}
+        sources: list[QuerySource] = []
+        for chunk in state["reranked_chunks"]:
+            if chunk.document_id not in filenames:
+                document = await self.repository.get_by_id(chunk.document_id)
+                filenames[chunk.document_id] = document.filename if document else "Unknown document"
+            sources.append(
+                QuerySource(
+                    document_id=chunk.document_id,
+                    filename=filenames[chunk.document_id],
+                    chunk_text=chunk.text,
+                )
+            )
+
+        confidence = None if state["reranker_unavailable"] else state["top_relevance_score"]
+        return sources, confidence
 
     async def _retrieve_node(self, state: QueryState) -> dict:
         """Graph node: hybrid search for the current question, merged with RRF."""

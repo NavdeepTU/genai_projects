@@ -2643,3 +2643,110 @@ migration tool, guardrails (item 16), multi-agent federated retrieval
 (item 17), conversation history (item 18), streamed generation (item
 19), and the still-growing test suite gap. At 3–4 hours/day, that's
 roughly 15–19 working days left, assuming no further scope changes.
+
+## Session: 2026-08-26 — Dashboard page, plus a scaffolding fix and real test coverage (Feature 16 continued)
+
+### What we built
+- The Dashboard page — the third of five planned frontend pages, and,
+  for the first time, mostly a real digest rather than a new feature:
+  total documents comes from a new `count_documents_for_user` (a real
+  `COUNT(*)`, not a fetch-every-row-and-`len()`), and recent queries
+  comes from the audit log's existing `query_made` entries — the audit
+  repository's first read method, which doesn't touch its append-only
+  guarantee at all, since that guarantee was always specifically about
+  `UPDATE`/`DELETE`, never `SELECT`.
+- Two of the spec's four widgets — retrieval accuracy trend and cost
+  per query — got an honest "not tracked yet" state instead of a
+  number, resolved as a deliberate fork before writing any code, same
+  move already made twice for the Query page. Considered and rejected
+  persisting the live confidence score as an accuracy proxy: confidence
+  and accuracy are different claims, and a reranker's relevance
+  judgment carries no ground truth at all.
+- A real bug, caught only by checking the running app, not by writing
+  the code carefully: the new page was built at
+  `frontend/app/dashboard/page.tsx`, but the navbar's "Dashboard" link
+  has always pointed at `/`, a convention set the very first frontend
+  session and never checked before deciding today's file path. Fixed
+  by moving `page.tsx`/`loading.tsx`/`error.tsx` to the app root,
+  overwriting the unmodified `create-next-app` boilerplate that had
+  sat there the whole time, and removing the now-empty
+  `app/dashboard/` directory.
+- Before writing this session's tests, went back and fixed a real
+  scaffolding violation from the *previous* session: `/query`'s
+  sources/confidence-building logic was sitting directly in the route
+  handler in `app/api/query.py`, not a service — this project's own
+  rule is routes stay thin, logic lives in services. Extracted into
+  `RetrievalService.build_sources_and_confidence`, which also made it
+  independently testable — this project has never used an HTTP test
+  client, so logic embedded in a route handler had no way to be
+  exercised by a test at all before this. Verified live, before and
+  after, that the extraction changed nothing about `/query`'s actual
+  response (same answer, same 5 sources, same confidence score to the
+  same decimal places).
+- New tests: `tests/test_dashboard.py` (permission-scoping and
+  ordering for both new repository methods) and
+  `tests/test_retrieval_service.py` (the newly-extracted
+  `build_sources_and_confidence` — filename dedup, `confidence = None`
+  specifically when the reranker was unavailable even with a
+  real-looking score present, and a missing-document fallback). Test
+  suite: 12 → 19 passing, the first growth since PII detection,
+  several sessions ago.
+- One new ADR: [`ADR-032`](adr/ADR-032-dashboard-page.md) (the two
+  honest-placeholder decisions, the `COUNT(*)` choice, and the
+  scaffolding fix).
+
+### What I struggled with
+- No corrections needed on the interview-prep questions this session —
+  correctly explained why confidence isn't a valid accuracy proxy, why
+  `COUNT(*)` beats fetch-and-`len()`, and walked through exactly why
+  writing tests specifically was what surfaced the scaffolding
+  violation from last session (no HTTP test client exists in this
+  project, so route-embedded logic was structurally untestable).
+- A short but useful tangent: asked directly whether to keep using
+  Sonnet 5 or switch to Opus 5 for this project. Answered as an
+  exploratory question, not a task — recommended staying on Sonnet 5
+  given no sign of a reasoning ceiling on this project's actual
+  complexity so far, switching only if a specific wall gets hit later,
+  not preemptively.
+- The routing mistake (building at `/dashboard` instead of `/`) is a
+  good concrete instance of a pattern worth watching for going
+  forward: check an existing convention (here, the navbar's own href
+  list) before deciding a new file's path, rather than assuming a
+  page's route from its own name.
+
+### Concepts to revisit
+- The test suite's known gaps list shrinks by two items this session
+  (dashboard, query sources/confidence) but is still real: hybrid
+  search, circuit breakers, the audit log's write path itself, MCP,
+  PII detection's splitting/batching logic, and access control all
+  still have zero coverage.
+- Whether any other route handler in this codebase quietly holds real
+  business logic the way `/query` did — worth a deliberate pass rather
+  than waiting to find the next one by accident while writing tests
+  again.
+
+### What's next
+- Two more planned frontend pages remain unbuilt: Analytics, Admin.
+- Real accuracy tracking (wiring the eval harness to run and store
+  results over time) and real cost tracking (item 15, token/cost
+  instrumentation) are now named in two ADRs (ADR-031, ADR-032) as
+  the concrete unlock for three separate honest placeholders across
+  two pages — a strong candidate for a dedicated future session once
+  the remaining two frontend pages are done.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real per-caller rate limiting/network isolation for APIM, real
+  auth/multi-tenancy (item 14), the missing migration tool, and the
+  rest of the build order beyond the frontend.
+
+**Estimated completion: ~59% of the total project, by weighted
+effort** — up from ~58%. A third frontend page is real and verified,
+the test suite grew for the first time in several sessions, and a
+real architectural inconsistency (business logic in a route handler)
+got caught and fixed rather than accumulating further. Rough remaining
+effort: ~56 hours across the rest of the frontend (two more pages),
+real auth/multi-tenancy (item 14), APIM's remaining gaps, the missing
+migration tool, guardrails (item 16), multi-agent federated retrieval
+(item 17), conversation history (item 18), streamed generation (item
+19), and the still-real test coverage gaps named above. At 3–4
+hours/day, that's roughly 14–19 working days left, assuming no further
+scope changes.

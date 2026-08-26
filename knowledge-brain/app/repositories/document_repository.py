@@ -226,6 +226,27 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
+    async def count_documents_for_user(self, user_id: str) -> int:
+        """Return how many documents this user has access to, without fetching the rows.
+
+        Same permission join as list_documents_for_user, but a COUNT
+        instead of a SELECT — the dashboard only needs the number, and
+        fetching every row just to call len() on it wastes a full,
+        unnecessary transfer of every document's data.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Document)
+            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
+            .where(DocumentPermission.user_id == user_id)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to count documents for user %s", user_id)
+            raise
+        return result.scalar_one()
+
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         """Return a document by id with no permission check — internal use only.
 
