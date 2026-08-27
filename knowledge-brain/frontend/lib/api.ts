@@ -99,6 +99,38 @@ export async function getDashboard(): Promise<DashboardResponse> {
   return response.json();
 }
 
+export type QueryVolumePoint = {
+  date: string;
+  count: number;
+};
+
+export type TopQuestion = {
+  question: string;
+  count: number;
+};
+
+export type AnalyticsResponse = {
+  query_volume: QueryVolumePoint[];
+  top_questions: TopQuestion[];
+  avg_response_time_ms: number | null;
+  correlation_id: string;
+};
+
+export async function getAnalytics(): Promise<AnalyticsResponse> {
+  const response = await fetch(`${BACKEND_URL}/analytics`, {
+    headers: {
+      "X-User-Id": CURRENT_USER_ID,
+      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to load analytics (status ${response.status})`);
+  }
+
+  return response.json();
+}
+
 export async function getDocuments(): Promise<DocumentListItem[]> {
   const response = await fetch(`${BACKEND_URL}/documents`, {
     headers: {

@@ -33,27 +33,25 @@ mcp = MCPServer(name="knowledge-brain")
     )
 )
 async def ask_knowledge_base(question: str) -> str:
-    """Wrap RetrievalService.answer_question() as a tool an MCP client can call directly."""
+    """Wrap RetrievalService.run_query() as a tool an MCP client can call directly."""
     user_id = get_current_user_id()
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
         try:
-            answer = await service.answer_question(question, user_id)
+            state = await service.run_query(question, user_id)
         except (CircuitOpenError, RetrievalUnavailableError):
             return "The knowledge base is temporarily unavailable. Please try again in a moment."
 
         correlation_id = get_correlation_id()
-        await AuditRepository(db).log_action(
+        await AuditRepository(db).log_query_made(
             correlation_id=correlation_id,
-            action="query_made",
-            resource_type="query",
-            resource_id=correlation_id,
-            extra_data={"question": question},
             user_id=user_id,
+            question=question,
+            duration_ms=state["duration_ms"],
         )
 
-        return answer
+        return state["answer"]
 
 
 @mcp.tool(

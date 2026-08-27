@@ -2121,6 +2121,112 @@ would actually look first, rather than leaving it implicit.
 
 ---
 
+## Feature 20: The Analytics Page — Real Timing, and a Chart Bug Caught by Review
+
+**What does this feature do, in one sentence?**
+A trends view over the last 30 days — real query volume, real top
+questions, and a genuinely new metric (average response time, since
+nothing in this system timed a query before this feature) — built as
+hand-rolled SVG with no new charting dependency, plus one more honest
+placeholder for retrieval accuracy, the same gap named twice already.
+
+```mermaid
+flowchart LR
+    QUERY["/query or MCP ask_knowledge_base"] --> RUN["RetrievalService.run_query()<br/>times the whole graph invocation"]
+    RUN --> LOG["AuditRepository.log_query_made()<br/>question + duration_ms"]
+    LOG --> AUDIT[(audit_log)]
+    UI["analytics/page.tsx"] -->|"GET /analytics"| API["app/api/analytics.py"]
+    API --> SVC["AnalyticsService"]
+    SVC -->|"get_query_entries_for_user()"| AUDIT
+    SVC --> ZEROFILL["zero-fill every day<br/>in the 30-day window"]
+    ZEROFILL --> UI
+```
+
+**Average response time needed timing added somewhere. Why does it
+live in `RetrievalService.run_query`, not in `/query`'s route where the
+audit log entry actually gets written?**
+Because `/query`'s route isn't the only caller. MCP's
+`ask_knowledge_base` writes to the exact same `query_made` audit log —
+if timing only happened in the REST route, the average would silently
+only reflect REST traffic, misrepresenting actual usage the moment
+anyone used the knowledge base through MCP instead. Timing the whole
+graph invocation once, inside `run_query`, means every caller — REST,
+MCP, even the evaluation harness if it ever wanted this — gets it for
+free, with nothing to duplicate or forget.
+
+**That decision had a real consequence for existing code. What broke,
+and why was deleting it the right call instead of keeping it around?**
+MCP's `ask_knowledge_base` used to call a different method,
+`answer_question` — a thin wrapper that only unpacked the answer
+string, with no way to also see `duration_ms`. Making MCP time its
+queries meant switching it to `run_query`, the same method `/query`
+and the evaluation harness already used. Once that switch happened,
+`answer_question` had zero remaining callers — checked directly by
+searching the codebase, not assumed. Deleting it outright, rather than
+leaving it as an unused method "in case something needs it later," is
+the same standard this project holds itself to elsewhere: dead code
+that nothing calls is a bug waiting to look like a real API surface to
+the next person reading the file.
+
+**A `/code-review` pass found a real bug in the volume chart after this
+feature's first version shipped. What was actually wrong, and why
+didn't the tests already written that session catch it?**
+The chart placed points at evenly-spaced x-positions using their array
+index, on the assumption that index N always meant "day N of the
+window." That assumption broke because `AnalyticsService` originally
+only emitted a point for days that actually had a query — a user who
+queried on day 1 and again on day 28 would get exactly two points, at
+indices 0 and 1, rendering a 27-day gap as if it were two consecutive
+days of activity. The tests written alongside the original feature
+checked that grouping and counting were arithmetically correct (two
+queries on one day count as one point with count 2) — they never
+checked that the *number of points* matched the *number of days in the
+window*, because nobody had yet realized those needed to be the same
+thing for the chart's spacing logic to be honest. That's exactly the
+kind of assumption a fresh reviewer, not the person who just wrote the
+code, is positioned to catch.
+
+**Why fix that in `AnalyticsService`, in Python, rather than in the
+chart component itself?**
+The chart component's job is to draw what it's given — it shouldn't
+also need to know how to reconstruct missing calendar days from a
+sparse list. Zero-filling belongs wherever the data's *contract* is
+defined: `AnalyticsService` is what decides what a `QueryVolumePoint`
+list means, so it's the right place to guarantee "index N is always
+day N of the window," full stop, rather than pushing that
+responsibility onto every consumer of the data to handle sparseness
+correctly on its own.
+
+**Same review pass flagged the `query_made` audit write as duplicated
+between `/query` and MCP. Was that actually a real risk, or just
+stylistic duplication?**
+Real — it had already caused a small, real drift within this very
+session: `duration_ms` was added to `/query`'s hand-built `extra_data`
+dict first, and MCP's separate hand-built dict had to be caught and
+updated to match by hand. Two independent copies of the same shape
+will diverge the moment someone edits one without remembering the
+other exists. `AuditRepository.log_query_made` fixes that by removing
+the second copy entirely — there's only one place this write can be
+made, so there's nothing left to keep in sync.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The 5000-row safety cap on `get_query_entries_for_user` is the honest
+answer: it protects against unbounded memory growth today, but a user
+asking more than roughly 166 questions a day, every day, for a month
+would start silently losing the oldest entries in that window from
+both the chart and the top-questions list — no error, just a chart
+that looks like activity started partway through the month. At real
+scale that needs a proper rollup (pre-aggregated daily counts, not raw
+rows re-aggregated in Python on every page load) rather than a bigger
+constant. Worth remembering too: `duration_ms` times the *whole* graph
+invocation, including retry loops — a surprisingly high average could
+mean a slow reranker retry cycle just as easily as slow generation,
+and nothing yet breaks that number down by pipeline stage the way
+document uploads already do with `processing_stage`.
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

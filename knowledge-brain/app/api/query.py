@@ -39,13 +39,11 @@ async def query(
         ) from None
 
     correlation_id = get_correlation_id()
-    await AuditRepository(db).log_action(
+    await AuditRepository(db).log_query_made(
         correlation_id=correlation_id,
-        action="query_made",
-        resource_type="query",
-        resource_id=correlation_id,
-        extra_data={"question": request.question},
         user_id=user_id,
+        question=request.question,
+        duration_ms=state["duration_ms"],
     )
 
     sources, confidence = await service.build_sources_and_confidence(state)

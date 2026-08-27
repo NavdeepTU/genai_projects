@@ -197,7 +197,42 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the Dashboard page (build-order
+**What's new since the last update:** the Analytics page (build-order
+item 13's fourth page) now exists — real query volume over the last 30
+days, real top questions, and a real average response time, alongside
+one more honest "not tracked yet" placeholder for retrieval accuracy
+(the same gap named twice already). Average response time is genuinely
+new: nothing in this system timed a query before this session.
+`RetrievalService.run_query` now wraps the whole graph invocation in
+`time.monotonic()` and stores `duration_ms` on the returned state —
+captured once, at the service level, not duplicated per caller, since
+MCP's `ask_knowledge_base` writes to the exact same `query_made` audit
+log `/query` does, and a response-time average that only ever saw REST
+traffic wouldn't be honest. That forced MCP off the now-deleted
+`answer_question` (a thin wrapper with no remaining callers) onto
+`run_query`, the same method `/query` and the evaluation harness
+already used. A new `AnalyticsService` aggregates existing audit log
+data — grouping by day, counting exact question-text matches (a real,
+named limit: no semantic clustering), averaging `duration_ms` only
+across entries that have it. The volume chart is hand-rolled inline
+SVG, no new dependency, consistent with this project's pattern of
+building things itself rather than reaching for a charting library.
+
+A `/code-review` pass after the initial build caught a real correctness
+bug before it shipped: `AnalyticsService` only emitted a data point for
+days with an actual query, and the chart spaced points evenly by array
+index — a real week-long gap in usage would have rendered as if the
+surrounding days were consecutive, silently misrepresenting how sparse
+usage actually was. Fixed by zero-filling every day in the window, so
+"index N" and "day N of the window" are always the same thing. The
+same pass also found a genuine near-miss: the `query_made` audit
+write, with its new `duration_ms` field, was hand-duplicated between
+`/query`'s route and MCP's tool — exactly the kind of drift risk that
+already happened once in this very session (`duration_ms` was added to
+one call site before the other) — now consolidated into one
+`AuditRepository.log_query_made` method. See ADR-033.
+
+**What's new before that:** the Dashboard page (build-order
 item 13's third page) now exists at the app's root, `/` — replacing an
 unmodified `create-next-app` boilerplate that had sat there since the
 very first frontend session, since the navbar's "Dashboard" link has
@@ -525,6 +560,27 @@ server. If it disappeared, every number on it would still be
 individually reachable — the document list, the query history in the
 audit log — just not summarized in one place.
 
+**Analytics page (`frontend/app/analytics/page.tsx`), `AnalyticsService`
+(`app/services/analytics_service.py`), and its endpoint
+(`app/api/analytics.py`)** — added with ADR-033, a trends view over the
+same audit log data the Dashboard already reads, aggregated across the
+last 30 days instead of just the most recent few. `AnalyticsService`
+groups entries by day (zero-filled for every day in the window, not
+just days with a query — a real correctness bug found by `/code-review`
+and fixed before it shipped, since a chart spacing points by array
+index needs every index to mean the same calendar day, always), counts
+exact question-text matches (no semantic clustering — a named limit,
+not an oversight), and averages `duration_ms` only across entries new
+enough to have it. The volume chart (`components/query-volume-chart.tsx`)
+is hand-rolled inline SVG, no charting library. Average response time
+is the one genuinely new metric in this system — nothing timed a query
+before this ADR; `RetrievalService.run_query` now does, once, for every
+caller. Retrieval accuracy trend gets the same honest placeholder as
+the Dashboard, for the same reason. Talks to: `GET /analytics` on the
+backend, from the Next.js server. If it disappeared, the underlying
+audit log data would still exist and still be queryable directly —
+only the aggregated trend view would be gone.
+
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
 job is stamping a shared secret onto every request it forwards, so the
@@ -701,16 +757,17 @@ logic lives in six methods on this class (`_retrieve_node`,
 `_generate_node`), each a graph node, all reusing the exact same
 search/rerank/graph-lookup helpers hardened in ADR-012, ADR-013, and
 ADR-015 — nothing about the existing partial-failure or
-reranker-fallback behavior changed to add graph context on top. Two
-public entry points sit on top of the same graph invocation: `run_query`
-returns the full final `QueryState` (chunks actually used, the
-reranker's relevance score, the answer) — what `/query`'s REST route
-(ADR-031) and the evaluation harness both need; `answer_question` is a
-thin wrapper around it that unpacks just the answer string — what MCP's
-`ask_knowledge_base` needs, since an MCP tool result is read by another
-AI, not rendered with source cards. Neither path duplicates pipeline
-logic; they just ask for different amounts of the same run's output. A
-third method, `build_sources_and_confidence` (added with ADR-032),
+reranker-fallback behavior changed to add graph context on top.
+`run_query` is now the *one* entry point every caller uses — the REST
+route, MCP's `ask_knowledge_base`, and the evaluation harness — since
+timing (`duration_ms`, wrapped around the whole graph invocation with
+`time.monotonic()`, ADR-033) needs to be computed once for every
+caller to get an honest response-time average, not duplicated per
+caller. `answer_question`, the old thin wrapper MCP used to call
+instead, was deleted with ADR-033 once that switch left it with no
+remaining callers — a real, verified deletion, not a stub kept around
+"just in case." A second method, `build_sources_and_confidence` (added
+with ADR-032),
 turns a finished `QueryState` into what `/query`'s REST response
 actually shows — deduped per-document filename lookups and the
 `confidence = None`-when-unavailable rule — moved here from the route
@@ -784,10 +841,16 @@ anything else runs.
 
 **Audit log (`app/models/audit_log.py`, `app/repositories/audit_repository.py`)**
 — an append-only record of every user-initiated, state-changing action
-(a document was uploaded, a question was asked). The repository
-deliberately exposes only an insert method — nothing in the codebase can
-update or delete an entry. Talks to: called directly from the API routes,
-right after each action succeeds.
+(a document was uploaded, a question was asked). The repository has no
+update or delete methods — that guarantee has never been about reads,
+only about `UPDATE`/`DELETE` — and now has several: the generic
+`log_action` write, `log_query_made` (a named wrapper around it, the
+one place both `/query` and MCP's tool write a query event from,
+ADR-033), and two reads powering the Dashboard and Analytics pages,
+`get_recent_queries_for_user` and `get_query_entries_for_user`
+(ADR-032, ADR-033). Talks to: called directly from the API routes,
+right after each action succeeds, and read from the Dashboard/Analytics
+routes' services.
 
 **Circuit breaker (`app/core/circuit_breaker.py`)** — wraps both OpenAI
 call sites (embedding and generation) and stops calling OpenAI for a
@@ -1107,6 +1170,24 @@ pattern, since the dashboard never needs the actual rows, only the
 number — a real, if currently small, difference in how much data
 crosses the network for no reason. See ADR-032.
 
+Average response time is timed once, in `RetrievalService.run_query`,
+not separately in `/query`'s route and MCP's tool — a response-time
+average that only ever saw REST traffic would misrepresent actual
+usage, since MCP's `ask_knowledge_base` writes to the exact same
+`query_made` audit log. That forced MCP off `answer_question` (now
+deleted, no callers left) onto `run_query`. The query-volume chart is
+zero-filled for every day in its 30-day window, not just days with
+activity — found as a real bug by `/code-review` after the initial
+build, since spacing chart points evenly by array index only works if
+every index corresponds to the same calendar day regardless of whether
+that day had any queries; a sparse list of only-active days silently
+compressed real gaps in usage into apparent consecutive activity. The
+`query_made` audit write was consolidated into one
+`AuditRepository.log_query_made` method after the same review pass
+found it hand-duplicated between REST and MCP — a duplication that had
+already caused a real, if minor, drift within this very session
+(`duration_ms` landed on one call site before the other). See ADR-033.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -1312,6 +1393,28 @@ hand or reading an OpenAI/Voyage billing dashboard directly. Not a new
 gap this page introduced — both were already true before this page
 existed — but now visibly named on the page a user would actually look
 at first, rather than left implicit. See ADR-032.
+
+**A very heavy user's oldest analytics entries silently drop out of the
+30-day window** — `get_query_entries_for_user` caps at 5000 rows as a
+safety valve against unbounded memory growth, not real pagination. A
+user asking more than roughly 166 questions a day, every day, for a
+month would start losing the oldest entries in that window from both
+the volume chart and the top-questions list, with no error or visible
+indication it happened — the chart would just look like activity
+started partway through the month. Not a concern at today's usage; a
+real gap once usage is anywhere near that, needing a proper rollup or
+DB-side aggregation rather than a larger constant. See ADR-033.
+
+**A slow query's timing includes retries, not just generation** — the
+`duration_ms` stored on every `query_made` audit entry wraps the
+*entire* graph invocation, including the rewrite-and-retry loop and
+graph-context lookups, not just the final LLM generation call. That's
+the right thing to average for genuine end-user wait time, but it
+means a surprisingly high average response time on the Analytics page
+could mean a slow reranker retry cycle just as easily as a slow
+generation call — the number alone doesn't say which, and nothing yet
+breaks down `duration_ms` by pipeline stage the way `processing_stage`
+does for document uploads. See ADR-033.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection

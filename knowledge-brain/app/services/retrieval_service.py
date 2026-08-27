@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -41,18 +42,13 @@ class RetrievalService:
         self.graph_repository = graph_repository
         self._graph = build_query_graph(self)
 
-    async def answer_question(self, question: str, user_id: str) -> str:
-        """Run one question through the query graph and return the final answer."""
-        state = await self.run_query(question, user_id)
-        return state["answer"]
-
     async def run_query(self, question: str, user_id: str) -> QueryState:
         """Run one question through the query graph and return the full final state.
 
-        Exposed separately from answer_question so callers that need more
-        than just the answer text — like the evaluation harness, which
-        needs to see which chunks were actually used, not only what the
-        LLM said — don't have to reimplement the graph invocation.
+        Exposed as the one entry point every caller uses — the REST route,
+        MCP's ask_knowledge_base, and the evaluation harness — so timing,
+        sources, and confidence are all computed once, in one place, not
+        duplicated per caller.
         """
         initial_state: QueryState = {
             "original_question": question,
@@ -65,8 +61,12 @@ class RetrievalService:
             "retry_count": 0,
             "graph_context": [],
             "answer": "",
+            "duration_ms": 0.0,
         }
-        return await self._graph.ainvoke(initial_state)
+        start = time.monotonic()
+        final_state = await self._graph.ainvoke(initial_state)
+        final_state["duration_ms"] = (time.monotonic() - start) * 1000
+        return final_state
 
     async def build_sources_and_confidence(
         self, state: QueryState

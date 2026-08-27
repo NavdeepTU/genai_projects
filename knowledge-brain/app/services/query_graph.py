@@ -29,6 +29,7 @@ class QueryState(TypedDict):
     retry_count: int
     graph_context: list[str]
     answer: str
+    duration_ms: float
 
 
 def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:

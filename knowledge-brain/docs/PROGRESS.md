@@ -2750,3 +2750,119 @@ migration tool, guardrails (item 16), multi-agent federated retrieval
 19), and the still-real test coverage gaps named above. At 3–4
 hours/day, that's roughly 14–19 working days left, assuming no further
 scope changes.
+
+## Session: 2026-08-27 — Analytics page, real timing, and a real /code-review catch (Feature 16 continued)
+
+### What we built
+- The Analytics page — the fourth of five planned frontend pages: real
+  query volume over the last 30 days (hand-rolled inline SVG bar
+  chart, no new dependency), real top questions (exact question-text
+  counting, a named limit — no semantic clustering), a genuinely new
+  metric (average response time — nothing in this system timed a
+  query before this session), and one more honest "not tracked yet"
+  placeholder for retrieval accuracy, the same gap named twice already.
+- Timing added once, at the service level: `RetrievalService.run_query`
+  now wraps the whole graph invocation in `time.monotonic()`, since
+  MCP's `ask_knowledge_base` writes to the exact same `query_made`
+  audit log `/query` does — a response-time average that only ever saw
+  REST traffic would misrepresent actual usage. That forced MCP off
+  `answer_question` (a thin wrapper with no remaining callers once the
+  switch happened) onto `run_query` — `answer_question` deleted
+  outright, checked first that nothing else still called it.
+- New `AnalyticsService`, `app/models/analytics.py`, and
+  `GET /analytics` — aggregates existing audit log data only, same
+  "no new source of truth" reasoning as the Dashboard.
+- Ran `/code-review` after the initial build — two failed attempts
+  first (one hit the session usage limit outright; a second got stuck
+  waiting on a sub-agent that never reported back and had to be
+  manually resumed with a direct nudge) before a clean run completed.
+  Found 7 real findings, most severe a genuine correctness bug: the
+  volume chart spaced points by array index while `AnalyticsService`
+  only emitted a point for days with an actual query — a real gap in
+  usage (no queries for a week) rendered as if the surrounding days
+  were consecutive, silently misrepresenting how sparse or bursty
+  usage actually was. Fixed by zero-filling every day in the window in
+  `AnalyticsService`, not the chart component — the data's contract,
+  not the rendering logic, is where "index N always means day N"
+  needed to be guaranteed.
+- All 7 findings fixed, not just the correctness bug: a missing
+  `correlation_id` on a new log line (couldn't just import
+  `get_correlation_id()` — `app.core.middleware` already imports
+  `AuditRepository`, a real circular import, not a stale contextvar
+  like ADR-030's case; fixed by passing `correlation_id` as a plain
+  parameter instead); the `query_made` audit write, hand-duplicated
+  between REST and MCP, consolidated into one
+  `AuditRepository.log_query_made` — this had already caused a real,
+  if minor, drift within the same session (`duration_ms` landed on one
+  call site before the other); a 5000-row safety cap added to the
+  previously-unbounded analytics query; and three frontend components
+  extracted for real, review-found reuse: `progress-bar.tsx` (upload
+  dropzone + Analytics), `list-card.tsx` (Dashboard + Analytics), and
+  a deduped empty-state message constant.
+- Test suite: 19 → 25 passing (5 new for `AnalyticsService`/repository
+  behavior at the initial build, 1 more replacing a test that had
+  asserted the pre-fix, buggy single-point-per-day chart shape).
+- Verified live throughout: `/analytics` returns 30 real, chronological,
+  zero-filled points; a real query's `duration_ms` (~9s, a full RAG
+  pipeline call) correctly shows up in the next analytics call's
+  average; all three fixed frontend components (Analytics, Dashboard,
+  Documents/upload) render correctly in the browser, confirmed in both
+  light and dark mode after the extraction.
+- One new ADR: [`ADR-033`](adr/ADR-033-analytics-page.md) (hand-rolled
+  charting, service-level timing, and the zero-fill/audit-consolidation
+  fixes from the review pass).
+
+### What I struggled with
+- No corrections needed on interview-prep questions this session —
+  correctly answered all of them, including a nuanced one about why
+  the chart-gap fix belongs in `AnalyticsService` rather than the
+  chart component itself (the data's contract, not the rendering
+  layer, is what needed to guarantee "index N means day N").
+- `/code-review` itself was genuinely flaky this session — not a code
+  issue, a tooling one: the first run failed outright on a session
+  usage-limit error across all its sub-agents; the second run's main
+  agent finished its own work but kept reporting "still waiting on the
+  cross-file tracer" identically four times in a row without actual
+  progress, and only produced real findings after being explicitly
+  sent a message asking it to report now. Worth remembering as a
+  pattern — a stuck background review agent may need an explicit nudge
+  rather than more waiting.
+
+### Concepts to revisit
+- The 5000-row analytics cap and the "timing includes retries, not
+  just generation" caveat are both new, real, named limits — worth
+  keeping in mind if a future session ever needs to explain why an
+  average response time looks surprisingly high, or why a very heavy
+  user's chart looks like it starts partway through the month.
+- Same three long-standing gaps as every recent session: real
+  accuracy tracking, real cost tracking (item 15), and the test
+  suite's remaining zero-coverage areas (hybrid search, circuit
+  breakers, the audit log's write path, MCP, PII detection's
+  splitting/batching, access control).
+
+### What's next
+- One frontend page remains unbuilt: Admin (tenant management, user
+  permissions, document access control settings, audit log viewer per
+  CLAUDE.md's spec) — the last of the five originally planned.
+- Real accuracy tracking and real cost tracking are now named across
+  three ADRs (ADR-031, ADR-032, ADR-033) as the concrete unlock for
+  three separate honest placeholders across two pages — still a
+  strong candidate for a dedicated future session once Admin is done.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real per-caller rate limiting/network isolation for APIM, real
+  auth/multi-tenancy (item 14), the missing migration tool, and the
+  rest of the build order beyond the frontend.
+
+**Estimated completion: ~60% of the total project, by weighted
+effort** — up from ~59%. The fourth of five frontend pages is real and
+verified, a genuine cross-cutting improvement (query timing, now
+available to any future feature that wants it) landed alongside the
+page itself, and a `/code-review` pass caught and fixed a real
+correctness bug before it reached anyone — the kind of catch this
+project's review habit exists for. Rough remaining effort: ~53 hours
+across the rest of the frontend (one more page), real auth/
+multi-tenancy (item 14), APIM's remaining gaps, the missing migration
+tool, guardrails (item 16), multi-agent federated retrieval (item 17),
+conversation history (item 18), streamed generation (item 19), and the
+still-real test coverage gaps named above. At 3–4 hours/day, that's
+roughly 13–18 working days left, assuming no further scope changes.

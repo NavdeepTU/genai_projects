@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -47,6 +48,25 @@ class AuditRepository:
             logger.exception("Failed to write audit log entry for action %s", action)
             raise
 
+    async def log_query_made(
+        self, *, correlation_id: str, user_id: str, question: str, duration_ms: float
+    ) -> None:
+        """Record one query_made action — the one shape both /query and MCP's ask_knowledge_base need.
+
+        A named wrapper around log_action, not two hand-built extra_data
+        dicts kept in sync by hand across two files — the exact drift
+        this project already hit once, adding duration_ms to only one
+        call site before this method existed.
+        """
+        await self.log_action(
+            correlation_id=correlation_id,
+            action="query_made",
+            resource_type="query",
+            resource_id=correlation_id,
+            extra_data={"question": question, "duration_ms": duration_ms},
+            user_id=user_id,
+        )
+
     async def get_recent_queries_for_user(self, user_id: str, limit: int = 5) -> list[AuditLog]:
         """Return this user's most recent query_made entries, newest first.
 
@@ -65,5 +85,57 @@ class AuditRepository:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
             logger.exception("Failed to fetch recent queries for user %s", user_id)
+            raise
+        return list(result.scalars().all())
+
+    async def get_query_entries_for_user(
+        self,
+        user_id: str,
+        days: int = 30,
+        limit: int = 5000,
+        correlation_id: str | None = None,
+    ) -> list[AuditLog]:
+        """Return this user's query_made entries from the last N days, newest first.
+
+        Returns raw rows, not aggregates — grouping by day, counting
+        repeated questions, and averaging duration all happen afterward
+        in AnalyticsService, in Python, not as SQL aggregation over the
+        extra_data JSONB column. At this project's scale that's simpler
+        to read and change than JSONB path aggregation; a real rollup
+        table would replace this if the row count ever made that cost
+        actually matter.
+
+        `limit` is a safety cap, not real pagination — at 5000 queries in
+        30 days this silently drops the oldest entries in the window
+        rather than growing memory unbounded; a genuinely high-volume
+        user would need a real rollup, not a larger cap.
+
+        correlation_id is accepted as a plain parameter, not read via
+        get_correlation_id(), because that function lives in
+        app.core.middleware, which itself imports AuditRepository —
+        importing it back here would be a circular import. Same
+        explicit-parameter reasoning ADR-030 already used for background
+        tasks, applied here for a different reason (a real import cycle,
+        not a stale contextvar).
+        """
+        since = datetime.now(UTC) - timedelta(days=days)
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.action == "query_made",
+                AuditLog.user_id == user_id,
+                AuditLog.timestamp >= since,
+            )
+            .order_by(AuditLog.timestamp.desc())
+            .limit(limit)
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to fetch query analytics entries for user %s",
+                user_id,
+                extra={"correlation_id": correlation_id},
+            )
             raise
         return list(result.scalars().all())

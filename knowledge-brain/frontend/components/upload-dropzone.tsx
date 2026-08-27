@@ -6,6 +6,7 @@ import { CheckCircle2, ShieldAlert, UploadCloud, XCircle } from "lucide-react";
 
 import type { DocumentStatusResponse, DocumentUploadResponse, ProcessingStage } from "@/lib/api";
 import { Card } from "@/components/ui/card";
+import { ProgressBar } from "@/components/progress-bar";
 import { cn } from "@/lib/utils";
 
 const ALLOWED_EXTENSIONS = [".pdf", ".txt"];
@@ -69,12 +70,7 @@ function UploadCard({ upload }: { upload: InFlightUpload }) {
 
       {state.kind === "processing" && (
         <div className="flex flex-col gap-1.5">
-          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-primary transition-all duration-500"
-              style={{ width: `${stageProgressPercent(state.stage)}%` }}
-            />
-          </div>
+          <ProgressBar percent={stageProgressPercent(state.stage)} />
           <span className="text-[0.65rem] text-muted-foreground">{STAGE_LABEL[state.stage]}</span>
         </div>
       )}
