@@ -2227,6 +2227,119 @@ document uploads already do with `processing_stage`.
 
 ---
 
+## Feature 21: The Admin Page — the First Page That Needed a Lock
+
+**What does this feature do, in one sentence?**
+Completes the five originally planned frontend pages with a bird's-eye
+view over data every other page already reads — documents,
+permissions, the audit log — except unscoped from "the current user"
+to "everyone," which is exactly why it's also the first page in this
+project that needed its own access check before it could ship at all.
+
+```mermaid
+flowchart LR
+    REQ["GET /admin<br/>X-User-Id: someone"] --> GATE{"require_admin:<br/>in ADMIN_USER_IDS?"}
+    GATE -->|no| REJECT["403 Forbidden"]
+    GATE -->|yes| SVC["get_all_recent_entries() +<br/>list_all_permissions()<br/>(unscoped — every user)"]
+    SVC --> RESP["AdminResponse"]
+```
+
+**Every earlier page in this project shipped with no access gate at
+all — the Query, Dashboard, and Analytics pages are all wide open to
+anyone who sets any `X-User-Id` header. Why does this page get one
+when those didn't?**
+Because what's being read is fundamentally different, not just bigger.
+Every earlier page's data is already scoped to the caller by the
+query itself — `list_documents_for_user`, `get_recent_queries_for_user`,
+and so on all filter to "documents/queries *this* user has access to."
+An open door onto data that's already scoped to you is a much smaller
+risk than an open door onto *everyone's* data. The Admin page reads
+`get_all_recent_entries` and `list_all_permissions` — both
+deliberately unscoped, both new to this codebase — so leaving it open
+would mean anyone who guessed a header value could see every user's
+documents, permissions, and full activity history at once. That's a
+real, different kind of exposure, not the same trade-off repeated a
+fourth time.
+
+**`require_admin` is a simple comma-separated allowlist, not a real
+roles table or RBAC system. Is that actually good enough, or just
+cutting a corner?**
+It's the correct amount of engineering for what this project actually
+needs today — a proportionate, deliberate choice, not a shortcut taken
+without noticing. This project already made the identical trade-off
+once before: MCP's entire access control is one shared secret, not
+per-caller API keys, because there was exactly one real caller type at
+the time (ADR-017). The same reasoning applies here: there's no real
+user base yet, so a small, explicit, environment-configured list of
+trusted people is proportionate. It becomes genuinely insufficient the
+moment this needs more than a handful of known operators, or any
+distinction between "can view" and "can act" — that's what real
+authorization (build-order item 14) is for. Pulling forward a minimal,
+correctly-scoped slice of a future requirement, rather than building
+it in full early or skipping it, is a repeatable pattern in this
+project, not a one-off.
+
+**Where does `require_admin` actually run, and why does that placement
+matter?**
+It's attached once, at the router level —
+`APIRouter(..., dependencies=[Depends(require_admin)])` — rather than
+repeated on each individual endpoint function. That means every route
+added to this router later inherits the gate automatically. The
+alternative, repeating `Depends(require_admin)` on every new admin
+endpoint by hand, has an obvious failure mode: the one time someone
+adds a new admin route and forgets to paste the dependency in, that
+route silently ships open. Attaching it once at the router removes the
+chance to forget.
+
+**`get_all_recent_entries` and `list_all_permissions` don't check who's
+calling them — they'll happily return every user's data to whatever
+code calls them. Isn't that a bug?**
+No — it's a deliberate split of responsibility, documented directly in
+both methods' docstrings. A repository method's job is running the
+right query; deciding *who's allowed to trigger that query* is a
+different concern, handled once, at the route layer, by
+`require_admin`. Baking an admin check into the repository itself
+would mean every future caller of that method — including internal,
+trusted code that might have its own reason to read broadly — pays
+for a check it may not need, and the repository layer starts making
+authorization decisions it has no context to make correctly. Keeping
+the query and the gate as two separate, composable pieces is the more
+maintainable shape.
+
+**A related question came up in conversation, not in code: if a
+document gets flagged for PII, should the person who uploaded it be
+allowed to review and release their own flag?**
+No, and the reason is separation of duties, not just "give it to
+admins because that sounds safer." If the uploader could clear their
+own PII flag, anyone with something genuinely sensitive to hide would
+simply always clear it — the check would only ever catch people who
+didn't mind being checked in the first place. A compliance gate that
+its own subject can veto isn't really a gate. That's exactly why any
+future review workflow for `pending_review` documents needs to sit
+behind `require_admin` specifically, not just "some button on the
+document's own page" — though it's worth knowing today there's
+nothing yet *for* a reviewer to look at either: the extracted text and
+original file bytes are both discarded the moment a document gets
+flagged, never persisted anywhere.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+The allowlist itself doesn't get materially more expensive at scale —
+checking membership in a small set is cheap regardless of traffic. The
+real gap is what the allowlist *doesn't* do: there's no distinction
+between a read-only admin and one who could take real actions (once
+those exist), no expiry on who's listed, and no dedicated audit trail
+for what an admin does once inside — today an admin viewing the panel
+gets the same correlation ID and middleware treatment as any other
+request, not a specifically-logged "admin viewed the audit log" event.
+Proportionate for a handful of trusted people; a real gap before this
+could honestly support more than that without item 14 existing for
+real.
+
+*Further reading: [OWASP's Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) — covers the principle of least privilege this ADR leans on directly, and is a good primer on why "who can even reach this code path" and "what can they do once there" are worth treating as separate design questions, the same split `require_admin` and the unscoped repository methods make here.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

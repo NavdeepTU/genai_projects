@@ -131,6 +131,47 @@ export async function getAnalytics(): Promise<AnalyticsResponse> {
   return response.json();
 }
 
+export type AdminAuditEntry = {
+  timestamp: string;
+  user_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+};
+
+export type DocumentPermissionEntry = {
+  document_id: string;
+  filename: string;
+  user_id: string;
+  granted_at: string;
+};
+
+export type AdminResponse = {
+  audit_entries: AdminAuditEntry[];
+  permissions: DocumentPermissionEntry[];
+  correlation_id: string;
+};
+
+export async function getAdmin(): Promise<AdminResponse> {
+  const response = await fetch(`${BACKEND_URL}/admin`, {
+    headers: {
+      "X-User-Id": CURRENT_USER_ID,
+      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error(
+        `You don't have admin access — add "${CURRENT_USER_ID}" to ADMIN_USER_IDS in the backend's .env.`,
+      );
+    }
+    throw new Error(`Failed to load admin data (status ${response.status})`);
+  }
+
+  return response.json();
+}
+
 export async function getDocuments(): Promise<DocumentListItem[]> {
   const response = await fetch(`${BACKEND_URL}/documents`, {
     headers: {

@@ -105,14 +105,14 @@ and why it was made that way.
   restriction and real per-caller rate limiting both turned out to be
   unavailable on the Consumption tier chosen for cost — see
   [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
-- **Frontend** *(in progress — see below)* — a separate Next.js
-  project (`frontend/`, Tailwind, Shadcn/UI on Base UI) with a shared
-  shell (navigation, dark mode, a responsive mobile menu) and four of
-  five planned pages. The Dashboard, at the app's root, is a real
-  digest — total documents and recent queries are pulled from data
-  that already exists, with two data-less widgets (retrieval accuracy,
-  cost per query) showing an honest "not tracked yet" state instead of
-  a fabricated number. The Document Library — backed by a new,
+- **Frontend** *(all five planned pages built — see below)* — a
+  separate Next.js project (`frontend/`, Tailwind, Shadcn/UI on Base
+  UI) with a shared shell (navigation, dark mode, a responsive mobile
+  menu). The Dashboard, at the app's root, is a real digest — total
+  documents and recent queries are pulled from data that already
+  exists, with two data-less widgets (retrieval accuracy, cost per
+  query) showing an honest "not tracked yet" state instead of a
+  fabricated number. The Document Library — backed by a new,
   permission-filtered `GET /documents` endpoint — fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
@@ -126,30 +126,41 @@ and why it was made that way.
   once inside `RetrievalService.run_query` so both REST and MCP queries
   count toward it — plus a hand-rolled (no new dependency) 30-day query
   volume chart and top questions, alongside one more honest "not
-  tracked yet" placeholder for retrieval accuracy. Every client-triggered
-  action talks only to same-origin Next.js Route Handlers, which proxy
-  the real, secret-bearing calls to the backend server-to-server, so
-  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript. See
+  tracked yet" placeholder for retrieval accuracy. The Admin page is
+  the first page in this project gated by an access check —
+  `require_admin`, a small allowlist (`ADMIN_USER_IDS`) rather than
+  real RBAC, since it's the first page that reads across every user
+  instead of just the caller's own — showing a real audit log viewer
+  and a real document-permissions list, with tenant management left an
+  honest placeholder (this system has no tenant concept at all yet).
+  Every client-triggered action talks only to same-origin Next.js
+  Route Handlers, which proxy the real, secret-bearing calls to the
+  backend server-to-server, so `BACKEND_GATEWAY_SECRET` never reaches
+  client-side JavaScript. See
   [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
   [`ADR-029`](docs/adr/ADR-029-document-library-page.md),
   [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md),
   [`ADR-031`](docs/adr/ADR-031-query-page.md),
-  [`ADR-032`](docs/adr/ADR-032-dashboard-page.md), and
-  [`ADR-033`](docs/adr/ADR-033-analytics-page.md).
+  [`ADR-032`](docs/adr/ADR-032-dashboard-page.md),
+  [`ADR-033`](docs/adr/ADR-033-analytics-page.md), and
+  [`ADR-034`](docs/adr/ADR-034-admin-page.md).
 
-**Not built yet:** the last planned frontend page (Admin), and full
-auth/multi-tenancy (today's identity is a self-asserted header, not
-real authentication). See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** full auth/multi-tenancy (today's identity is a
+self-asserted header, not real authentication) and a review workflow
+for documents flagged for PII (they're correctly held back from
+search today, but nothing yet lets an admin release or reject one —
+see `ADR-034`). See `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
   chunking, extraction, PII detection's "flag and stop" branch, the
-  dashboard's and analytics page's repository/service methods, and the
-  query pipeline's source/confidence-building logic — it does not yet
-  cover hybrid search, the circuit breaker, the audit log's write path,
-  LangGraph's retry logic, the Neo4j graph feature, MCP, PII
-  detection's own splitting/batching logic, or any part of access
-  control.
+  dashboard's and analytics page's repository/service methods, the
+  query pipeline's source/confidence-building logic, and the admin
+  allowlist (`require_admin`) — it does not yet cover hybrid search,
+  the circuit breaker, the audit log's write path, LangGraph's retry
+  logic, the Neo4j graph feature, MCP, PII detection's own
+  splitting/batching logic, or document-level ACL (`grant_access`/
+  `has_access`).
 - The audit log's "nobody can edit or delete an entry" guarantee is
   enforced at the code level only — the local database connection is a
   superuser and could bypass a real database-level restriction. See
@@ -216,8 +227,8 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Docker** — runs Postgres and Neo4j locally, isolated from anything
   else on the machine (see [`ADR-003`](docs/adr/ADR-003-postgres-in-docker.md))
 - **Next.js + Tailwind + Shadcn/UI (on Base UI)** — the frontend
-  (`frontend/`), in progress: a shared shell and four of five planned
-  pages so far (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
+  (`frontend/`), complete: a shared shell and all five planned
+  pages (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
 
 The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in
 `CLAUDE.md` — most of it isn't built yet, and is being added
@@ -251,7 +262,11 @@ deliberately, one justified decision at a time, not upfront.
    free `F0` tier is enough) — create one in the
    [Azure Portal](https://portal.azure.com), search "Language service,"
    and copy its endpoint and key from the resource's "Keys and
-   Endpoint" page.
+   Endpoint" page. `ADMIN_USER_IDS` defaults to empty, meaning nobody
+   is an admin — set it to a comma-separated list including whatever
+   value you're sending as `X-User-Id` (e.g. `dev-user`) to use the
+   Admin page locally; anyone not on this list gets a `403` from
+   `GET /admin`.
 4. **Install dependencies:**
    ```
    uv sync

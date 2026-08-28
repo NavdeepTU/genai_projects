@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # API Management gateway
     apim_gateway_secret: str
 
+    # Admin panel — a minimal, explicit allowlist, not real RBAC; a small
+    # slice of real auth (build-order item 14) pulled forward rather than
+    # left open or built in full. Comma-separated user IDs, empty by
+    # default so no one is an admin until this is deliberately set.
+    admin_user_ids: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -2866,3 +2866,130 @@ tool, guardrails (item 16), multi-agent federated retrieval (item 17),
 conversation history (item 18), streamed generation (item 19), and the
 still-real test coverage gaps named above. At 3–4 hours/day, that's
 roughly 13–18 working days left, assuming no further scope changes.
+
+## Session: 2026-08-28 — Admin page: the fifth and final planned frontend page (Feature 16 complete)
+
+### What we built
+- The Admin page — the fifth and last of the five originally planned
+  frontend pages, completing build-order item 13's frontend scope.
+  Unlike every page before it, this one reads across every user, not
+  just the caller — the reason it's also the first page in this
+  project that needed its own access check before it could ship.
+- New `require_admin`, a FastAPI dependency checking the caller's
+  `X-User-Id` against a small, explicit allowlist
+  (`ADMIN_USER_IDS`, comma-separated, empty by default), attached once
+  at the router level so every current and future admin route inherits
+  it automatically rather than needing the check repeated per
+  endpoint. Not real RBAC — the same proportionate "pull forward a
+  small slice of real auth" move already made for MCP's shared secret
+  (ADR-017), decided as an explicit fork before writing any code,
+  since every earlier page's open-by-default trade-off didn't apply
+  here the same way.
+- Two new repository reads, the first in this codebase to deliberately
+  span every user rather than scope to one:
+  `AuditRepository.get_all_recent_entries` and
+  `PermissionRepository.list_all_permissions` (joined against
+  `Document` for filenames). Both explicit in their own docstrings
+  that they do no authorization themselves — that's `require_admin`'s
+  job, kept as a separate, composable concern at the route layer.
+- Frontend: `frontend/app/admin/page.tsx`, built entirely from
+  components already extracted in prior sessions (`ListCard`,
+  `StatTile`) — the first frontend page needing no new shared
+  component. Tenant management stayed an honest placeholder, the same
+  reasoning as every other data-less widget on the Dashboard and
+  Analytics pages — no tenant concept exists in this system's data
+  model at all yet. `admin/error.tsx` deliberately shows the real
+  error message, not a fixed generic one — a `403` and a genuine
+  server failure are different situations worth telling apart here.
+- Real conversation, not code, surfaced a related and genuinely
+  important gap: documents flagged `pending_review` for PII have no
+  reviewer workflow at all, and — checked directly against the code,
+  not assumed — there's nothing left to review even if one existed,
+  since `IngestionService.process_document` discards both the
+  extracted text and the original file bytes the moment
+  `flag_for_review` runs. Talked through why review should be
+  admin-only (separation of duties — the uploader who created the risk
+  shouldn't be the one clearing it) and why an uploader shouldn't be
+  able to opt their own flagged document out of admin visibility
+  either (a compliance gate its own subject can veto isn't a gate).
+  Deliberately not built this session — tracked as its own future item.
+- New tests: `tests/test_admin.py` — `require_admin` allowed/rejected/
+  empty-allowlist-locks-everyone-out (using `monkeypatch` on
+  `get_settings` and the `user_id` contextvar directly, new territory
+  for this test suite), and both new repository methods confirmed to
+  span multiple users, not just the caller. Test suite: 25 → 30
+  passing.
+- Verified live: `/admin` correctly returned `403` before
+  `ADMIN_USER_IDS` was set in the real `.env`, and real, multi-user
+  data (several different real user IDs, several different real action
+  types, all real filenames) after — confirming the gate and the
+  "spans every user" behavior actually work together against the real
+  database, not just in isolated unit tests. Confirmed in both light
+  and dark mode.
+- One new ADR: [`ADR-034`](adr/ADR-034-admin-page.md) (the allowlist
+  decision, what stayed a placeholder and why, and the PII-review gap
+  named but deliberately not built).
+
+### What I struggled with
+- No corrections needed on the interview-prep questions this session —
+  correctly explained why this page specifically needed a gate when
+  no earlier page did (it reads across every user, not more of the
+  same "scoped to the caller" pattern), and reasoned through the
+  separation-of-duties argument for PII review being admin-only
+  without being led there — that came from the user's own follow-up
+  question, not a question I posed.
+- A genuinely good back-and-forth, not a struggle: the user asked a
+  real Azure cost question mid-session (unrelated to the Admin page)
+  — read the actual Terraform config rather than guessing at generic
+  Azure pricing, found `min_replicas = 1` as the real cause of the
+  largest cost line, and explained why a single "activate everything /
+  deactivate everything" script isn't the right shape for this
+  infrastructure, since different resources have fundamentally
+  different billing models (some already free when idle, one
+  genuinely benefits from a start/stop toggle, one can't be toggled at
+  all without real trade-offs). Deferred at the user's request to
+  return to after the Admin page — still open, not forgotten.
+
+### Concepts to revisit
+- The PII review workflow gap, now clearly scoped in conversation
+  (admin-gated, needs a decision about where flagged content is
+  persisted for review — Blob Storage vs. persisting extracted text at
+  flag-time) — a strong, well-defined candidate for the next feature
+  session.
+- The Azure cost/`min_replicas` fix is still open, explicitly deferred
+  by the user mid-session, not resolved: `infra/main.tf`'s
+  `min_replicas = 1` is the real, verified cause of the Container
+  Apps line item; a Postgres start/stop script pair was also proposed
+  but not written.
+- The admin allowlist's own real limits — no read-only-vs-full-admin
+  distinction, no dedicated audit trail for admin actions themselves —
+  worth keeping in mind if the review workflow above needs finer
+  permissions than "is this person an admin at all."
+
+### What's next
+- **All five originally planned frontend pages are now built.**
+  Remaining frontend work is deepening existing pages (a PII review
+  queue, revoking document access from the Admin page), not new
+  top-level pages.
+- The Azure cost discussion is still open, waiting on the user to
+  return to it — the `min_replicas` fix and the Postgres start/stop
+  scripts are both scoped and ready to write, not started.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real accuracy/cost tracking (item 15), real per-caller rate
+  limiting/network isolation for APIM, real auth/multi-tenancy (item
+  14), the missing migration tool, and the rest of the build order
+  beyond the frontend.
+
+**Estimated completion: ~61% of the total project, by weighted
+effort** — up from ~60%. The fifth and final planned frontend page is
+real, tested, and verified, closing out build-order item 13's
+frontend scope entirely — the first time an entire multi-session
+build-order item has reached full completion rather than partial.
+Rough remaining effort: ~51 hours across real auth/multi-tenancy (item
+14), APIM's remaining gaps, the missing migration tool, guardrails
+(item 16), multi-agent federated retrieval (item 17), conversation
+history (item 18), streamed generation (item 19), the PII review
+workflow (newly scoped, not yet built), the Azure cost fix (open,
+deferred), and the still-real test coverage gaps named above. At 3–4
+hours/day, that's roughly 13–17 working days left, assuming no further
+scope changes.

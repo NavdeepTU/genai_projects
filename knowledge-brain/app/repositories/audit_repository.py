@@ -139,3 +139,24 @@ class AuditRepository:
             )
             raise
         return list(result.scalars().all())
+
+    async def get_all_recent_entries(
+        self, limit: int = 50, correlation_id: str | None = None
+    ) -> list[AuditLog]:
+        """Return the most recent audit entries across every user and action type.
+
+        Unscoped by user_id, unlike every other read method on this
+        repository — genuinely admin-only, since it's the one query in
+        this codebase that shows someone activity that isn't their own.
+        Callers must gate this behind require_admin; this method itself
+        does no authorization, only the query.
+        """
+        stmt = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit)
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to fetch recent audit entries", extra={"correlation_id": correlation_id}
+            )
+            raise
+        return list(result.scalars().all())

@@ -1,11 +1,13 @@
 import logging
 import uuid
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.document import Document
 from app.models.document_permission import DocumentPermission
 
 logger = logging.getLogger(__name__)
@@ -48,3 +50,28 @@ class PermissionRepository:
             logger.exception("Failed to check access for document %s, user %s", document_id, user_id)
             raise
         return result.scalar_one_or_none() is not None
+
+    async def list_all_permissions(self) -> list[Row[tuple[uuid.UUID, str, str, datetime]]]:
+        """Return every document-permission grant across every document and user.
+
+        Unscoped, unlike has_access/grant_access — genuinely admin-only,
+        the permission-side equivalent of AuditRepository's
+        get_all_recent_entries. Joined against Document for the filename,
+        since a raw document_id is useless to a human reading this list.
+        """
+        stmt = (
+            select(
+                DocumentPermission.document_id,
+                Document.filename,
+                DocumentPermission.user_id,
+                DocumentPermission.granted_at,
+            )
+            .join(Document, Document.id == DocumentPermission.document_id)
+            .order_by(DocumentPermission.granted_at.desc())
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to list all document permissions")
+            raise
+        return list(result.all())

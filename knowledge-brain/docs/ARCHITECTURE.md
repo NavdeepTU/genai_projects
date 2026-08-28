@@ -197,7 +197,43 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the Analytics page (build-order
+**What's new since the last update:** the Admin page (build-order item
+13's fifth and final planned page) now exists, completing the
+originally planned frontend. It's a bird's-eye view over data every
+other page already reads — documents, permissions, the audit log —
+just unscoped from "the current user" to "everyone," which is exactly
+why it's the first page in this project to need its own access gate.
+A new `require_admin` FastAPI dependency checks the caller's
+`X-User-Id` against a small, explicit allowlist (`ADMIN_USER_IDS`),
+attached once at the router level so every admin route inherits it
+automatically. Not real RBAC — the same proportionate "pull forward a
+small slice of real auth" move this project already made for MCP's
+shared secret (ADR-017), not the full system (item 14) built early,
+and not left open either. Two new repository reads are the first in
+this codebase to deliberately span every user rather than scope to
+one: `get_all_recent_entries` and `list_all_permissions`, both
+explicit in their own docstrings that they do no authorization
+themselves — that's `require_admin`'s job, at the route layer. Tenant
+management stayed an honest placeholder, the same reasoning as every
+other data-less widget on the Dashboard and Analytics pages: there's
+no tenant concept anywhere in this system's data model yet, and
+building one just for this page would mean quietly implementing a
+piece of item 14 under a different feature's name. See ADR-034.
+
+A real, related gap surfaced in conversation after the page shipped,
+deliberately not built yet: documents flagged `pending_review` for PII
+have no reviewer workflow at all. Worth naming precisely because it's
+not just "add an approve button" — `IngestionService.process_document`
+extracts a document's text into a local variable, checks it for PII,
+and if flagged, discards both the extracted text and the original file
+bytes once `flag_for_review` runs; neither is persisted anywhere. A
+real review workflow needs its own decision about where flagged
+content lives long enough to be reviewed, and needs to be admin-gated
+for the same separation-of-duties reason `require_admin` exists at
+all — the uploader who created the risk shouldn't be the one clearing
+it. Tracked as its own future item, not folded into ADR-034.
+
+**What's new before that:** the Analytics page (build-order
 item 13's fourth page) now exists — real query volume over the last 30
 days, real top questions, and a real average response time, alongside
 one more honest "not tracked yet" placeholder for retrieval accuracy
@@ -581,6 +617,33 @@ backend, from the Next.js server. If it disappeared, the underlying
 audit log data would still exist and still be queryable directly —
 only the aggregated trend view would be gone.
 
+**Admin page (`frontend/app/admin/page.tsx`) and its endpoint
+(`app/api/admin.py`), gated by `require_admin`
+(`app/core/admin_auth.py`)** — added with ADR-034, the fifth and final
+originally-planned frontend page. Unlike every page before it, this
+one reads across every user, not just the caller — the reason it's
+also the first page in this project to need its own access check.
+`require_admin` is a FastAPI dependency, attached once at the router
+level (`dependencies=[Depends(require_admin)]`), checking `X-User-Id`
+against a small, explicit allowlist (`ADMIN_USER_IDS`) — not real
+RBAC, the same proportionate "pull forward a small slice of real auth"
+move already used for MCP's shared secret (ADR-017). Shows a real
+audit log viewer (`AuditRepository.get_all_recent_entries`) and a real
+document-permissions list (`PermissionRepository.list_all_permissions`),
+both entirely built from components already extracted in prior
+sessions (`ListCard`, `StatTile`) — the first frontend page needing no
+new shared component. Tenant management is an honest placeholder, the
+same reasoning as every other data-less widget on the Dashboard and
+Analytics pages: there's no tenant concept in this system's data model
+at all yet. `admin/error.tsx` deliberately shows the real error
+message rather than a fixed generic one — a `403` ("you're not an
+admin") and a genuine server failure are different situations worth
+telling apart here specifically. Talks to: `GET /admin` on the
+backend, from the Next.js server. If it disappeared, every number on
+it would still be individually reachable by someone with direct
+database access — only the one consolidated, admin-gated view would
+be gone.
+
 **API Management gateway (`infra/apim.tf`)** — the intended front door
 onto the whole system, sitting in front of everything below it. Its one
 job is stamping a shared secret onto every request it forwards, so the
@@ -630,11 +693,16 @@ check against.
 — all direct database access for who can see which document.
 `grant_access` is idempotent (`ON CONFLICT DO NOTHING`, not
 check-then-insert, so two concurrent grants for the same pair can't
-race into an error); `has_access` is a plain existence check. Talks to:
-nothing but the database — this table is intentionally simple, one row
-per (document, user) grant, no roles or ownership tiers. If it
-disappeared, nothing could ever be shared, and no document would be
-retrievable by anyone, including its own uploader.
+race into an error); `has_access` is a plain existence check.
+`list_all_permissions` (ADR-034) is the one method here that doesn't
+scope to a single user or document — every grant, across everyone,
+joined against `Document` for filenames, powering the Admin page. It
+does no authorization of its own; enforcing that only an admin can
+call it is `require_admin`'s job, at the route layer, not this
+repository's. Talks to: nothing but the database — this table is
+intentionally simple, one row per (document, user) grant, no roles or
+ownership tiers. If it disappeared, nothing could ever be shared, and
+no document would be retrievable by anyone, including its own uploader.
 
 ```mermaid
 flowchart LR
@@ -846,11 +914,14 @@ update or delete methods — that guarantee has never been about reads,
 only about `UPDATE`/`DELETE` — and now has several: the generic
 `log_action` write, `log_query_made` (a named wrapper around it, the
 one place both `/query` and MCP's tool write a query event from,
-ADR-033), and two reads powering the Dashboard and Analytics pages,
-`get_recent_queries_for_user` and `get_query_entries_for_user`
-(ADR-032, ADR-033). Talks to: called directly from the API routes,
-right after each action succeeds, and read from the Dashboard/Analytics
-routes' services.
+ADR-033), and three reads: `get_recent_queries_for_user` and
+`get_query_entries_for_user` (ADR-032, ADR-033), both scoped to one
+user, and `get_all_recent_entries` (ADR-034), the first read here that
+isn't — every user, every action type, powering the Admin page's
+audit viewer. Same contract as `list_all_permissions`: it does no
+authorization itself, `require_admin` does. Talks to: called directly
+from the API routes, right after each action succeeds, and read from
+the Dashboard/Analytics/Admin routes' services.
 
 **Circuit breaker (`app/core/circuit_breaker.py`)** — wraps both OpenAI
 call sites (embedding and generation) and stops calling OpenAI for a
@@ -1188,6 +1259,21 @@ found it hand-duplicated between REST and MCP — a duplication that had
 already caused a real, if minor, drift within this very session
 (`duration_ms` landed on one call site before the other). See ADR-033.
 
+The Admin page is the one page in this project that needed an access
+check at all — every earlier page only ever exposed the caller's own
+data, so leaving them open was proportionate to a project with no real
+users yet; a page that shows *every* user's documents, permissions,
+and activity to anyone who sets any `X-User-Id` header is a real,
+different kind of exposure, not more of the same. `require_admin` is
+deliberately a small, explicit allowlist, not RBAC — the same "pull
+forward a small slice of real auth" move already used for MCP's shared
+secret (ADR-017), attached once at the router level so every admin
+route inherits it without repeating the check. Tenant management
+stayed a placeholder for the same reason two other data-less widgets
+did on earlier pages: there's no real data model behind it, and
+building one just for this page would mean quietly implementing a
+piece of item 14 under a different feature's name. See ADR-034.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -1415,6 +1501,32 @@ could mean a slow reranker retry cycle just as easily as a slow
 generation call — the number alone doesn't say which, and nothing yet
 breaks down `duration_ms` by pipeline stage the way `processing_stage`
 does for document uploads. See ADR-033.
+
+**The admin allowlist is real, but coarse** — `require_admin` answers
+one question, "is this caller allowed to use admin routes at all,"
+nothing finer. There's no read-only-vs-full-admin distinction, no
+expiry on who's listed, and no separate audit trail yet for what an
+admin *does* once inside — an admin reading `/admin` gets a
+correlation ID and passes through the same middleware as any other
+request, but there's no dedicated "admin viewed the audit log" or
+"admin viewed permissions" event the way a future review action
+(approve, reject, delete) would need. Proportionate for a handful of
+trusted operators; a real gap before this system could honestly
+support more than a small, known set of administrators. See ADR-034.
+
+**A document flagged for PII has no reviewer, and nothing left to
+review even if one existed** — `pending_review` and `pii_detected`
+have been correctly set since ADR-018, but nothing has ever moved a
+document back out of that status: no approve, no reject, no delete.
+Worse, `IngestionService.process_document` discards both the extracted
+text and the original file bytes the moment `flag_for_review` runs —
+neither is persisted anywhere, so even a reviewer with access has
+nothing to actually look at today. A real fix needs its own decision
+about where flagged content lives long enough to review, and needs to
+be gated behind `require_admin` specifically — the uploader who
+created the risk shouldn't be the one clearing it, the same
+separation-of-duties reasoning the Admin page itself exists for.
+Tracked as a distinct future item, not folded into ADR-034.
 
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
