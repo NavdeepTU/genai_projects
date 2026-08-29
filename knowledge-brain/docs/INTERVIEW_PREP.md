@@ -2238,46 +2238,59 @@ project that needed its own access check before it could ship at all.
 
 ```mermaid
 flowchart LR
-    REQ["GET /admin<br/>X-User-Id: someone"] --> GATE{"require_admin:<br/>in ADMIN_USER_IDS?"}
+    REQ["GET /admin<br/>session_token cookie"] --> AUTH{"user_id_middleware:<br/>real, unexpired session?"}
+    AUTH -->|no| REJECT401["401 Unauthorized"]
+    AUTH -->|yes| GATE{"require_admin:<br/>User.is_admin?"}
     GATE -->|no| REJECT["403 Forbidden"]
     GATE -->|yes| SVC["get_all_recent_entries() +<br/>list_all_permissions()<br/>(unscoped — every user)"]
     SVC --> RESP["AdminResponse"]
 ```
 
-**Every earlier page in this project shipped with no access gate at
-all — the Query, Dashboard, and Analytics pages are all wide open to
-anyone who sets any `X-User-Id` header. Why does this page get one
-when those didn't?**
-Because what's being read is fundamentally different, not just bigger.
-Every earlier page's data is already scoped to the caller by the
-query itself — `list_documents_for_user`, `get_recent_queries_for_user`,
-and so on all filter to "documents/queries *this* user has access to."
-An open door onto data that's already scoped to you is a much smaller
-risk than an open door onto *everyone's* data. The Admin page reads
-`get_all_recent_entries` and `list_all_permissions` — both
-deliberately unscoped, both new to this codebase — so leaving it open
-would mean anyone who guessed a header value could see every user's
-documents, permissions, and full activity history at once. That's a
-real, different kind of exposure, not the same trade-off repeated a
-fourth time.
+*(Note, current as of ADR-036: `require_admin` itself changed after this
+page shipped — see the note below and Feature 23.)*
 
-**`require_admin` is a simple comma-separated allowlist, not a real
-roles table or RBAC system. Is that actually good enough, or just
-cutting a corner?**
-It's the correct amount of engineering for what this project actually
-needs today — a proportionate, deliberate choice, not a shortcut taken
-without noticing. This project already made the identical trade-off
-once before: MCP's entire access control is one shared secret, not
-per-caller API keys, because there was exactly one real caller type at
-the time (ADR-017). The same reasoning applies here: there's no real
-user base yet, so a small, explicit, environment-configured list of
-trusted people is proportionate. It becomes genuinely insufficient the
-moment this needs more than a handful of known operators, or any
-distinction between "can view" and "can act" — that's what real
-authorization (build-order item 14) is for. Pulling forward a minimal,
-correctly-scoped slice of a future requirement, rather than building
-it in full early or skipping it, is a repeatable pattern in this
-project, not a one-off.
+**Every earlier page in this project shipped with no access gate at
+all — the Query, Dashboard, and Analytics pages were all wide open to
+anyone who sets any `X-User-Id` header. Why did this page get one when
+those didn't, at the time?**
+Because what's being read was fundamentally different, not just
+bigger. Every earlier page's data was already scoped to the caller by
+the query itself — `list_documents_for_user`,
+`get_recent_queries_for_user`, and so on all filter to
+"documents/queries *this* user has access to." An open door onto data
+already scoped to you is a much smaller risk than an open door onto
+*everyone's* data. The Admin page reads `get_all_recent_entries` and
+`list_all_permissions` — both deliberately unscoped, both new to this
+codebase — so leaving it open would have meant anyone who guessed a
+header value could see every user's documents, permissions, and full
+activity history at once. That distinction is now layered on top of a
+second one ADR-036 added afterward: *every* REST page requires a real,
+password-verified session before it's reachable at all — `require_admin`
+is specifically about *authorization* (is this logged-in caller
+allowed to see everyone's data), on top of the *authentication*
+(is this a real, logged-in caller at all) every page now shares.
+
+**`require_admin` started as a simple comma-separated allowlist, not a
+real roles table or RBAC system. Was that actually good enough at the
+time, or just cutting a corner — and why did it change?**
+It was the correct amount of engineering for what this project needed
+at the time — a proportionate, deliberate choice, not a shortcut taken
+without noticing. This project had already made the identical
+trade-off once before: MCP's entire access control is one shared
+secret, not per-caller API keys, because there was exactly one real
+caller type when that shipped (ADR-017). The allowlist made sense for
+the same reason: there was no real user base yet, and no real accounts
+to check a role against — `X-User-Id` was just a header, not a proven
+identity, so a database-backed "is this real user an admin" check
+wasn't even possible yet. It stopped being good enough the moment
+ADR-036 gave this project real accounts: at that point, checking a
+real `User.is_admin` column costs the same one query `require_admin`
+already ran, but the answer is now backed by something a caller can't
+just claim. Pulling forward a minimal, correctly-scoped slice of a
+future requirement, then upgrading it in place once the real thing
+under it exists, rather than building the full thing early or leaving
+a placeholder around after it's obsolete, is a repeatable pattern in
+this project, not a one-off.
 
 **Where does `require_admin` actually run, and why does that placement
 matter?**
@@ -2324,17 +2337,17 @@ flagged, never persisted anywhere.
 
 **What would you change here if this needed to run at genuine
 production scale?**
-The allowlist itself doesn't get materially more expensive at scale —
-checking membership in a small set is cheap regardless of traffic. The
-real gap is what the allowlist *doesn't* do: there's no distinction
-between a read-only admin and one who could take real actions (once
-those exist), no expiry on who's listed, and no dedicated audit trail
-for what an admin does once inside — today an admin viewing the panel
-gets the same correlation ID and middleware treatment as any other
-request, not a specifically-logged "admin viewed the audit log" event.
-Proportionate for a handful of trusted people; a real gap before this
-could honestly support more than that without item 14 existing for
-real.
+Checking `User.is_admin` doesn't get materially more expensive at
+scale — it's one indexed lookup, same as checking membership in a
+small allowlist was. The real gap is what a single boolean *doesn't*
+do: there's no distinction between a read-only admin and one who could
+take real actions (once those exist), no expiry or time-boxing on who
+holds the flag, and no dedicated audit trail for what an admin does
+once inside — today an admin viewing the panel gets the same
+correlation ID and middleware treatment as any other request, not a
+specifically-logged "admin viewed the audit log" event. Proportionate
+for a handful of trusted people; a real gap before this could honestly
+support more than that without full RBAC existing.
 
 *Further reading: [OWASP's Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) — covers the principle of least privilege this ADR leans on directly, and is a good primer on why "who can even reach this code path" and "what can they do once there" are worth treating as separate design questions, the same split `require_admin` and the unscoped repository methods make here.*
 
@@ -2429,6 +2442,122 @@ consistent responsiveness, which is exactly the right trade at real
 scale, the opposite of what's right for an idle learning project.
 
 *Further reading: [Microsoft Learn — Scaling in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/scale-app) — the official source for the exact cool-down/scale-behavior numbers used in this decision, and for the ingress warning that was checked before applying it.*
+
+---
+
+## Feature 23: Real Authentication — Session Cookies, Backend Half
+
+**What does this feature do, in one sentence?**
+Replaces the self-asserted `X-User-Id` header every REST endpoint used
+to trust unconditionally with real, password-verified login: a new
+`users` table holds Argon2id-hashed passwords, a new `sessions` table
+is the server's own source of truth for who's logged in, and the
+browser only ever holds an opaque, unguessable token in an `httponly`
+cookie.
+
+```mermaid
+flowchart LR
+    LOGIN["POST /auth/login<br/>email + password"] --> VERIFY{"Argon2id verify<br/>against stored hash"}
+    VERIFY -->|wrong| ERR["401 — same error as<br/>'no such email'"]
+    VERIFY -->|right| CREATE["Create Session row<br/>(random token, 7-day expiry)"]
+    CREATE --> COOKIE["Set-Cookie: session_token<br/>(httponly, secure in prod)"]
+
+    LATER["Any later REST request"] -->|"cookie sent<br/>automatically by browser"| CHECK{"Session row exists<br/>+ unexpired?"}
+    CHECK -->|no| REJECT["401 — request never<br/>reaches a route"]
+    CHECK -->|yes| ALLOW["Request proceeds,<br/>identity = session's user_id"]
+```
+
+**Why session cookies instead of JWT? JWT is the more commonly reached-for
+default in a lot of tutorials.**
+Because JWT trades away exactly the thing this pass exists to build
+hands-on: its whole design point is that the server *doesn't* need to
+hold any session state, so choosing it would mean skipping the actual
+mechanics — hashing, session storage, revocation — rather than learning
+them. It's also the wrong tool for what this system actually needs
+regardless of the learning goal: nothing here demands stateless,
+cross-service token verification at the scale JWT exists for, and a
+JWT can't be revoked before it expires without adding back the exact
+server-side state it was chosen to avoid. Session cookies were chosen
+because the server stays the one place that can end a login
+immediately, just by deleting a row.
+
+**Walk me through what happens on a login — where does the password
+actually go?**
+The plaintext password arrives once, in the `POST /auth/login` request
+body, gets handed straight to Argon2id's `verify()` against the
+already-stored hash, and is never written anywhere — not logged, not
+persisted, not passed further into the system than `AuthService`. On
+success, a brand new `Session` row is created with a random token
+(`secrets.token_urlsafe(32)`), and that token — never the password, and
+never the session row's own database `id` — is what gets sent back to
+the browser, as a cookie the browser can't read the value of
+(`httponly`) and won't send over plain HTTP once the app is running in
+production (`secure`).
+
+**Why is the session `token` a separate value from the session row's
+own `id`? Isn't that redundant?**
+Because the two values leak in very different ways. This project's
+`id` columns show up routinely in log lines throughout the codebase —
+that's normal, expected, and fine, since an `id` alone doesn't let
+anyone do anything. A session `token` is different: it's the literal
+bearer credential a stolen cookie would hand an attacker, equivalent to
+a valid login. If `token` and `id` were the same value, then every
+place an `id` already safely appears in a log would become a genuine
+credential leak. Keeping them separate means the value that's routinely
+visible in logs and the value that's actually dangerous to expose are
+never the same thing.
+
+**A wrong password and a nonexistent email both return the exact same
+401. Why not tell the user which one actually happened — wouldn't that
+be more helpful?**
+It would be more helpful to a real user and also more helpful to an
+attacker running a script — which is exactly the problem. If "wrong
+password" and "no such account" produced different responses, someone
+could feed a list of a million email addresses at the login endpoint
+and learn, for free, which ones have real accounts here, before ever
+trying to guess a password. Collapsing both cases into one identical
+error removes that signal entirely — a login attempt can prove or
+disprove nothing about whether an email is registered.
+
+**MCP still authenticates with a shared API key and a self-asserted
+`X-User-Id` header — untouched by this whole feature. Is that a gap
+this session missed?**
+No — a deliberate boundary, not an oversight. Session cookies work
+because a browser automatically stores and resends them on every
+request to the same origin; an MCP client (Claude Desktop, another
+agent) isn't a browser and has no equivalent built-in mechanism to hold
+a cookie-based session the same way. Migrating MCP onto this model
+would mean designing a whole separate credential-and-storage story for
+non-browser clients — real, legitimate scope, but a different feature,
+not a gap in this one. MCP keeps the shared-secret trade-off this
+project already accepted and named for it in ADR-017.
+
+**The frontend still can't actually log anyone in after this session.
+Why ship a backend that the UI can't use yet?**
+Because the two halves are genuinely separable, and building both in
+one pass would have meant learning neither well — backend session
+mechanics and frontend cookie-forwarding/login-UI concerns are
+different enough skills that combining them risked a shallow pass at
+both instead of a real one at each. The backend is fully testable and
+verifiable on its own — every new piece has direct unit tests, and the
+whole suite plus a live app-import check both pass — without needing a
+browser in the loop at all. The frontend wiring is real, scoped, and
+already planned as its own session.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+Two concrete gaps, both named rather than silently accepted: there's
+no rate limiting on `/auth/login` yet, so nothing beyond Argon2id's own
+deliberately-slow hashing cost stands between a script and a
+password-guessing attempt — a real gap before this could be called
+production-hardened. And every authenticated request now pays one
+extra database round trip (the session lookup) that the old
+header-trusting scheme never paid — invisible at this project's actual
+traffic, but the direct cost of choosing revocability over JWT's
+stateless-verification design, worth naming explicitly if this
+question comes up as a trade-off rather than a flaw.
+
+*Further reading: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) — the source for Argon2id's current #1 recommendation, and for why session tokens need to be generated with a cryptographically secure random source, not a UUID or counter.*
 
 ---
 

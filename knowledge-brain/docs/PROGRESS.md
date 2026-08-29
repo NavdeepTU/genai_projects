@@ -3091,3 +3091,120 @@ history (item 18), streamed generation (item 19), the PII review
 workflow, Postgres' still-open cost fix, and the still-real test
 coverage gaps named in prior sessions. At 3–4 hours/day, that's
 roughly 13–17 working days left, assuming no further scope changes.
+
+## Session: 2026-08-29 — Real authentication, backend half (build-order item 14)
+
+### What we built
+- Picked build-order item 14 (auth, multi-tenancy, and production
+  hardening) for the first time. Explicitly scoped this session to
+  real authentication only — multi-tenancy stays its own separate
+  future decision — and, given the size of even that narrowed scope,
+  split it further: backend infrastructure this session, frontend
+  login/signup wiring deferred to a dedicated future session.
+- Chose the auth model deliberately, not by default: email + password
+  with the project's own server-side session cookies, over JWT and
+  over an external identity provider (Azure AD B2C) — picked
+  specifically to learn the real mechanics (hashing, sessions,
+  revocation) rather than delegate them to a stateless-token scheme or
+  a managed service.
+- Researched password hashing live rather than assuming the usual
+  tutorial default: confirmed via web search that OWASP's 2024 cheat
+  sheet update promoted Argon2id over bcrypt, and that `passlib` (the
+  library most tutorials wrap it in) is genuinely unmaintained and
+  broken on current Python — used `argon2-cffi` directly instead.
+- Built the full backend stack: `users`/`sessions` tables
+  (`app/models/user.py`, `app/models/session.py`), repositories
+  (`UserRepository`, `SessionRepository`), `AuthService` (signup,
+  login, logout — the only place a real password is ever touched),
+  and the API surface (`POST /auth/signup`, `POST /auth/login`,
+  `POST /auth/logout`, `GET /auth/me`), each state-changing action
+  audit-logged the same way every other action in this project already
+  is.
+- Rewrote `app/core/middleware.py`'s `user_id_middleware` — the single
+  choke point every request's identity already flowed through, which
+  is exactly what made this migration tractable without touching every
+  route. It now branches on path: `/mcp` keeps trusting its existing
+  shared-API-key-plus-`X-User-Id` model unchanged (an explicit,
+  discussed decision — MCP isn't a browser and can't hold a session
+  cookie the same way); every other request now needs a real,
+  unexpired session cookie or it's rejected before reaching any route.
+- Upgraded `require_admin` (ADR-034) to check a real `User.is_admin`
+  column instead of the `ADMIN_USER_IDS` env allowlist, and removed
+  that allowlist from configuration entirely — the "small slice of
+  real auth, pulled forward" ADR-034 named is now the real thing.
+- Added a new `environment` setting (`dev`/`staging`/`prod`) purely so
+  the session cookie's `secure` flag is off for local `http` testing
+  and on once this runs behind real `https` — a small but necessary
+  detail, not scope creep, since `secure=True` would have silently
+  broken every local login.
+- Wrote `tests/test_auth.py` (signup, duplicate email, correct/
+  incorrect login, logout, expired-session rejection, unknown-user
+  lookup) and rewrote `tests/test_admin.py`'s `require_admin` tests
+  against real `User` rows instead of a mocked allowlist. Test suite:
+  30 → 39 passing. Verified the app still imports cleanly and the full
+  suite passes after every change.
+- One new ADR: [`ADR-036`](adr/ADR-036-real-authentication-session-cookies.md).
+  `docs/ARCHITECTURE.md` and `docs/INTERVIEW_PREP.md` updated in
+  place — every existing section and Q&A that described the old
+  `X-User-Id`-trusts-everything behavior as current (the top data-flow
+  diagram, both main-journey walkthroughs, the Admin page's own Q&A,
+  the "identity vs. authentication" glossary entry) now reflects what
+  the system actually does today, not just a new section appended on
+  top.
+
+### What I struggled with
+- Two dependency gaps only surfaced by actually trying to import the
+  app, not by reasoning about it in advance: `EmailStr` needed
+  `email-validator` installed (assumed present transitively; it
+  wasn't), and the real local `.env` file still had the now-removed
+  `ADMIN_USER_IDS` key, which `pydantic-settings`' strict validation
+  rejected outright as an unknown field. Both fixed by actually running
+  `uv run python -c "import app.main"` rather than trusting that the
+  code alone was correct — running it live and reading the exact error
+  message, twice, is what actually confirmed the app worked.
+
+### Concepts to revisit
+- Why session cookies were the right choice here specifically, and
+  what JWT would have cost in revocability if chosen instead — the
+  full reasoning is in ADR-036 and the new Feature 23 section of
+  `INTERVIEW_PREP.md`, worth being able to say back from memory before
+  treating this feature as settled.
+- The `document_permission`/`audit_log` tables still store `user_id`
+  as a loose string, not a real foreign key to the new `users` table —
+  not a bug (nothing that used those tables changed), but a seam
+  multi-tenancy work will eventually need to close.
+
+### What's next
+- The frontend is currently broken against this backend on purpose —
+  it still sends the old `X-User-Id` header and has no login/signup
+  UI. Wiring it up (login/signup pages, the Next.js Route Handler
+  forwarding the session cookie, every existing `lib/api.ts` call,
+  route protection, a logout control) is the natural next session, and
+  was explicitly agreed as its own separate piece of work up front.
+- Multi-tenancy itself (real isolation between separate companies'
+  data) is still fully unbuilt — its own future decision, deliberately
+  kept out of this pass.
+- Two real, named gaps from this session, not yet closed: no rate
+  limiting on `/auth/login`, and sessions have a fixed 7-day lifetime
+  with no sliding renewal or revoke-all-sessions control.
+- Everything else from prior sessions' "what's next" still stands:
+  real accuracy/cost tracking (item 15), real per-caller rate limiting/
+  network isolation for APIM, the missing migration tool, the PII
+  review workflow, Postgres' still-open cost fix, and guardrails/
+  multi-agent retrieval/conversation history/streaming (items 16–19).
+
+**Estimated completion: ~63% of the total project, by weighted
+effort** — up from 61%. Real authentication is a genuinely new,
+substantial slice of item 14 (a large item that also includes
+multi-tenancy and the rest of production hardening), but only the
+backend half of just the auth piece is done — the frontend wiring,
+multi-tenancy, and the broader hardening work under this same
+build-order item are all still ahead, so this moves the needle by a
+couple of points, not a large jump. Rough remaining effort: ~45 hours
+(down from ~51) — the frontend auth wiring, multi-tenancy, APIM's
+remaining gaps, the missing migration tool, guardrails (item 16),
+multi-agent federated retrieval (item 17), conversation history (item
+18), streamed generation (item 19), the PII review workflow, Postgres'
+still-open cost fix, and the still-real test coverage gaps named in
+prior sessions. At 3–4 hours/day, that's roughly 12–15 working days
+left, assuming no further scope changes.

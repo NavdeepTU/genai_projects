@@ -65,14 +65,30 @@ and why it was made that way.
   upload endpoint and the MCP tool automatically. Fails closed, not
   open, if Azure itself is unavailable — see
   [`ADR-018`](docs/adr/ADR-018-pii-detection.md).
-- **Document-level access control** — every request, REST or MCP, must
-  carry an `X-User-Id` header identifying the caller; missing it is a
-  401. Uploading a document auto-grants the uploader access; a new
+- **Document-level access control** — every request must carry a
+  proven identity (see real authentication, below); missing or invalid
+  is a 401. Uploading a document auto-grants the uploader access; a new
   endpoint lets anyone with access share it with someone else.
   Retrieval — vector search, keyword search, and graph-context
   snippets alike — is filtered by a SQL join against a permissions
   table before results are ever ranked, not after. See
   [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
+- **Real authentication (backend half)** — email/password login with
+  the project's own server-side session cookies, not JWT and not an
+  external identity provider, chosen specifically to build the real
+  mechanics hands-on. `POST /auth/signup` hashes a password with
+  Argon2id (`argon2-cffi`, not the unmaintained `passlib`) before it's
+  ever stored; `POST /auth/login` verifies it and hands back a random,
+  unguessable session token as an `httponly` cookie — never the
+  session row's own database id, so a value that routinely appears in
+  this project's logs is never the same value that would let someone
+  log in. Every REST endpoint now requires that cookie to resolve to a
+  real, unexpired session; MCP is deliberately unchanged, since a
+  non-browser client can't hold a session cookie the same way — it
+  keeps its existing shared-API-key-plus-`X-User-Id` model. The
+  frontend has **not** been updated to use this yet (see "Not built
+  yet" below). See
+  [`ADR-036`](docs/adr/ADR-036-real-authentication-session-cookies.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -133,15 +149,18 @@ and why it was made that way.
   volume chart and top questions, alongside one more honest "not
   tracked yet" placeholder for retrieval accuracy. The Admin page is
   the first page in this project gated by an access check —
-  `require_admin`, a small allowlist (`ADMIN_USER_IDS`) rather than
-  real RBAC, since it's the first page that reads across every user
-  instead of just the caller's own — showing a real audit log viewer
-  and a real document-permissions list, with tenant management left an
-  honest placeholder (this system has no tenant concept at all yet).
-  Every client-triggered action talks only to same-origin Next.js
-  Route Handlers, which proxy the real, secret-bearing calls to the
-  backend server-to-server, so `BACKEND_GATEWAY_SECRET` never reaches
-  client-side JavaScript. See
+  `require_admin`, checking a real `User.is_admin` column (originally
+  a small `ADMIN_USER_IDS` allowlist, upgraded once real accounts
+  existed — see `ADR-036`) rather than full RBAC, since it's the first
+  page that reads across every user instead of just the caller's own —
+  showing a real audit log viewer and a real document-permissions
+  list, with tenant management left an honest placeholder (this system
+  has no tenant concept at all yet). Every client-triggered action
+  talks only to same-origin Next.js Route Handlers, which proxy the
+  real, secret-bearing calls to the backend server-to-server, so
+  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript.
+  **Currently broken against the backend** — see "Not built yet"
+  below. See
   [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
   [`ADR-029`](docs/adr/ADR-029-document-library-page.md),
   [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md),
@@ -150,22 +169,32 @@ and why it was made that way.
   [`ADR-033`](docs/adr/ADR-033-analytics-page.md), and
   [`ADR-034`](docs/adr/ADR-034-admin-page.md).
 
-**Not built yet:** full auth/multi-tenancy (today's identity is a
-self-asserted header, not real authentication) and a review workflow
-for documents flagged for PII (they're correctly held back from
-search today, but nothing yet lets an admin release or reject one —
-see `ADR-034`). See `CLAUDE.md`'s build order for the full plan.
+**Not built yet:** the frontend hasn't been updated to log in at all —
+it still sends the old self-asserted `X-User-Id` header, which the
+backend no longer accepts for REST, so every page currently fails to
+load data until a future session adds real login/signup screens and
+cookie forwarding. Multi-tenancy is equally unbuilt — real auth
+(above) and multi-tenancy are separate decisions, and only the former
+exists so far. Also not built: a review workflow for documents flagged
+for PII (they're correctly held back from search today, but nothing
+yet lets an admin release or reject one — see `ADR-034`). See
+`CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
   chunking, extraction, PII detection's "flag and stop" branch, the
   dashboard's and analytics page's repository/service methods, the
-  query pipeline's source/confidence-building logic, and the admin
-  allowlist (`require_admin`) — it does not yet cover hybrid search,
-  the circuit breaker, the audit log's write path, LangGraph's retry
-  logic, the Neo4j graph feature, MCP, PII detection's own
-  splitting/batching logic, or document-level ACL (`grant_access`/
-  `has_access`).
+  query pipeline's source/confidence-building logic, `require_admin`,
+  and real authentication (signup, login, logout, session expiry) — it
+  does not yet cover hybrid search, the circuit breaker, the audit
+  log's write path, LangGraph's retry logic, the Neo4j graph feature,
+  MCP, PII detection's own splitting/batching logic, or document-level
+  ACL (`grant_access`/`has_access`).
+- There's no rate limiting on `/auth/login` — nothing beyond Argon2id's
+  own deliberately-slow hashing cost stands between a script and a
+  password-guessing attempt. Sessions also have a fixed 7-day lifetime
+  with no sliding renewal or a "log out everywhere" control. See
+  `ADR-036`.
 - The audit log's "nobody can edit or delete an entry" guarantee is
   enforced at the code level only — the local database connection is a
   superuser and could bypass a real database-level restriction. See
@@ -196,10 +225,11 @@ flowchart LR
     RAG -. reads .-> DB
 ```
 
-Every request must also carry an `X-User-Id` header — there's no login
-yet, just a caller-supplied identity, but every document is only
-visible to users explicitly granted access to it, and a request with
-no `X-User-Id` is rejected outright. Every request also gets a
+Every REST request must also carry a real, logged-in session cookie
+(MCP keeps its own separate shared-key model) — every document is only
+visible to users explicitly granted access to it, and a request
+without a valid session is rejected outright, before it reaches any
+route. Every request also gets a
 correlation ID (for tracing), an audit log entry (for accountability),
 and OpenAI calls are protected by a circuit breaker (so one bad outage
 doesn't cascade). Full diagrams and the reasoning behind every choice
@@ -267,11 +297,14 @@ deliberately, one justified decision at a time, not upfront.
    free `F0` tier is enough) — create one in the
    [Azure Portal](https://portal.azure.com), search "Language service,"
    and copy its endpoint and key from the resource's "Keys and
-   Endpoint" page. `ADMIN_USER_IDS` defaults to empty, meaning nobody
-   is an admin — set it to a comma-separated list including whatever
-   value you're sending as `X-User-Id` (e.g. `dev-user`) to use the
-   Admin page locally; anyone not on this list gets a `403` from
-   `GET /admin`.
+   Endpoint" page. `ENVIRONMENT` defaults to `dev`, which keeps the
+   session cookie (see "Trying it manually" below) usable over plain
+   `http` locally — leave it as `dev` unless you're running this
+   somewhere with real TLS in front of it. To use the Admin page
+   locally, sign up a user (see below) and then flip that row's
+   `is_admin` to `true` directly in Postgres — there's no allowlist
+   setting anymore, since `require_admin` checks a real column now
+   (see `ADR-036`).
 4. **Install dependencies:**
    ```
    uv sync
@@ -291,21 +324,36 @@ without writing any `curl` commands by hand.
 
 ### Trying it manually
 
-Every request needs an `X-User-Id` header — any value you like, it's
-just a caller-supplied identity, not a real login — and an
-`X-Gateway-Secret` header matching whatever value you set for
+Every REST request needs a real, logged-in session now (see
+[`ADR-036`](docs/adr/ADR-036-real-authentication-session-cookies.md)),
+plus an `X-Gateway-Secret` header matching whatever value you set for
 `APIM_GATEWAY_SECRET` in `.env` (see step 3 above; in Azure, API
 Management adds this header automatically, but locally you have to
-send it yourself):
+send it yourself). Sign up, then log in — `curl -c cookies.txt` saves
+the session cookie login sets, `-b cookies.txt` sends it back on every
+call after:
 
 ```
-curl -X POST http://localhost:8000/documents/upload \
-  -H "X-User-Id: you" \
+curl -X POST http://localhost:8000/auth/signup \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "a-real-password"}'
+
+curl -X POST http://localhost:8000/auth/login -c cookies.txt \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "a-real-password"}'
+```
+
+From here, every call just needs `-b cookies.txt` instead of an
+`X-User-Id` header:
+
+```
+curl -X POST http://localhost:8000/documents/upload -b cookies.txt \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -F "file=@/path/to/a/file.txt"
 
-curl -X POST http://localhost:8000/query \
-  -H "X-User-Id: you" \
+curl -X POST http://localhost:8000/query -b cookies.txt \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
   -d '{"question": "What does this document say?"}'
@@ -318,8 +366,7 @@ seconds) to watch it move through `processing`/`processing_stage` and
 on to `ready`:
 
 ```
-curl http://localhost:8000/documents/<document-id>/status \
-  -H "X-User-Id: you" \
+curl http://localhost:8000/documents/<document-id>/status -b cookies.txt \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here"
 ```
 
@@ -331,21 +378,22 @@ unavailable for that request.
 
 Uploading a document automatically grants you access to it. To share a
 document with someone else (or test what happens when you *don't* have
-access), grant another user ID:
+access), sign up a second user, then grant their real user id — from
+that second account's own `GET /auth/me -b cookies2.txt` — access:
 
 ```
-curl -X POST http://localhost:8000/documents/<document-id>/access \
-  -H "X-User-Id: you" \
+curl -X POST http://localhost:8000/documents/<document-id>/access -b cookies.txt \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "someone-else"}'
+  -d '{"user_id": "<the other account'"'"'s real id from /auth/me>"}'
 ```
 
-The same two actions are also reachable as MCP tools at
-`http://localhost:8000/mcp`, over the Streamable HTTP transport, for
-any MCP-compatible client (e.g. Claude Desktop) — every request must
-include both the shared secret you set as `MCP_API_KEY` in an
-`X-API-Key` header, and an `X-User-Id` header, same as the REST
-endpoints.
+MCP tools (`ask_knowledge_base`, `upload_document`) are also reachable
+at `http://localhost:8000/mcp`, over the Streamable HTTP transport, for
+any MCP-compatible client (e.g. Claude Desktop) — MCP was deliberately
+**not** migrated to session cookies (it can't hold one the way a
+browser does), so it still authenticates the old way: every request
+must include both the shared secret you set as `MCP_API_KEY` in an
+`X-API-Key` header, and a self-asserted `X-User-Id` header.
 
 ### Running the frontend
 
@@ -370,14 +418,16 @@ Then start it:
 npm run dev
 ```
 
-Visit `http://localhost:3000`. Only the shared shell and the Document
-Library page (`/documents`) exist so far — everything else in the nav
-is a placeholder route. The frontend currently sends a hardcoded
-`X-User-Id: dev-user` on every request (see
-[`ADR-029`](docs/adr/ADR-029-document-library-page.md)), which won't
-match whatever user ID you've used in manual `curl` tests — they're
-treated as two unrelated identities until real auth (build-order item
-14) exists.
+Visit `http://localhost:3000`. All five planned pages exist (Dashboard,
+Document Library, Query, Analytics, Admin), but **none of them will
+load data right now**: the frontend still sends a hardcoded
+`X-User-Id: dev-user` header (see
+[`ADR-029`](docs/adr/ADR-029-document-library-page.md)), and the
+backend no longer accepts that for any REST call — see real
+authentication, above. Every page will show its error state until a
+future session adds real login/signup screens and switches the
+frontend to forward a session cookie instead. Manual `curl` testing
+against the backend (above) is unaffected.
 
 ### Running the evaluation harness
 

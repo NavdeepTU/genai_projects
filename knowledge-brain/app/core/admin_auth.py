@@ -1,22 +1,25 @@
-from fastapi import HTTPException
+import uuid
 
-from app.core.config import get_settings
+from fastapi import Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
 from app.core.middleware import get_current_user_id
+from app.repositories.user_repository import UserRepository
 
 
-def require_admin() -> None:
-    """FastAPI dependency: reject any request whose caller isn't a configured admin.
+async def require_admin(db: AsyncSession = Depends(get_db)) -> None:
+    """FastAPI dependency: reject any request whose caller isn't a real admin.
 
-    A minimal, explicit allowlist — not real RBAC — pulling forward a
-    small slice of real auth (build-order item 14) rather than building
-    it in full or leaving admin routes open, the same proportionate
-    trade-off this project already made for MCP's shared secret
-    (ADR-017). Every other page here scopes data to the caller's own —
-    this is the one place that reads across every user, so it's the
-    one place that needs its own lock.
+    Checks the User.is_admin column now that a real account backs every
+    caller — the natural completion of what ADR-034 called "a small
+    slice of real auth, pulled forward" when it started as an
+    ADMIN_USER_IDS env-var allowlist, before real accounts existed at
+    all. Every other page here scopes data to the caller's own — this
+    is the one place that reads across every user, so it's the one
+    place that needs its own lock.
     """
-    settings = get_settings()
-    admin_ids = {uid.strip() for uid in settings.admin_user_ids.split(",") if uid.strip()}
+    user = await UserRepository(db).get_user_by_id(uuid.UUID(get_current_user_id()))
 
-    if get_current_user_id() not in admin_ids:
+    if user is None or not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")

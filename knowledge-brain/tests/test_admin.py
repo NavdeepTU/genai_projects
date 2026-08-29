@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+import uuid
 
 import pytest
 from fastapi import HTTPException
@@ -7,35 +7,39 @@ from app.core import admin_auth, middleware
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.permission_repository import PermissionRepository
+from app.repositories.user_repository import UserRepository
 
 
-def test_require_admin_allows_a_user_on_the_allowlist(monkeypatch):
-    monkeypatch.setattr(admin_auth, "get_settings", lambda: SimpleNamespace(admin_user_ids="dev-user, alice"))
-    token = middleware._user_id.set("alice")
+async def test_require_admin_allows_a_real_admin_user(db_session):
+    user = await UserRepository(db_session).create_user("admin@example.com", "hashed")
+    user.is_admin = True
+    await db_session.commit()
+
+    token = middleware._user_id.set(str(user.id))
     try:
-        admin_auth.require_admin()  # should not raise
+        await admin_auth.require_admin(db_session)  # should not raise
     finally:
         middleware._user_id.reset(token)
 
 
-def test_require_admin_rejects_a_user_not_on_the_allowlist(monkeypatch):
-    monkeypatch.setattr(admin_auth, "get_settings", lambda: SimpleNamespace(admin_user_ids="dev-user, alice"))
-    token = middleware._user_id.set("bob")
+async def test_require_admin_rejects_a_non_admin_user(db_session):
+    user = await UserRepository(db_session).create_user("regular@example.com", "hashed")
+
+    token = middleware._user_id.set(str(user.id))
     try:
         with pytest.raises(HTTPException) as exc_info:
-            admin_auth.require_admin()
+            await admin_auth.require_admin(db_session)
         assert exc_info.value.status_code == 403
     finally:
         middleware._user_id.reset(token)
 
 
-def test_require_admin_rejects_everyone_when_allowlist_is_empty(monkeypatch):
-    """The default, empty ADMIN_USER_IDS should lock everyone out, not act as a wildcard."""
-    monkeypatch.setattr(admin_auth, "get_settings", lambda: SimpleNamespace(admin_user_ids=""))
-    token = middleware._user_id.set("dev-user")
+async def test_require_admin_rejects_an_unknown_user_id(db_session):
+    """A user id with no matching account (e.g. a stale or forged session) is rejected, not treated as non-admin-but-real."""
+    token = middleware._user_id.set(str(uuid.uuid4()))
     try:
         with pytest.raises(HTTPException) as exc_info:
-            admin_auth.require_admin()
+            await admin_auth.require_admin(db_session)
         assert exc_info.value.status_code == 403
     finally:
         middleware._user_id.reset(token)

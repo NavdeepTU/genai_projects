@@ -37,12 +37,16 @@ flowchart TD
         REQ[Request arrives] --> CID["Correlation ID middleware<br/>(outermost — always runs, even on rejection)"]
         CID --> GW{"X-Gateway-Secret<br/>header correct?"}
         GW -->|no| GWREJECT["401 + audit log entry<br/>(action: access_denied)"]
-        GW -->|yes| UID{"X-User-Id header<br/>present?"}
-        UID -->|no| REJECT["401 + audit log entry<br/>(action: access_denied)"]
+        GW -->|yes| MCPCHECK{"Path under /mcp?"}
+        MCPCHECK -->|"yes — MCP's own<br/>separate trust model"| MCPUID{"X-User-Id header<br/>present?"}
+        MCPUID -->|no| REJECT["401 + audit log entry<br/>(action: access_denied)"]
+        MCPCHECK -->|no — REST| SESSION{"session_token cookie<br/>valid + unexpired in DB?"}
+        SESSION -->|no| REJECT
     end
 
-    UID -->|yes| UP[POST /documents/upload]
-    UID -->|yes| Q[POST /query]
+    MCPUID -->|yes| MCPDOOR[/mcp: ask_knowledge_base / upload_document]
+    SESSION -->|yes| UP[POST /documents/upload]
+    SESSION -->|yes| Q[POST /query]
 
     subgraph ingest["Getting a document in"]
         UP --> CREATE["Create document row + grant access<br/>(synchronous — fast enough to finish<br/>before the response goes out)"]
@@ -105,9 +109,15 @@ flowchart TD
 
 **Getting a document in:** a user uploads a file — through the REST
 endpoint or through MCP, both funnel into the exact same pipeline —
-and before anything else, the request has to carry a `X-User-Id`
-header identifying who's asking; missing it means an immediate
-rejection, logged as its own audit event. The REST endpoint's own work
+and before anything else, the request has to prove who's asking.
+REST callers do that with a real, logged-in session: a `session_token`
+cookie, checked against the `sessions` table for a row that exists and
+hasn't expired. MCP callers still authenticate the way they always
+have — a shared API key plus a self-asserted `X-User-Id` header, a
+deliberately separate trust model an MCP client can't hold a browser
+cookie the way REST callers do (see ADR-036). Either way, missing or
+invalid identity means an immediate rejection, logged as its own audit
+event. The REST endpoint's own work
 now stops almost immediately: it creates the document row, grants the
 uploader access to it, writes the audit log entry, and returns —
 `pending` — without waiting for anything else. Everything from text
@@ -150,8 +160,9 @@ two methods this session broke that call site outright (it still
 called the now-deleted `ingest_document`) until this was caught
 reviewing this very document and fixed.
 
-**Asking a question:** a user sends a question, again carrying their
-`X-User-Id` → it's turned into a meaning-vector, and two independent
+**Asking a question:** a user sends a question, again proven by their
+session cookie (or, over MCP, the same shared-key/`X-User-Id` pair
+described above) → it's turned into a meaning-vector, and two independent
 searches run one after another: a vector search (closest meaning) and
 a keyword search (Postgres full-text search, for exact terms vector
 search can miss — error codes, product IDs, rare proper nouns). Both
@@ -197,7 +208,37 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the deployed backend's Container
+**What's new since the last update:** real authentication now exists
+for REST — the backend half of build-order item 14 (auth, multi-
+tenancy, and production hardening). Every previous page and endpoint
+trusted a self-asserted `X-User-Id` header; a caller could set it to
+anything and be believed. That's gone for REST now. Two new tables,
+`users` and `sessions`, back a real signup/login/logout flow
+(`POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`,
+`GET /auth/me`): a password is hashed with Argon2id before it's ever
+stored, and logging in creates a `Session` row with a long random
+token, sent to the browser only as an `httponly` cookie the browser
+can't read or forge. `user_id_middleware` — the one place every
+request's identity gets established — now checks that cookie against
+the database on every REST request instead of trusting a header;
+missing or invalid, expired included, and the request is rejected
+before it reaches any route. MCP was deliberately left untouched: it
+isn't a browser and can't hold a session cookie the same way, so it
+keeps its existing shared-API-key-plus-`X-User-Id` model, on its own
+branch inside the same middleware function. The Admin page's
+`require_admin` (ADR-034) was upgraded alongside this — it now checks
+a real `User.is_admin` column instead of the `ADMIN_USER_IDS`
+allowlist, which was removed from configuration entirely rather than
+left behind as a second, dead check. **The frontend was deliberately
+not touched this session** — it still sends the old `X-User-Id`
+header and has no login/signup screens, so every page that calls the
+backend will fail until a separate, already-planned future session
+wires up real login, cookie forwarding through the Next.js Route
+Handlers, and a logout control. Multi-tenancy itself — isolating
+separate companies' data from each other — is equally not part of
+this pass; it's its own future decision. See ADR-036.
+
+**What's new before that:** the deployed backend's Container
 App now scales to zero. Checking Azure Cost Management for the first
 time since deployment found the largest single cost line was the
 Container App itself — traced directly to `infra/main.tf`'s
@@ -529,7 +570,11 @@ is the shared shell every page sits inside: navigation, dark mode
 below the `md` breakpoint. `lib/api.ts` and `lib/config.ts` hold the one
 place that knows how to reach the backend — the base URL, the temporary
 `dev-user` identity placeholder, and the gateway secret local dev needs
-to send by hand. Talks to: the FastAPI backend, over plain HTTP, from
+to send by hand. **Currently broken, on purpose:** ADR-036 made the
+backend stop trusting that `X-User-Id` placeholder for REST calls —
+every fetch here now gets rejected with a 401 until a future session
+adds real login/signup screens and switches this file to forward a
+session cookie instead. Talks to: the FastAPI backend, over plain HTTP, from
 the Next.js server itself rather than the browser (see the Document
 Library entry below for why). If it disappeared, the backend and its
 API would still work exactly as before — MCP and direct `curl`/API
@@ -644,10 +689,13 @@ originally-planned frontend page. Unlike every page before it, this
 one reads across every user, not just the caller — the reason it's
 also the first page in this project to need its own access check.
 `require_admin` is a FastAPI dependency, attached once at the router
-level (`dependencies=[Depends(require_admin)]`), checking `X-User-Id`
-against a small, explicit allowlist (`ADMIN_USER_IDS`) — not real
-RBAC, the same proportionate "pull forward a small slice of real auth"
-move already used for MCP's shared secret (ADR-017). Shows a real
+level (`dependencies=[Depends(require_admin)]`), checking the
+authenticated caller's real `User.is_admin` column (ADR-036) — until
+this session, a small, explicit `X-User-Id` allowlist (`ADMIN_USER_IDS`),
+now removed entirely now that real accounts exist. Still not full
+RBAC — no per-action permissions, just one boolean — the same
+proportionate "pull forward a small slice of real auth" move already
+used for MCP's shared secret (ADR-017). Shows a real
 audit log viewer (`AuditRepository.get_all_recent_entries`) and a real
 document-permissions list (`PermissionRepository.list_all_permissions`),
 both entirely built from components already extracted in prior
@@ -696,18 +744,51 @@ Talks to: the ingestion service. If it disappeared, there'd be no way
 to get a file into the system, or to check on one already uploading,
 at all.
 
-**Identity middleware (`app/core/middleware.py`)** — the newest
-addition, `user_id_middleware`, sits alongside the correlation ID
-middleware and stamps every request with whoever's calling, read from
-an `X-User-Id` header. Unlike a correlation ID, this one can't be
-invented when missing — no header means an immediate 401, logged to
-the audit table as its own event. Exempts only Swagger UI's own pages
-(`/docs`, `/openapi.json`, `/redoc`), so the API's documentation stays
-browsable without an identity. Talks to: the audit log directly (it
-opens its own database session, the same way MCP's tools do, since
-middleware runs outside FastAPI's dependency injection). If it
-disappeared, every permission check downstream would have nothing to
-check against.
+**Identity middleware (`app/core/middleware.py`)** — `user_id_middleware`
+sits alongside the correlation ID middleware and stamps every request
+with whoever's calling — but, since ADR-036, it no longer just believes
+what it's told. It branches on the request path: anything under `/mcp`
+still trusts a self-asserted `X-User-Id` header, MCP's own deliberately
+separate trust model (an MCP client can't hold a browser session cookie
+the way REST callers now do); everything else must present a
+`session_token` cookie that resolves, via `SessionRepository`, to a
+real, unexpired row in the `sessions` table. `/auth/signup` and
+`/auth/login` are exempt from this check entirely — they're how a
+caller gets a session in the first place. Unlike a correlation ID, this
+one can't be invented when missing — no valid identity means an
+immediate 401, logged to the audit table as its own event. Also exempts
+Swagger UI's own pages (`/docs`, `/openapi.json`, `/redoc`), so the
+API's documentation stays browsable without an identity. Talks to: the
+audit log directly (it opens its own database session, the same way
+MCP's tools do, since middleware runs outside FastAPI's dependency
+injection) and, for REST requests, the new `sessions`/`users` tables via
+`SessionRepository`. If it disappeared, every permission check
+downstream would have nothing to check against.
+
+**Auth (`app/api/auth.py`, `app/services/auth_service.py`,
+`app/repositories/user_repository.py`,
+`app/repositories/session_repository.py`, `app/models/user.py`,
+`app/models/session.py`)** — added with ADR-036, the only place in the
+codebase that ever touches a real password, hashed or plain.
+`AuthService.sign_up` hashes a password with Argon2id (`argon2-cffi`,
+used directly, not through the unmaintained `passlib`) and inserts a
+`User` row; `log_in` verifies the hash and, on success, creates a
+`Session` row with a random `secrets.token_urlsafe(32)` token — a
+different value from the row's own `id`, deliberately, since `id`s
+routinely appear in this project's log lines and a leaked `id` must
+never be equivalent to a leaked login; `log_out` deletes the session
+row. A wrong password and a nonexistent email raise the identical
+`InvalidCredentialsError`, so a login attempt can never be used to
+discover which emails have accounts. The API layer
+(`POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`,
+`GET /auth/me`) sets/clears the session cookie and writes an audit log
+entry for each state-changing action, the same pattern every other
+state change in this project already follows. Talks to: the `users`
+and `sessions` tables, and (indirectly, as the thing every other route
+now depends on) `user_id_middleware`. If it disappeared, nobody could
+log in, and — since the middleware now requires a real session for
+every REST request — nothing else in the system would be reachable
+either.
 
 **Permission repository (`app/repositories/permission_repository.py`)**
 — all direct database access for who can see which document.
@@ -1284,21 +1365,39 @@ check at all — every earlier page only ever exposed the caller's own
 data, so leaving them open was proportionate to a project with no real
 users yet; a page that shows *every* user's documents, permissions,
 and activity to anyone who sets any `X-User-Id` header is a real,
-different kind of exposure, not more of the same. `require_admin` is
-deliberately a small, explicit allowlist, not RBAC — the same "pull
+different kind of exposure, not more of the same. `require_admin` was,
+at the time, a small, explicit allowlist, not RBAC — the same "pull
 forward a small slice of real auth" move already used for MCP's shared
-secret (ADR-017), attached once at the router level so every admin
-route inherits it without repeating the check. Tenant management
+secret (ADR-017); ADR-036 later replaced the allowlist with a real
+`User.is_admin` column once real accounts existed, but kept the same
+attach-once-at-the-router-level shape. Tenant management
 stayed a placeholder for the same reason two other data-less widgets
 did on earlier pages: there's no real data model behind it, and
 building one just for this page would mean quietly implementing a
 piece of item 14 under a different feature's name. See ADR-034.
 
+We chose server-side session cookies over JWT (a self-contained signed
+token needing no server-side lookup) and over handing the whole login
+flow to an external identity provider, for real authentication. JWT
+was rejected specifically because it trades away the mechanics this
+pass exists to build hands-on — hashing, session state, revocation —
+for a scheme that needs none of them, and can't even be revoked before
+it expires without adding that state back anyway; an external provider
+was rejected for the same reason, one step further removed, since it
+leaves nothing to actually build. Argon2id was chosen for password
+hashing over the older bcrypt default, verified live rather than
+assumed: OWASP's own cheat sheet promoted it to the top recommendation
+in 2024. MCP was deliberately left on its existing shared-secret model
+rather than migrated — it can't hold a browser session cookie the way
+REST callers now do, so folding it in would be new scope, not a
+migration of this one. See ADR-036.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
-file, carrying an `X-User-Id` header identifying who they are; missing
-it, the request is rejected before any of this runs. The system checks
+file, with their logged-in session's cookie identifying who they are —
+checked against the `sessions` table before any of this runs; missing
+or expired, the request is rejected right there. The system checks
 the file type is supported, creates a database record for the document
 immediately (marked "pending"), immediately grants the uploader access
 to it, writes an audit log entry, schedules the rest of the work as a
@@ -1336,7 +1435,7 @@ to back, in the same call, and the tool's return value describes the
 document's actual final state, not an in-progress one.
 
 **Asking a question:** a user sends a question to the query address,
-again carrying their `X-User-Id`. The question is turned into a
+again proven by their session cookie. The question is turned into a
 meaning-vector using the same embedding model used for chunks, so the
 two are comparable. Postgres finds 20 candidate chunks by vector
 similarity and, separately, 20 by keyword match — both searches joined
@@ -1644,11 +1743,19 @@ into. Acceptable for a single-tenant learning project; a real
 multi-tenant deployment would need ownership tracking before this
 rule could be trusted. See ADR-019.
 
-**Identity is entirely self-asserted** — `X-User-Id` is just a header
-value; nothing verifies a caller actually is who they claim to be. The
-same honest trade-off MCP's shared secret already accepted, and for the
-same reason: proportionate for a project with no real users yet, closed
-properly once build-order item 14 (real auth) exists.
+**Identity is self-asserted over MCP, proven over REST** — ADR-036
+closed this for REST: a caller now needs a real password-verified
+session, not just a header claiming a name. MCP keeps the old trade-off
+deliberately, for the reason named there — it isn't a browser and can't
+hold a session cookie the way REST callers now do. What's still
+genuinely open: there's no rate limiting on `/auth/login` yet, so
+nothing beyond Argon2id's own deliberately-slow hashing cost stands
+between a script and a password-guessing attempt; sessions live for a
+fixed 7 days with no sliding renewal or revoke-all-sessions control;
+and the frontend hasn't been updated to use any of this yet, so it's
+currently unable to reach the backend at all. Multi-tenancy — real
+isolation between separate companies' data, as opposed to one shared
+pool of users — is still entirely unbuilt, its own future decision.
 
 **Azure AI Language itself goes down during PII detection** — after 3
 failures in 60 seconds, its own independent circuit breaker opens,
@@ -2153,11 +2260,12 @@ capability; an ACL entry only ever says something about one specific
 document and one specific user.
 
 **Identity vs. authentication** — identity is *who a request claims to
-be*; authentication is *proving that claim is true*. This project has
-identity (`X-User-Id`) without authentication — nothing verifies the
-header's value is genuine, only that it's present. Real authentication
-(passwords, sessions, tokens someone can't just type in) is
-build-order item 14, not built yet.
+be*; authentication is *proving that claim is true*. This project now
+has both for its REST API (ADR-036): a session cookie only exists
+because a password was already verified, so it proves identity rather
+than just asserting it. MCP still has identity without authentication
+— a self-asserted `X-User-Id` header, unchanged by design — and
+multi-tenancy, the other half of build-order item 14, isn't built yet.
 
 **Idempotent** — an operation that produces the same end result no
 matter how many times it runs. `grant_access`'s `ON CONFLICT DO

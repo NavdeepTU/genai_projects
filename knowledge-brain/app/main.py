@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.api.admin import router as admin_router
 from app.api.analytics import router as analytics_router
+from app.api.auth import router as auth_router
 from app.api.dashboard import router as dashboard_router
 from app.api.documents import router as documents_router
 from app.api.query import router as query_router
@@ -39,6 +40,7 @@ app.middleware("http")(correlation_id_middleware)
 
 app.include_router(admin_router)
 app.include_router(analytics_router)
+app.include_router(auth_router)
 app.include_router(dashboard_router)
 app.include_router(documents_router)
 app.include_router(query_router)

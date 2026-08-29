@@ -1031,7 +1031,7 @@
       <div class="node">
         <span class="status-pill done">Built</span>
         <span class="label">GET /admin — require_admin gated</span>
-        <span class="path mono">ADMIN_USER_IDS allowlist · get_all_recent_entries · list_all_permissions</span>
+        <span class="path mono">real User.is_admin column (was ADMIN_USER_IDS allowlist — see Feature 17) · get_all_recent_entries · list_all_permissions</span>
       </div>
       <div class="arrow">
         <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -1049,13 +1049,53 @@
     <p class="caveat"><strong>The Query page's answer renders all at once, not token-by-token, and has no persisted history:</strong> both are named, deliberate scope cuts, not gaps found later — real streaming needs item 19's SSE endpoint, and a real sidebar needs item 18's conversation storage and context-condensing, neither built yet. What did ship: <code>/query</code>'s response now carries <code>sources</code> (the actual chunks used, with filenames) and <code>confidence</code> (<code>null</code>, not <code>0.0</code>, when the reranker was unavailable) — both pulled from data the pipeline already computed, nothing newly calculated. See <a href="adr/ADR-031-query-page.md">ADR-031</a>.</p>
     <p class="caveat"><strong>Two of the Dashboard's four widgets are honest "not tracked yet" placeholders, not fabricated numbers:</strong> retrieval accuracy trend and cost per query have no real data behind them today — accuracy has no ground-truth signal for a live question, cost needs token-level instrumentation that's build-order item 15's job. A live-confidence-as-proxy option was considered and rejected for accuracy specifically, since confidence and correctness are different claims. Also this session: a scaffolding violation from the Query page session (business logic sitting in the route handler, not a service) was found while writing tests and fixed — moved into <code>RetrievalService.build_sources_and_confidence</code>, verified unchanged live behavior before/after. Test suite grew 12 → 19 passing. See <a href="adr/ADR-032-dashboard-page.md">ADR-032</a>.</p>
     <p class="caveat"><strong>Average response time is a genuinely new metric — nothing timed a query before this session:</strong> <code>RetrievalService.run_query</code> now wraps the whole graph invocation with <code>time.monotonic()</code>, captured once so both REST and MCP get an honest average, not duplicated per caller — which meant deleting the now-dead <code>answer_question</code> method MCP used to call instead. A <code>/code-review</code> pass after the initial build caught a real correctness bug: the volume chart spaced points by array index while the backend only emitted a point for days with an actual query, silently compressing real gaps in usage into apparent consecutive activity — fixed by zero-filling every day in the 30-day window. The same pass also found the <code>query_made</code> audit write hand-duplicated between REST and MCP (already causing one real drift this session), consolidated into <code>AuditRepository.log_query_made</code>. Test suite grew 19 → 25 passing. See <a href="adr/ADR-033-analytics-page.md">ADR-033</a>.</p>
-    <p class="caveat"><strong>The Admin page is the first page in this project that needed its own access check:</strong> every earlier page only ever exposed the caller's own data; this one reads across every user by design. A new <code>require_admin</code> dependency, attached once at the router level, checks the caller against a small allowlist (<code>ADMIN_USER_IDS</code>) — not real RBAC, the same proportionate trade-off already made for MCP's shared secret. Two new repository reads (<code>get_all_recent_entries</code>, <code>list_all_permissions</code>) are the first in this codebase to deliberately span every user; neither does its own authorization — that's <code>require_admin</code>'s job. Tenant management stayed an honest placeholder — no tenant concept exists anywhere in this system yet. A related gap surfaced in conversation, deliberately not built: PII-flagged documents have no reviewer workflow, and no content persisted to review even if one existed — tracked as its own future item. Test suite grew 25 → 30 passing. See <a href="adr/ADR-034-admin-page.md">ADR-034</a>.</p>
+    <p class="caveat"><strong>The Admin page is the first page in this project that needed its own access check:</strong> every earlier page only ever exposed the caller's own data; this one reads across every user by design. A new <code>require_admin</code> dependency, attached once at the router level, originally checked the caller against a small allowlist (<code>ADMIN_USER_IDS</code>) — not real RBAC, the same proportionate trade-off already made for MCP's shared secret. Upgraded to check a real <code>User.is_admin</code> column once real accounts existed — see Feature 17. Two new repository reads (<code>get_all_recent_entries</code>, <code>list_all_permissions</code>) are the first in this codebase to deliberately span every user; neither does its own authorization — that's <code>require_admin</code>'s job. Tenant management stayed an honest placeholder — no tenant concept exists anywhere in this system yet. A related gap surfaced in conversation, deliberately not built: PII-flagged documents have no reviewer workflow, and no content persisted to review even if one existed — tracked as its own future item. Test suite grew 25 → 30 passing. See <a href="adr/ADR-034-admin-page.md">ADR-034</a>.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 17 — Real authentication <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
+      <span class="count">build-order item 14, backend half only · frontend wiring + multi-tenancy not started</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">users + sessions tables</span>
+        <span class="path mono">app/models/user.py · app/models/session.py · Argon2id hash, random session token</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">AuthService</span>
+        <span class="path mono">app/services/auth_service.py · signup / login / logout, identical error on wrong password vs. unknown email</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">/auth/signup, /login, /logout, /me</span>
+        <span class="path mono">app/api/auth.py · sets/clears httponly session cookie, audit-logs each action</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">user_id_middleware rewritten</span>
+        <span class="path mono">REST: real session cookie required · /mcp: unchanged shared-key + X-User-Id</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Not built, deferred on purpose:</strong> the frontend still sends the old <code>X-User-Id</code> header and has no login/signup UI, so every page is currently unable to reach the backend — wiring it up (login/signup pages, cookie forwarding through the Next.js Route Handlers, a logout control) is a dedicated future session, agreed up front. Multi-tenancy (real isolation between separate companies' data) is equally untouched — its own future decision. MCP was deliberately left on its existing shared-API-key model, not migrated — it can't hold a browser session cookie the way REST callers now do.</p>
+    <p class="caveat"><strong>Verified:</strong> app import check (<code>uv run python -c "import app.main"</code>) and the full test suite both pass after every change. New <code>tests/test_auth.py</code> plus a rewritten <code>tests/test_admin.py</code> (now exercised against real <code>User</code> rows instead of a mocked allowlist). Test suite grew 30 → 39 passing. See <a href="adr/ADR-036-real-authentication-session-cookies.md">ADR-036</a>.</p>
   </section>
 
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">14</span>Auth &amp; multi-tenancy hardening</li>
       <li><span class="n mono">15</span>LLM/RAG observability</li>
       <li><span class="n mono">16</span>Real-time answer guardrails</li>
       <li><span class="n mono">17</span>Multi-agent federated retrieval</li>
