@@ -243,7 +243,17 @@ resource "azurerm_container_app" "backend" {
   }
 
   template {
-    min_replicas = 1
+    # 0, not 1: lets the backend scale to zero after 5 minutes of no
+    # traffic (Container Apps' default cool-down period), eliminating
+    # the vCPU/GiB-second billing that ran up ~₹617/month while this
+    # sat at a permanent min_replicas = 1. Safe specifically because
+    # ingress is enabled below — Container Apps' default HTTP scale
+    # rule wakes a fresh replica on the next incoming request
+    # automatically, whether from APIM, the direct URL, or MCP. The
+    # real trade-off: that first request after idle time pays a
+    # several-second cold start (FastAPI startup, plus the MCP
+    # lifespan's session_manager.run()).
+    min_replicas = 0
     max_replicas = 1
 
     container {

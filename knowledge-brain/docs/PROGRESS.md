@@ -2993,3 +2993,101 @@ workflow (newly scoped, not yet built), the Azure cost fix (open,
 deferred), and the still-real test coverage gaps named above. At 3–4
 hours/day, that's roughly 13–17 working days left, assuming no further
 scope changes.
+
+## Session: 2026-08-29 — Container App scale-to-zero (real Azure cost fix)
+
+### What we built
+- Picked the Azure cost discussion back up from last session, this
+  time following it all the way through to a real, applied
+  infrastructure change. Deep-dived Azure Container Apps' actual
+  Consumption-plan billing model — verified directly against
+  Microsoft's own documentation, not recalled from memory: compute has
+  three real states (active, a reduced-but-nonzero idle rate only
+  reachable when `min_replicas` is set above zero, and genuinely free
+  at zero replicas), a default 5-minute (300-second) cool-down before
+  the last replica actually scales to zero, and an explicit warning
+  that `min_replicas = 0` without ingress enabled can strand an app
+  permanently — checked directly against `infra/main.tf` and confirmed
+  ingress is already enabled, so that danger case doesn't apply here.
+- Made the actual fix: `infra/main.tf`'s `min_replicas` changed from
+  `1` to `0` on the backend Container App, with the full reasoning
+  left as an inline comment. I made the code edit; you ran `terraform
+  plan` and `terraform apply` yourself, per this project's own
+  external-tools rule — confirmed clean (`0 to add, 1 to change, 0 to
+  destroyed`), no resource recreation, no conflict with ADR-023's
+  existing `lifecycle { ignore_changes }` block (which only protects
+  the CI-owned `image` field, not `min_replicas`).
+- Walked through Postgres' *separate* pricing model too (compute vs.
+  storage vs. backup storage, each billed independently), confirmed
+  it's currently covered by Azure's first-12-months-free grant for
+  this exact VM size and storage amount, and confirmed Postgres has no
+  automatic wake-on-request mechanism the way Container Apps does —
+  the real reason a manual start/stop script pair makes sense for
+  Postgres specifically but would be redundant, not just unnecessary,
+  for Container Apps.
+- Gave you the exact verification commands to run yourself
+  (`curl -w` against `/docs`, before and after a genuine 5+ minute
+  idle window) rather than checking the live cold-start behavior
+  myself — the deployed backend is external infrastructure, same rule
+  as everything else in `infra/`.
+- One new ADR: [`ADR-035`](adr/ADR-035-container-app-scale-to-zero.md)
+  (the billing-model research, the ingress safety check, and the
+  accepted cold-start trade-off).
+
+### What I struggled with
+- One real correction to my own earlier answer, caught and fixed
+  before it mattered: originally described "reduce cost to $0" and
+  "at least 1 instance running = charged" in slightly imprecise terms.
+  Verified against Microsoft's actual billing documentation mid-
+  conversation and corrected both — Postgres storage bills even while
+  stopped (never truly $0 without deleting the server), and Container
+  Apps has a real third billing state (reduced-rate idle, not just
+  active-vs-free) that only existed under the *old* `min_replicas = 1`
+  config, not the new one.
+- No corrections needed on the interview-prep questions — correctly
+  reasoned through why Postgres and Container Apps need different
+  cost-saving mechanisms (one has no auto-wake capability, one has it
+  built in), and why this decision is explicitly framed as revisited
+  later, not a permanent optimization, once real traffic exists.
+
+### Concepts to revisit
+- The `min_replicas = 0` decision is explicitly not permanent — named
+  in both the ADR and this log as something to reconsider the moment
+  this system serves real, continuous traffic rather than occasional
+  dev sessions.
+- Postgres' own cost fix (a start/stop script pair) is still fully
+  open — scoped and understood, not yet written, since it saves
+  nothing until the 12-month free-tier grant on this exact server
+  actually expires.
+- The stray `operator_ip_address` value sitting in `terraform.tfvars`
+  with no matching `variable` block (surfaced as a harmless warning
+  during `terraform plan`) — almost certainly a leftover from
+  ADR-026's abandoned network-IP-restriction design, worth a cleanup
+  pass sometime, not urgent.
+
+### What's next
+- The PII review workflow, scoped in the previous session, is still
+  the most concrete unbuilt feature: needs a decision about where
+  flagged content is persisted for review, plus a `require_admin`-gated
+  approve/reject action.
+- Postgres' start/stop scripts, whenever the free-tier window is
+  actually close to expiring — not urgent today.
+- Everything from prior sessions' "what's next" still stands unchanged:
+  real accuracy/cost tracking (item 15), real per-caller rate
+  limiting/network isolation for APIM, real auth/multi-tenancy (item
+  14), the missing migration tool, and the rest of the build order
+  beyond the frontend.
+
+**Estimated completion: ~61% of the total project, by weighted
+effort** — unchanged from last session. This was real, valuable
+operational work — a genuine cost fix, applied and verified live, with
+real research behind it — but it's infrastructure hygiene on top of
+already-built features, not new build-order scope, so it doesn't move
+the completion estimate on its own. Rough remaining effort: ~51 hours,
+unchanged from last session's estimate — real auth/multi-tenancy (item
+14), APIM's remaining gaps, the missing migration tool, guardrails
+(item 16), multi-agent federated retrieval (item 17), conversation
+history (item 18), streamed generation (item 19), the PII review
+workflow, Postgres' still-open cost fix, and the still-real test
+coverage gaps named in prior sessions. At 3–4 hours/day, that's
+roughly 13–17 working days left, assuming no further scope changes.

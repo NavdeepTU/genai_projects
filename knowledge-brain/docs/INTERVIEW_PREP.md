@@ -2340,6 +2340,98 @@ real.
 
 ---
 
+## Feature 22: Scaling the Deployed Backend to Zero
+
+**What does this feature do, in one sentence?**
+Changes one Terraform value (`min_replicas` from `1` to `0`) on the
+already-deployed Container App so it stops running — and being billed
+for — continuously, and instead scales down to nothing after 5 minutes
+of no traffic, waking a fresh instance automatically on the next
+request.
+
+```mermaid
+flowchart LR
+    IDLE["No traffic for 5 minutes<br/>(Container Apps' default cool-down)"] --> ZERO["Replica count: 0<br/>no compute billing"]
+    ZERO -->|"next request arrives<br/>(REST, direct URL, or MCP)"| WAKE["Fresh replica boots —<br/>real cold start, several seconds"]
+    WAKE --> WARM["Warm — fast responses<br/>until idle again"]
+    WARM --> IDLE
+```
+
+**How did you find this cost was even happening — did you go looking
+for it, or was it reported?**
+Reported — the user checked Azure Cost Management directly and shared
+the actual cost breakdown: Container Apps was the single largest line
+item, larger than every other resource combined. The next step was
+verifying the *cause* against the actual deployed configuration rather
+than reasoning from generic Azure pricing knowledge — reading
+`infra/main.tf` directly found `min_replicas = 1` immediately, no
+speculation needed.
+
+**Why does `min_replicas = 1` cost real money even if the app never
+receives a single request?**
+Because Consumption-plan Container Apps bills by *time a replica
+exists*, not by requests served — vCPU-seconds and GiB-seconds,
+metered continuously for as long as a replica is running, regardless
+of whether it's doing anything. `min_replicas = 1` guarantees exactly
+one replica exists at all times, so that meter runs 24/7, the entire
+month, whether or not any real traffic ever arrives.
+
+**You changed the value to 0 rather than building a manual start/stop
+script the way you discussed for Postgres. Why treat these two
+resources differently?**
+Because they don't have the same capabilities. Postgres Flexible
+Server has no automatic "wake on incoming connection" mechanism — a
+stopped Postgres server stays stopped until something explicitly
+starts it again, so a script toggled by the developer is the only
+lever available. Container Apps' Consumption plan is built around
+exactly the opposite behavior: its default HTTP scale rule
+automatically wakes a fresh replica the moment a real request arrives.
+Building a manual toggle for Container Apps would mean reimplementing,
+by hand, behavior the platform already provides for free — worse than
+unnecessary, since forgetting to run the "start" half before a session
+would just mean a slow first request, not a broken one, so there's
+nothing solid to gain from doing it manually.
+
+**Before applying this, you specifically checked whether it was safe.
+What could have gone wrong, and how did you rule it out?**
+Microsoft's own documentation carries an explicit warning: a Container
+App with `min_replicas = 0` and *no ingress enabled* can get
+permanently stuck at zero replicas, because without ingress there's no
+inbound HTTP path capable of triggering the platform's automatic
+wake-up. Before treating this as safe, checked `infra/main.tf`
+directly rather than assuming: `ingress { external_enabled = true,
+... }` is already configured, since APIM and the direct backend URL
+both already depend on it. That specific failure mode doesn't apply
+here — confirmed against the real deployed config, not inferred from
+"this is probably fine."
+
+**What's the actual, ongoing cost of this decision — not money, since
+that's the whole point, but the real trade-off?**
+Cold start. Microsoft documents a 300-second (5-minute) default
+cool-down before the last remaining replica actually scales to zero,
+and once it does, the next request pays real startup latency — FastAPI
+initializing, plus the MCP lifespan's `session_manager.run()` — before
+it responds. Every request after that stays fast until the app goes
+idle again. It's a real, felt cost for a real user, just not a
+monetary one — acceptable here because this project's actual traffic
+is occasional development sessions, not continuous real usage.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+Revert it, deliberately — this isn't a "set once, forget forever"
+optimization. The moment this system has real users hitting it
+throughout the day rather than occasional dev sessions, a
+several-second delay on the first request after any lull becomes a
+genuine user-facing latency problem, not a curiosity. At that point
+`min_replicas` should move back toward `1`, or the app should get real
+autoscaling rules — trading the now-eliminated idle cost back for
+consistent responsiveness, which is exactly the right trade at real
+scale, the opposite of what's right for an idle learning project.
+
+*Further reading: [Microsoft Learn — Scaling in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/scale-app) — the official source for the exact cool-down/scale-behavior numbers used in this decision, and for the ingress warning that was checked before applying it.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

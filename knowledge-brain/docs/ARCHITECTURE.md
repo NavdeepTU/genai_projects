@@ -197,7 +197,27 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the Admin page (build-order item
+**What's new since the last update:** the deployed backend's Container
+App now scales to zero. Checking Azure Cost Management for the first
+time since deployment found the largest single cost line was the
+Container App itself — traced directly to `infra/main.tf`'s
+`min_replicas = 1`, which had kept one instance running continuously
+since first deployment, billed the whole time regardless of whether
+any real request ever arrived. Changed to `min_replicas = 0`: Container
+Apps' own default HTTP scale rule wakes a fresh replica automatically
+on the next request after 5 minutes of idle time (Microsoft's
+documented default cool-down period), no manual toggle needed, unlike
+the Postgres start/stop approach discussed but not built. Confirmed
+safe first, not assumed: Microsoft's own docs warn `min_replicas = 0`
+without ingress enabled can strand an app at zero replicas
+permanently — this backend already has ingress enabled (`external_enabled
+= true`, needed for APIM and the direct URL regardless), so that
+danger case doesn't apply. The real, accepted cost: a several-second
+cold start on the first request after any idle period, affecting MCP
+identically to REST, since both run in the same container. See
+ADR-035.
+
+**What's new before that:** the Admin page (build-order item
 13's fifth and final planned page) now exists, completing the
 originally planned frontend. It's a bird's-eye view over data every
 other page already reads — documents, permissions, the audit log —
@@ -1528,6 +1548,20 @@ created the risk shouldn't be the one clearing it, the same
 separation-of-duties reasoning the Admin page itself exists for.
 Tracked as a distinct future item, not folded into ADR-034.
 
+**The deployed backend now pays a real cold-start delay after any idle
+period** — `min_replicas = 0` (ADR-035) means the first request after
+5+ minutes of no traffic waits for a fresh replica to boot (FastAPI
+startup, plus the MCP lifespan's `session_manager.run()`) before it
+responds, several real seconds rather than instant. This affects MCP
+identically to REST, since both share the same container — a client
+like Claude Desktop calling `ask_knowledge_base` after idle time pays
+the same delay a browser hitting the REST API would. A deliberate,
+accepted trade-off for a project with occasional development traffic,
+not continuous real usage — the moment that changes, `min_replicas`
+should move back toward `1` (or real autoscaling), trading the
+now-eliminated idle cost back for consistent responsiveness. See
+ADR-035.
+
 **The audit log's tamper-proofing is currently code-level only** — the
 repository has no update/delete methods, but the database connection
 itself is a superuser and could bypass a real database-level restriction.
@@ -1742,6 +1776,16 @@ and the automated one (GitHub Actions CI/CD) are verified live, the
 latter with a real, unassisted, successful end-to-end run. API
 Management (item 11) has since been built too — see the "What's new"
 section above and ADR-026 for what it does and doesn't actually close.
+
+The backend now scales to zero when idle (`min_replicas = 0`,
+ADR-035), rather than running one instance continuously — found by
+actually reviewing Azure Cost Management, not by anticipating the
+cost ahead of time. Container Apps' own default HTTP scale rule wakes
+a fresh instance automatically on the next real request after 5
+minutes of no traffic; the trade-off is a real, several-second cold
+start on that first request, accepted deliberately given this
+project's actual usage pattern (occasional development sessions, not
+continuous real traffic).
 
 Getting there took five separate phases, each documented in its own
 ADR: [ADR-020](adr/ADR-020-azure-deployment-infrastructure.md)

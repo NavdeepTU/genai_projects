@@ -79,12 +79,17 @@ and why it was made that way.
   Container App, wired together with a Managed Identity instead of any
   raw secret; Key Vault holds all 7 real secrets the app needs. Its
   public URL returns a real HTTP 200 with a genuine Swagger UI and a
-  correlation ID header. See
+  correlation ID header. The Container App scales to zero after 5
+  minutes of no traffic (Azure Cost Management surfaced it running,
+  and billing, continuously since first deploy) — the first request
+  after any idle period pays a real several-second cold start, both
+  through the REST API and MCP, which share the same container. See
   [`ADR-020`](docs/adr/ADR-020-azure-deployment-infrastructure.md),
-  [`ADR-021`](docs/adr/ADR-021-containerizing-the-backend.md), and
+  [`ADR-021`](docs/adr/ADR-021-containerizing-the-backend.md),
   [`ADR-022`](docs/adr/ADR-022-deploying-the-real-backend-image.md)
   (which also covers a real deploy failure — an image built for the
-  wrong CPU architecture — diagnosed and fixed live).
+  wrong CPU architecture — diagnosed and fixed live), and
+  [`ADR-035`](docs/adr/ADR-035-container-app-scale-to-zero.md).
 - **GitHub Actions CI/CD** — an OIDC-authenticated workflow (no stored
   Azure secret) that tests, builds for `amd64` explicitly, pushes, and
   deploys on every push to `main`. Verified live with a real,
