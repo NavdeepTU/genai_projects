@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { BACKEND_GATEWAY_SECRET, BACKEND_URL, CURRENT_USER_ID } from "@/lib/config";
+import { BACKEND_URL } from "@/lib/config";
+import { backendAuthHeaders } from "@/lib/auth";
 
 // Same proxy reasoning as the document upload/status routes: the browser
 // calls this same-origin path, which then makes the real, secret-bearing
@@ -11,11 +12,7 @@ export async function POST(request: Request) {
 
   const response = await fetch(`${BACKEND_URL}/query`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
+    headers: { "Content-Type": "application/json", ...(await backendAuthHeaders()) },
     body: JSON.stringify(body),
   });
 

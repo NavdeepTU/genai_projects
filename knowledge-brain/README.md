@@ -73,22 +73,28 @@ and why it was made that way.
   snippets alike — is filtered by a SQL join against a permissions
   table before results are ever ranked, not after. See
   [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
-- **Real authentication (backend half)** — email/password login with
-  the project's own server-side session cookies, not JWT and not an
-  external identity provider, chosen specifically to build the real
-  mechanics hands-on. `POST /auth/signup` hashes a password with
-  Argon2id (`argon2-cffi`, not the unmaintained `passlib`) before it's
-  ever stored; `POST /auth/login` verifies it and hands back a random,
+- **Real authentication** — email/password login with the project's
+  own server-side session cookies, not JWT and not an external
+  identity provider, chosen specifically to build the real mechanics
+  hands-on. `POST /auth/signup` hashes a password with Argon2id
+  (`argon2-cffi`, not the unmaintained `passlib`) before it's ever
+  stored; `POST /auth/login` verifies it and hands back a random,
   unguessable session token as an `httponly` cookie — never the
   session row's own database id, so a value that routinely appears in
   this project's logs is never the same value that would let someone
-  log in. Every REST endpoint now requires that cookie to resolve to a
+  log in. Every REST endpoint requires that cookie to resolve to a
   real, unexpired session; MCP is deliberately unchanged, since a
   non-browser client can't hold a session cookie the same way — it
   keeps its existing shared-API-key-plus-`X-User-Id` model. The
-  frontend has **not** been updated to use this yet (see "Not built
-  yet" below). See
-  [`ADR-036`](docs/adr/ADR-036-real-authentication-session-cookies.md).
+  frontend has real `/login` and `/signup` pages now too: a route
+  handler calls the backend server-to-server and re-issues the
+  resulting session token as this app's own cookie, and a cheap
+  edge-level check (`proxy.ts`) redirects an unauthenticated visitor
+  to `/login` before a protected page ever renders. See
+  [`ADR-036`](docs/adr/ADR-036-real-authentication-session-cookies.md)
+  (backend) and
+  [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md)
+  (frontend).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -158,27 +164,22 @@ and why it was made that way.
   has no tenant concept at all yet). Every client-triggered action
   talks only to same-origin Next.js Route Handlers, which proxy the
   real, secret-bearing calls to the backend server-to-server, so
-  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript.
-  **Currently broken against the backend** — see "Not built yet"
-  below. See
+  `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript. See
   [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md),
   [`ADR-029`](docs/adr/ADR-029-document-library-page.md),
   [`ADR-030`](docs/adr/ADR-030-background-upload-processing.md),
   [`ADR-031`](docs/adr/ADR-031-query-page.md),
   [`ADR-032`](docs/adr/ADR-032-dashboard-page.md),
-  [`ADR-033`](docs/adr/ADR-033-analytics-page.md), and
-  [`ADR-034`](docs/adr/ADR-034-admin-page.md).
+  [`ADR-033`](docs/adr/ADR-033-analytics-page.md),
+  [`ADR-034`](docs/adr/ADR-034-admin-page.md), and
+  [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md).
 
-**Not built yet:** the frontend hasn't been updated to log in at all —
-it still sends the old self-asserted `X-User-Id` header, which the
-backend no longer accepts for REST, so every page currently fails to
-load data until a future session adds real login/signup screens and
-cookie forwarding. Multi-tenancy is equally unbuilt — real auth
-(above) and multi-tenancy are separate decisions, and only the former
-exists so far. Also not built: a review workflow for documents flagged
-for PII (they're correctly held back from search today, but nothing
-yet lets an admin release or reject one — see `ADR-034`). See
-`CLAUDE.md`'s build order for the full plan.
+**Not built yet:** multi-tenancy — real auth (above) and multi-tenancy
+are separate decisions, and only the former exists so far. Also not
+built: a review workflow for documents flagged for PII (they're
+correctly held back from search today, but nothing yet lets an admin
+release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
+for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
 - The automated test suite (`tests/`) covers ingestion end-to-end,
@@ -419,15 +420,19 @@ npm run dev
 ```
 
 Visit `http://localhost:3000`. All five planned pages exist (Dashboard,
-Document Library, Query, Analytics, Admin), but **none of them will
-load data right now**: the frontend still sends a hardcoded
-`X-User-Id: dev-user` header (see
-[`ADR-029`](docs/adr/ADR-029-document-library-page.md)), and the
-backend no longer accepts that for any REST call — see real
-authentication, above. Every page will show its error state until a
-future session adds real login/signup screens and switches the
-frontend to forward a session cookie instead. Manual `curl` testing
-against the backend (above) is unaffected.
+Document Library, Query, Analytics, Admin) — you'll land on `/login`
+first if you don't have a session yet. Sign up (or log in, if you
+already have an account) and you're in; see real authentication, above,
+and [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md) for
+how the frontend and backend sessions connect.
+
+One real gotcha worth knowing about: documents uploaded through the
+browser *before* real auth existed were granted to a placeholder
+identity (`"dev-user"`) that no real login can ever produce again — if
+you're picking this project back up after that change, those old
+documents will look like they've vanished (they're still in Postgres,
+just permanently unreachable through the app now). Re-upload them under
+your real account.
 
 ### Running the evaluation harness
 

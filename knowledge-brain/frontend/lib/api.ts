@@ -1,4 +1,10 @@
-import { BACKEND_GATEWAY_SECRET, BACKEND_URL, CURRENT_USER_ID } from "@/lib/config";
+// Types and client-safe calls only. The server-only calls (getDashboard,
+// getAnalytics, getAdmin, getDocuments) live in lib/server-api.ts instead —
+// splitting them out isn't just organization, it's required: those import
+// lib/auth.ts, which imports next/headers, and next/headers can't be
+// reached from a Client Component's bundle even indirectly. Keeping
+// server-only code out of this file is what keeps query/page.tsx (a
+// Client Component that imports postQuery from here) buildable at all.
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed" | "pending_review";
 
@@ -34,7 +40,7 @@ export type DocumentStatusResponse = {
   correlation_id: string;
 };
 
-type DocumentListResponse = {
+export type DocumentListResponse = {
   documents: DocumentListItem[];
   correlation_id: string;
 };
@@ -52,27 +58,6 @@ export type QueryResponse = {
   correlation_id: string;
 };
 
-// Called from the browser (a Client Component's submit handler), so this
-// hits the same-origin Next.js proxy at /api/query, never the backend
-// directly — the proxy is what attaches X-User-Id and the gateway secret
-// server-side. Unlike getDocuments below, this can't take BACKEND_URL as
-// a parameter, since a browser fetch to a different origin would need
-// CORS the backend doesn't have configured.
-export async function postQuery(question: string): Promise<QueryResponse> {
-  const response = await fetch("/api/query", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
-  });
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data?.detail ?? `Query failed (status ${response.status})`);
-  }
-
-  return data;
-}
-
 export type RecentQuery = {
   question: string;
   asked_at: string;
@@ -83,21 +68,6 @@ export type DashboardResponse = {
   recent_queries: RecentQuery[];
   correlation_id: string;
 };
-
-export async function getDashboard(): Promise<DashboardResponse> {
-  const response = await fetch(`${BACKEND_URL}/dashboard`, {
-    headers: {
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to load dashboard (status ${response.status})`);
-  }
-
-  return response.json();
-}
 
 export type QueryVolumePoint = {
   date: string;
@@ -115,21 +85,6 @@ export type AnalyticsResponse = {
   avg_response_time_ms: number | null;
   correlation_id: string;
 };
-
-export async function getAnalytics(): Promise<AnalyticsResponse> {
-  const response = await fetch(`${BACKEND_URL}/analytics`, {
-    headers: {
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to load analytics (status ${response.status})`);
-  }
-
-  return response.json();
-}
 
 export type AdminAuditEntry = {
   timestamp: string;
@@ -152,38 +107,37 @@ export type AdminResponse = {
   correlation_id: string;
 };
 
-export async function getAdmin(): Promise<AdminResponse> {
-  const response = await fetch(`${BACKEND_URL}/admin`, {
-    headers: {
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
-  });
-
-  if (!response.ok) {
-    if (response.status === 403) {
-      throw new Error(
-        `You don't have admin access — add "${CURRENT_USER_ID}" to ADMIN_USER_IDS in the backend's .env.`,
-      );
-    }
-    throw new Error(`Failed to load admin data (status ${response.status})`);
+// Thrown by postQuery on a 401 instead of the generic Error below, so the
+// calling Client Component can tell "you got logged out" apart from a
+// real query failure and route you to /login with next/navigation's
+// useRouter — this function itself isn't a component, so it can't call
+// that hook directly.
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Not logged in");
+    this.name = "UnauthorizedError";
   }
-
-  return response.json();
 }
 
-export async function getDocuments(): Promise<DocumentListItem[]> {
-  const response = await fetch(`${BACKEND_URL}/documents`, {
-    headers: {
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
+// Called from the browser (a Client Component's submit handler), so this
+// hits the same-origin Next.js proxy at /api/query, never the backend
+// directly — the proxy is what attaches the session cookie and the
+// gateway secret server-side.
+export async function postQuery(question: string): Promise<QueryResponse> {
+  const response = await fetch("/api/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
   });
 
-  if (!response.ok) {
-    throw new Error(`Failed to load documents (status ${response.status})`);
+  if (response.status === 401) {
+    throw new UnauthorizedError();
   }
 
-  const data: DocumentListResponse = await response.json();
-  return data.documents;
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.detail ?? `Query failed (status ${response.status})`);
+  }
+
+  return data;
 }

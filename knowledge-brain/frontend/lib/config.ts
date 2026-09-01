@@ -1,9 +1,3 @@
-// The backend has no real authentication yet (build-order item 14) — it
-// accepts any non-empty X-User-Id as a self-asserted identity. This stands
-// in for "the logged-in user" everywhere the frontend calls the API, until
-// real auth exists.
-export const CURRENT_USER_ID = "dev-user";
-
 export const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 // Matches whatever APIM_GATEWAY_SECRET is set to in the backend's own

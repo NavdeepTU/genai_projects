@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useState } from "react";
 import { Menu } from "lucide-react";
 
+import type { CurrentUser } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,12 +18,11 @@ import {
 } from "@/components/ui/sheet";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-const NAV_ITEMS = [
+const BASE_NAV_ITEMS = [
   { href: "/", label: "Dashboard" },
   { href: "/documents", label: "Documents" },
   { href: "/query", label: "Query" },
   { href: "/analytics", label: "Analytics" },
-  { href: "/admin", label: "Admin" },
 ];
 
 function NavLink({
@@ -48,8 +49,56 @@ function NavLink({
   );
 }
 
-export function Navbar() {
+function UserSection({ user }: { user: CurrentUser | null }) {
+  const router = useRouter();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
+
+  if (!user) {
+    return (
+      <Link href="/login" className="text-sm text-muted-foreground hover:text-foreground">
+        Log in
+      </Link>
+    );
+  }
+
+  async function handleLogout() {
+    setIsLoggingOut(true);
+    setLogoutFailed(false);
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Logout failed");
+      router.push("/login");
+      router.refresh();
+    } catch {
+      // A network hiccup shouldn't leave the button stuck reading
+      // "Logging out..." forever — reset it and let the user try again.
+      setLogoutFailed(true);
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="hidden max-w-32 truncate text-xs text-muted-foreground sm:inline">
+        {user.email}
+      </span>
+      {logoutFailed && (
+        <span className="text-xs text-destructive">Couldn&apos;t log out — try again</span>
+      )}
+      <Button variant="outline" size="sm" onClick={handleLogout} disabled={isLoggingOut}>
+        {isLoggingOut ? "Logging out..." : "Log out"}
+      </Button>
+    </div>
+  );
+}
+
+export function Navbar({ user }: { user: CurrentUser | null }) {
   const pathname = usePathname();
+  const navItems = user?.is_admin
+    ? [...BASE_NAV_ITEMS, { href: "/admin", label: "Admin" }]
+    : BASE_NAV_ITEMS;
 
   return (
     <header className="border-b">
@@ -59,12 +108,13 @@ export function Navbar() {
         </Link>
 
         <nav className="hidden items-center gap-6 md:flex">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <NavLink key={item.href} {...item} pathname={pathname} />
           ))}
         </nav>
 
         <div className="flex items-center gap-2">
+          <UserSection user={user} />
           <ThemeToggle />
 
           <Sheet>
@@ -81,7 +131,7 @@ export function Navbar() {
                 <SheetTitle>Knowledge Brain</SheetTitle>
               </SheetHeader>
               <nav className="flex flex-col gap-4 px-4">
-                {NAV_ITEMS.map((item) => (
+                {navItems.map((item) => (
                   <SheetClose key={item.href} render={<NavLink {...item} pathname={pathname} />} />
                 ))}
               </nav>

@@ -1,6 +1,7 @@
 import { Clock, MessageSquareText, TrendingUp } from "lucide-react";
 
-import { getAnalytics, type TopQuestion } from "@/lib/api";
+import type { TopQuestion } from "@/lib/api";
+import { getAnalytics } from "@/lib/server-api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ListCard } from "@/components/list-card";
 import { ProgressBar } from "@/components/progress-bar";

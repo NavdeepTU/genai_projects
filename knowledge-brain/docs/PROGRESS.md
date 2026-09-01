@@ -3208,3 +3208,132 @@ multi-agent federated retrieval (item 17), conversation history (item
 still-open cost fix, and the still-real test coverage gaps named in
 prior sessions. At 3–4 hours/day, that's roughly 12–15 working days
 left, assuming no further scope changes.
+
+## Session: 2026-09-01 — Real authentication, frontend half (build-order item 14)
+
+### What we built
+- Picked up exactly where last session left off: the backend has
+  required real, logged-in sessions since ADR-036, but the frontend
+  still sent the old `X-User-Id: dev-user` header and had no way to
+  log in — every page was broken. This session closed that gap.
+- Real login and signup pages (`/login`, `/signup`), each a thin
+  Server Component wrapper (redirects to `/` if already logged in)
+  around an actual Client Component form. Signup chains a
+  server-to-server login call right after account creation, so a new
+  user lands already logged in rather than filling the login form a
+  second time immediately after.
+- A real cookie flow: login/signup route handlers call the backend
+  server-to-server, then re-issue the session token as this app's own
+  cookie (`lib/auth.ts`'s `applySessionFromResponse`) rather than
+  relaying the backend's `Set-Cookie` header verbatim — a fresh cookie
+  scoped to this app's own origin, with attributes chosen for this
+  app's own environment, not inherited from a server-to-server
+  response context the browser was never part of.
+- `proxy.ts` (Next.js 16 renamed "middleware" to this) as a cheap,
+  first-line gate: does a session cookie exist at all, on every route
+  except `/login`/`/signup`. The real, database-backed check happens
+  wherever a page already fetches its data — the same two-layer shape
+  `user_id_middleware` and `require_admin` already use on the backend.
+- Every existing route handler and backend call switched from the old
+  header to the real cookie, through a shared `backendAuthHeaders`
+  helper. The navbar now shows the logged-in user's email and a
+  working logout control, and only shows the Admin link when
+  `user.is_admin` is true.
+- A real, unplanned architecture fix along the way: Turbopack's
+  Server/Client boundary check operates per file, not per function —
+  once `lib/api.ts` contained anything that imported `next/headers`,
+  the Query page (a Client Component importing `postQuery` from that
+  same file) failed to build at all, even though it never touched the
+  server-only part. Split into `lib/api.ts` (client-safe) and a new
+  `lib/server-api.ts` (server-only) to fix it — found by the build
+  itself, not by reasoning about it in advance.
+- Verified live in the browser end to end: signup → auto-login →
+  every protected page loading real, cookie-authenticated data → a
+  real question round-tripping through the query proxy → the Admin
+  page correctly `403`ing a non-admin account → logout → re-login →
+  visiting `/login` while already authenticated correctly bouncing
+  back to `/` with no loop.
+- Ran a `/code-review` pass afterward and fixed 6 of the 7 real issues
+  it found: a login route that could return `200` with no session
+  actually established if the backend's `Set-Cookie` header ever came
+  back unusable; an upload status-poll timer that kept firing after a
+  `401` instead of stopping itself; a logout button with no error
+  handling that could get stuck forever on a network failure; and
+  three duplication issues (auth headers copy-pasted across four
+  route handlers, `Set-Cookie` extraction duplicated between login and
+  signup, `proxy.ts` hardcoding its own copy of the cookie-name
+  string) consolidated into shared helpers and a new
+  `lib/constants.ts`. Left one duplication finding alone on purpose —
+  the login and signup forms are structurally similar, but merging two
+  concrete call sites with real small differences into a shared
+  abstraction would have cost more than the duplication itself.
+  Re-verified type-check, lint, build, and the live login/logout flow
+  again after applying the fixes.
+- One new ADR: [`ADR-037`](adr/ADR-037-real-authentication-frontend.md).
+  `docs/ARCHITECTURE.md` updated in place — the frontend component
+  description, the top-level flowchart, the "what could go wrong"
+  entry, and the key-decisions log all now reflect that the frontend
+  can actually reach the backend, not the "currently broken, on
+  purpose" state from last session's entry.
+
+### What I struggled with
+- Two real, live-only findings, neither a code bug: the very first
+  live signup attempt failed with a genuine `UndefinedTableError` —
+  last session's `users`/`sessions` tables had never actually been
+  created against the local database, since that's a manual step the
+  user runs themselves and it simply hadn't happened yet. And
+  documents uploaded through the frontend *before* this session turned
+  out to be permission-granted to the old `"dev-user"` placeholder —
+  now permanently unreachable by any real account, since no real login
+  can ever produce that exact string again. Both surfaced only by
+  actually clicking through the feature live, not by the type-checker
+  or the build.
+- A related, unplanned cleanup: walked the user through finding and
+  deleting those orphaned `dev-user`-owned documents directly in
+  Postgres via pgAdmin — including troubleshooting a collapsed query
+  editor pane, and correcting a real misconception along the way
+  (asked whether the plaintext password could be recovered from the
+  Argon2id hash — explained why that's impossible by design, not a
+  gap in the tool). The user asked me to run the deletion myself
+  directly; declined, consistent with never performing permanent
+  deletions on the user's behalf regardless of how directly asked, and
+  gave the exact SQL for them to run instead.
+
+### Concepts to revisit
+- Why the frontend issues its own cookie instead of relaying the
+  backend's, and why `proxy.ts` deliberately only checks cookie
+  *presence*, not validity — both covered in ADR-037 and the new
+  Feature 24 section of `INTERVIEW_PREP.md`.
+- The Turbopack Server/Client file-level boundary gotcha — a genuinely
+  non-obvious Next.js architecture constraint, worth remembering for
+  any future file that mixes client-safe and server-only exports.
+
+### What's next
+- No "return to where you were" redirect after login yet — landing on
+  `/login` from a deep link always sends you to `/` afterward, a named
+  but not yet closed UX gap.
+- Everything ADR-036 already named as open on the backend is
+  inherited unchanged: no rate limiting on `/auth/login`, fixed 7-day
+  sessions with no sliding renewal or "log out everywhere" control.
+- Multi-tenancy itself (real isolation between separate companies'
+  data) is still fully unbuilt — its own future decision, and the
+  last major piece of build-order item 14 left untouched.
+- Everything else from prior sessions' "what's next" still stands:
+  real accuracy/cost tracking (item 15), real per-caller rate limiting/
+  network isolation for APIM, the missing migration tool, the PII
+  review workflow, Postgres' still-open cost fix, and guardrails/
+  multi-agent retrieval/conversation history/streaming (items 16–19).
+
+**Estimated completion: ~65% of the total project, by weighted
+effort** — up from 63%. This closes out the auth portion of item 14
+cleanly (both backend and frontend halves now real and verified live),
+but multi-tenancy and the rest of "production hardening" under that
+same build-order item are still fully ahead, so this is a solid step,
+not the item's completion. Rough remaining effort: ~40 hours (down
+from ~45) — multi-tenancy, APIM's remaining gaps, the missing
+migration tool, guardrails (item 16), multi-agent federated retrieval
+(item 17), conversation history (item 18), streamed generation (item
+19), the PII review workflow, Postgres' still-open cost fix, and the
+still-real test coverage gaps named in prior sessions. At 3–4
+hours/day, that's roughly 10–13 working days left, assuming no further
+scope changes.

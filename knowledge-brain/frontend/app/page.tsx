@@ -1,6 +1,7 @@
 import { DollarSign, FileText, MessageCircle, TrendingUp } from "lucide-react";
 
-import { getDashboard, type RecentQuery } from "@/lib/api";
+import type { RecentQuery } from "@/lib/api";
+import { getDashboard } from "@/lib/server-api";
 import { ListCard } from "@/components/list-card";
 import { StatTile } from "@/components/stat-tile";
 import { cn } from "@/lib/utils";

@@ -208,7 +208,41 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** real authentication now exists
+**What's new since the last update:** the frontend can now actually log
+in — the other half of real authentication, completing ADR-036 with
+ADR-037. Login and signup pages exist for real (`/login`, `/signup`),
+each a thin Server Component wrapper around a Client Component form.
+Signing in calls a same-origin route handler, which calls the backend
+server-to-server and re-issues the session token as this app's own
+cookie, scoped to this app's own origin rather than relaying the
+backend's `Set-Cookie` header verbatim. `proxy.ts` — Next.js 16 renamed
+"middleware" to this — is a cheap, first-line gate on every route
+except `/login`/`/signup`: does a session cookie exist at all; the real
+check happens where each page already fetches its data, the same
+two-layer shape (cheap gate, real check behind it) `user_id_middleware`
+and `require_admin` already use on the backend. Every page and route
+handler that used to send the fake `X-User-Id: dev-user` header now
+forwards the real cookie instead, through a shared `backendAuthHeaders`
+helper — a genuine build failure, not a style choice, forced
+`lib/api.ts` to split into a client-safe file and a new
+`lib/server-api.ts`: Turbopack's Server/Client boundary check operates
+per file, so a Client Component importing anything from a file that
+also imports `next/headers` fails outright, even if it never calls the
+part that does. A `/code-review` pass after the initial build found and
+fixed six real issues — a login route that could return `200` with no
+session actually established, a status-poll timer that kept firing
+after a `401` instead of stopping itself, a logout button with no error
+handling that could get stuck forever on a network failure, and three
+duplication issues consolidated into shared helpers. Two real, live
+findings along the way, neither a code bug: the very first live signup
+attempt failed because the `users`/`sessions` tables from last session
+had never actually been created against the local database, and
+documents uploaded through the frontend before this session turned out
+to be permission-granted to the old `"dev-user"` placeholder string —
+now permanently unreachable by any real account, since no real login
+can ever produce that identity again. See ADR-037.
+
+**What's new before that:** real authentication now exists
 for REST — the backend half of build-order item 14 (auth, multi-
 tenancy, and production hardening). Every previous page and endpoint
 trusted a self-asserted `X-User-Id` header; a caller could set it to
@@ -567,25 +601,30 @@ Python backend at all, talking to it purely over HTTP. `app/layout.tsx`
 is the shared shell every page sits inside: navigation, dark mode
 (via `next-themes`, toggling a `dark` class that every color in
 `globals.css` is keyed off through CSS variables), and a hamburger menu
-below the `md` breakpoint. `lib/api.ts` and `lib/config.ts` hold the one
-place that knows how to reach the backend — the base URL, the temporary
-`dev-user` identity placeholder, and the gateway secret local dev needs
-to send by hand. **Currently broken, on purpose:** ADR-036 made the
-backend stop trusting that `X-User-Id` placeholder for REST calls —
-every fetch here now gets rejected with a 401 until a future session
-adds real login/signup screens and switches this file to forward a
-session cookie instead. Talks to: the FastAPI backend, over plain HTTP, from
-the Next.js server itself rather than the browser (see the Document
-Library entry below for why). If it disappeared, the backend and its
-API would still work exactly as before — MCP and direct `curl`/API
-access would be unaffected, only the human-facing UI would be gone.
+below the `md` breakpoint. It also fetches `getCurrentUser()` once
+(ADR-037) and passes it to the navbar, so the shell itself knows who's
+logged in without every page re-deriving it. `lib/server-api.ts` holds
+the real backend calls (`getDashboard`, `getDocuments`, and so on),
+each forwarding the caller's real session cookie rather than the old
+`dev-user` placeholder; `lib/api.ts` holds only what's safe to reach
+from a Client Component (shared types, `postQuery`) — the two are
+deliberately separate files, not just separate concerns, since a
+Client Component importing anything from a file that also imports
+`next/headers` fails to build at all (see the Auth entry below).
+`lib/config.ts` holds the base URL and the gateway secret local dev
+needs to send by hand. Talks to: the FastAPI backend, over plain HTTP,
+from the Next.js server itself rather than the browser (see the
+Document Library entry below for why). If it disappeared, the backend
+and its API would still work exactly as before — MCP and direct
+`curl`/API access would be unaffected, only the human-facing UI would
+be gone.
 
 ```mermaid
 flowchart LR
     BROWSER[Browser] -->|"renders shell,<br/>navigates"| SHELL["layout.tsx<br/>Navbar + dark mode + mobile menu"]
     SHELL --> PAGE["A page, e.g.<br/>app/documents/page.tsx<br/>(Server Component)"]
-    PAGE -->|"fetch, server-to-server —<br/>no CORS involved"| API["lib/api.ts"]
-    API -->|"X-User-Id: dev-user<br/>X-Gateway-Secret: ..."| BACKEND["FastAPI backend<br/>(app/api/documents.py)"]
+    PAGE -->|"fetch, server-to-server —<br/>no CORS involved"| API["lib/server-api.ts"]
+    API -->|"Cookie: session_token=...<br/>X-Gateway-Secret: ..."| BACKEND["FastAPI backend<br/>(app/api/documents.py)"]
 ```
 
 **Document Library (`frontend/app/documents/page.tsx`)** — the first of
@@ -789,6 +828,34 @@ now depends on) `user_id_middleware`. If it disappeared, nobody could
 log in, and — since the middleware now requires a real session for
 every REST request — nothing else in the system would be reachable
 either.
+
+**Frontend auth (`frontend/app/login/page.tsx`,
+`frontend/app/signup/page.tsx`, `frontend/components/login-form.tsx`,
+`frontend/components/signup-form.tsx`,
+`frontend/app/api/auth/{login,signup,logout}/route.ts`,
+`frontend/lib/auth.ts`, `frontend/proxy.ts`)** — added with ADR-037,
+the frontend half of the pair above. The login/signup pages are thin
+Server Component wrappers — they call `getCurrentUser()` and redirect
+to `/` if already logged in — around the actual Client Component
+forms. Their route handlers follow this project's existing
+same-origin-proxy pattern: the browser calls `/api/auth/login`, which
+calls the real backend server-to-server, then pulls the token out of
+the backend's own `Set-Cookie` header and re-issues it as this app's
+own cookie via `lib/auth.ts`'s `applySessionFromResponse` — a fresh
+cookie scoped to this app's own origin, not a byte-for-byte relay.
+Signup chains a second, server-to-server login call right after
+account creation, so a new user lands already logged in. `proxy.ts`
+(Next.js 16's renamed `middleware.ts`) is the cheap, first-line gate:
+does a session cookie exist at all, on every route except `/login` and
+`/signup`; the real, database-backed check happens wherever a page
+actually fetches its data, via `lib/auth.ts`'s `backendAuthHeaders`
+and `getCurrentUser`, the same two-layer shape `user_id_middleware`
+and `require_admin` already use on the backend. Talks to: the backend's
+`/auth/*` endpoints, and every other frontend page/route indirectly,
+since `backendAuthHeaders` is what they all now use to reach the
+backend at all. If it disappeared, every page would be back to
+ADR-036's original state — reachable by URL, but unable to prove who's
+asking, so immediately rejected.
 
 **Permission repository (`app/repositories/permission_repository.py`)**
 — all direct database access for who can see which document.
@@ -1392,6 +1459,26 @@ rather than migrated — it can't hold a browser session cookie the way
 REST callers now do, so folding it in would be new scope, not a
 migration of this one. See ADR-036.
 
+On the frontend, we chose to issue a fresh, app-owned session cookie
+rather than relay the backend's `Set-Cookie` header verbatim — the
+backend's header was shaped for a server-to-server response, not for
+the browser's actual relationship to this app, so a route handler
+reads the token out of it and calls `cookies().set()` itself, with
+attributes chosen for this app's own environment. For route
+protection, we chose a cheap, edge-level presence check (`proxy.ts`)
+backed by a real, database-checked validity check wherever a page
+already fetches its data, over either doing a full database check at
+the edge (rejected: Next.js's own guidance is that Proxy runs on every
+route, including prefetches, so a real backend call there is a real,
+avoidable cost paid far too often) or skipping the edge-level check
+entirely (rejected: a first-line gate for the obvious case is nearly
+free to add). For the login/signup forms themselves, we chose
+same-origin route handlers over Server Actions — Next.js's newer,
+officially-recommended mechanism — specifically to keep one consistent
+pattern with the rest of this app rather than introduce a second
+pattern on top of everything else being new this session. See
+ADR-037.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -1745,17 +1832,21 @@ rule could be trusted. See ADR-019.
 
 **Identity is self-asserted over MCP, proven over REST** — ADR-036
 closed this for REST: a caller now needs a real password-verified
-session, not just a header claiming a name. MCP keeps the old trade-off
-deliberately, for the reason named there — it isn't a browser and can't
-hold a session cookie the way REST callers now do. What's still
-genuinely open: there's no rate limiting on `/auth/login` yet, so
-nothing beyond Argon2id's own deliberately-slow hashing cost stands
-between a script and a password-guessing attempt; sessions live for a
-fixed 7 days with no sliding renewal or revoke-all-sessions control;
-and the frontend hasn't been updated to use any of this yet, so it's
-currently unable to reach the backend at all. Multi-tenancy — real
-isolation between separate companies' data, as opposed to one shared
-pool of users — is still entirely unbuilt, its own future decision.
+session, not just a header claiming a name. ADR-037 finished the other
+half — the frontend now has real login/signup pages and forwards that
+session cookie on every call, so the UI is no longer locked out of its
+own backend. MCP keeps the old trade-off deliberately, for the reason
+named there — it isn't a browser and can't hold a session cookie the
+way REST callers now do. What's still genuinely open: there's no rate
+limiting on `/auth/login` yet, so nothing beyond Argon2id's own
+deliberately-slow hashing cost stands between a script and a
+password-guessing attempt; sessions live for a fixed 7 days with no
+sliding renewal or revoke-all-sessions control; and there's no
+"return to where you were" redirect after a login triggered by a deep
+link — you always land on `/` afterward, not the page you actually
+wanted. Multi-tenancy — real isolation between separate companies'
+data, as opposed to one shared pool of users — is still entirely
+unbuilt, its own future decision.
 
 **Azure AI Language itself goes down during PII detection** — after 3
 failures in 60 seconds, its own independent circuit breaker opens,

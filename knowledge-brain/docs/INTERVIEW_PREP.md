@@ -2561,6 +2561,119 @@ question comes up as a trade-off rather than a flaw.
 
 ---
 
+## Feature 24: Real Authentication — the Frontend Half
+
+**What does this feature do, in one sentence?**
+Gives the frontend real login and signup pages, and switches every
+existing page and API call from the old self-asserted `X-User-Id`
+header to the real session cookie ADR-036 already built on the
+backend — closing the gap last session deliberately left open.
+
+```mermaid
+flowchart LR
+    VISIT["Visit any protected page,<br/>no session cookie"] --> PROXY{"proxy.ts:<br/>cookie present?"}
+    PROXY -->|no| LOGIN["Redirected to /login"]
+    LOGIN --> SUBMIT["Submit credentials"]
+    SUBMIT --> ROUTE["/api/auth/login route handler"]
+    ROUTE -->|"server-to-server,<br/>with gateway secret"| BACKEND["Backend: verifies password,<br/>creates a Session row"]
+    BACKEND -->|"Set-Cookie:<br/>session_token=..."| ROUTE
+    ROUTE -->|"re-issues as this<br/>app's OWN cookie"| BROWSER["Browser stores it,<br/>scoped to this app's origin"]
+    BROWSER --> PAGE["Page renders, its own fetch<br/>forwards the cookie for real"]
+```
+
+**Why does the route handler re-issue its own cookie instead of just
+forwarding the backend's `Set-Cookie` header straight through?**
+Because that header wasn't written with the browser in mind at all —
+it's the backend's response to a server-to-server call the browser
+never sees. Its attributes were shaped for that context, not for this
+app's actual relationship with the browser. What the browser genuinely
+needs is much simpler: some cookie, holding the same secret token,
+scoped correctly to this app's own origin. So the route handler reads
+the token value out of the backend's header and calls `cookies().set()`
+itself, choosing `secure`/`sameSite`/`maxAge` for *this* app's own
+environment. It's not extra work for its own sake — blindly relaying a
+header shaped for a different context is the version that's actually
+more likely to behave unpredictably.
+
+**`proxy.ts` only checks whether a cookie exists, not whether it's
+actually still valid. Isn't that a security hole?**
+No — it's a deliberate, cheap first layer, with the real check sitting
+right behind it. Next.js's own documentation is explicit that Proxy
+runs on *every* request, including prefetches a user never even sees
+land, so doing a real database lookup there would mean paying that
+cost far more often than necessary — the framework itself warns
+against using it as a full session-management solution. The actual
+check — is this specific session still valid in the `sessions` table —
+happens wherever a page already fetches its data, via
+`backendAuthHeaders`/`getCurrentUser` in `lib/auth.ts`. A cookie that's
+present but expired or deleted server-side sails past `proxy.ts` just
+fine, then gets a real `401` the moment the page actually tries to use
+it, and gets redirected from there. This is the same two-layer shape
+already used on the backend: `user_id_middleware` does the one real
+check every request needs, and `require_admin` layers a second,
+narrower check on top for the one thing that needs it.
+
+**Splitting `lib/api.ts` into two files — was that just cleanup, or did
+something force it?**
+A real build failure forced it, not a preference. Turbopack's
+Server/Client boundary check works at the level of the whole file, not
+by tracing which specific functions get called. The Query page is a
+Client Component that imports `postQuery` from `lib/api.ts` — and once
+that same file also contained a function that imported `next/headers`
+(to read the session cookie for the server-only calls), the build
+failed outright, even though the Client Component never touched that
+function. The fix was splitting the file along that exact line:
+`lib/api.ts` keeps only what's safe in a browser bundle; the new
+`lib/server-api.ts` keeps everything that needs `next/headers`, and can
+only ever be imported by a Server Component or a Route Handler.
+
+**A `/code-review` pass afterward found six issues. Walk me through the
+most interesting one.**
+The login route could return a `200` even when no real session got
+established. If the backend responded successfully but its
+`Set-Cookie` header ever came back in a shape the regex couldn't parse
+— malformed, or genuinely missing — the old code just silently skipped
+setting the cookie and returned success anyway. The client, seeing
+`200`, would navigate to `/` believing login worked; `proxy.ts` would
+then find no cookie and bounce it straight back to `/login`, with
+nothing on screen explaining why. The fix makes that extraction's
+result explicit: `applySessionFromResponse` now returns a boolean, and
+the route handler treats a `false` as what it actually is — a failed
+login — returning a real `502` with an explanation instead of a
+misleading `200`.
+
+**Two things came up live that weren't code bugs at all. What were
+they, and why do they matter for how you think about "done"?**
+Both were caught only by actually clicking through the feature in a
+browser, not by anything the type-checker or the build could see.
+First: the very first live signup attempt failed with a genuine
+database error — the `users`/`sessions` tables from last session had
+never actually been created against the local database, since running
+that script is a manual step the user runs themselves, and it simply
+hadn't happened yet. Second: documents uploaded through the frontend
+*before* this session turned out to be permission-granted to the old
+`"dev-user"` placeholder string — and since no real login can ever
+produce that literal string again, those old permission rows became
+permanently unreachable by any real account the moment real auth
+shipped. Neither is a flaw in this session's code; both are exactly
+the kind of thing that only surfaces by actually running the full
+system end to end, which is why "the build passed" was never treated
+as equivalent to "the feature works."
+
+**What would you change here if this needed to run at genuine
+production scale?**
+Two concrete gaps, both already true on the backend and now inherited
+unchanged by the frontend: no rate limiting on the login form, and a
+fixed 7-day session with no sliding renewal or a "log out everywhere"
+control. One frontend-specific gap worth naming on its own: there's no
+"return to where you were" redirect after a login triggered by
+following a deep link — you always land on `/`, not the page you
+actually wanted, a small UX cost that's real but not a security gap.
+
+*Further reading: [Next.js — Authentication guide](https://nextjs.org/docs/app/guides/authentication) — the official source for the optimistic-check-at-the-edge-plus-real-check-at-the-data-layer pattern this feature follows, including the explicit warning against doing database checks inside Proxy/Middleware.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

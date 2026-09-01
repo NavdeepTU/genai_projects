@@ -1054,8 +1054,8 @@
 
   <section class="block">
     <div class="block-title">
-      <h2>Feature 17 — Real authentication <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
-      <span class="count">build-order item 14, backend half only · frontend wiring + multi-tenancy not started</span>
+      <h2>Feature 17 — Real authentication <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 14, auth only (both backend + frontend) · multi-tenancy not started</span>
     </div>
     <div class="row">
       <div class="node">
@@ -1089,8 +1089,43 @@
       </div>
     </div>
 
-    <p class="caveat"><strong>Not built, deferred on purpose:</strong> the frontend still sends the old <code>X-User-Id</code> header and has no login/signup UI, so every page is currently unable to reach the backend — wiring it up (login/signup pages, cookie forwarding through the Next.js Route Handlers, a logout control) is a dedicated future session, agreed up front. Multi-tenancy (real isolation between separate companies' data) is equally untouched — its own future decision. MCP was deliberately left on its existing shared-API-key model, not migrated — it can't hold a browser session cookie the way REST callers now do.</p>
-    <p class="caveat"><strong>Verified:</strong> app import check (<code>uv run python -c "import app.main"</code>) and the full test suite both pass after every change. New <code>tests/test_auth.py</code> plus a rewritten <code>tests/test_admin.py</code> (now exercised against real <code>User</code> rows instead of a mocked allowlist). Test suite grew 30 → 39 passing. See <a href="adr/ADR-036-real-authentication-session-cookies.md">ADR-036</a>.</p>
+    <p class="caveat"><strong>Backend, verified:</strong> app import check (<code>uv run python -c "import app.main"</code>) and the full test suite both pass after every change. New <code>tests/test_auth.py</code> plus a rewritten <code>tests/test_admin.py</code> (now exercised against real <code>User</code> rows instead of a mocked allowlist). Test suite grew 30 → 39 passing. See <a href="adr/ADR-036-real-authentication-session-cookies.md">ADR-036</a>.</p>
+
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">/login, /signup pages</span>
+        <span class="path mono">frontend/app/login|signup/page.tsx · redirects to / if already logged in</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">/api/auth/{login,signup,logout}</span>
+        <span class="path mono">re-issues backend's session token as this app's own cookie</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">proxy.ts</span>
+        <span class="path mono">cheap edge gate: cookie present? · real check happens at each page's own fetch</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Every page/route switched to real cookie</span>
+        <span class="path mono">old X-User-Id: dev-user placeholder removed entirely</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Not built, deferred on purpose:</strong> multi-tenancy (real isolation between separate companies' data) is still entirely untouched — its own future decision, always scoped separately from authentication itself. No "return to where you were" redirect after login yet — landing on <code>/login</code> from a deep link always sends you to <code>/</code> afterward. MCP was deliberately left on its existing shared-API-key model, not migrated — it can't hold a browser session cookie the way REST callers now do.</p>
+    <p class="caveat"><strong>Frontend, a real build failure, not a style choice:</strong> Turbopack's Server/Client boundary check works per file, not per function — once <code>lib/api.ts</code> contained anything importing <code>next/headers</code>, the Query page (a Client Component importing <code>postQuery</code> from that same file) failed to build outright. Fixed by splitting into <code>lib/api.ts</code> (client-safe) and a new <code>lib/server-api.ts</code> (server-only).</p>
+    <p class="caveat"><strong>Frontend, verified live in the browser, twice:</strong> signup → auto-login → every protected page loading real cookie-authenticated data → a real question round-tripping through the query proxy → Admin correctly 403ing a non-admin account → logout → re-login → <code>/login</code> while already authenticated correctly bouncing back to <code>/</code> with no loop. A <code>/code-review</code> pass afterward found and fixed 6 real issues (a login route that could return 200 with no session established, a status-poll timer that kept firing after a 401, a logout button that could get stuck on a network failure, and three duplication issues consolidated into shared helpers) — re-verified live after applying the fixes. Type-check, lint, and a full production build all pass clean. See <a href="adr/ADR-037-real-authentication-frontend.md">ADR-037</a>.</p>
   </section>
 
   <footer class="roadmap">

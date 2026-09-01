@@ -1,6 +1,7 @@
 import { Building2, ScrollText, ShieldCheck } from "lucide-react";
 
-import { getAdmin, type AdminAuditEntry, type DocumentPermissionEntry } from "@/lib/api";
+import type { AdminAuditEntry, DocumentPermissionEntry } from "@/lib/api";
+import { getAdmin } from "@/lib/server-api";
 import { Badge } from "@/components/ui/badge";
 import { ListCard } from "@/components/list-card";
 import { StatTile } from "@/components/stat-tile";

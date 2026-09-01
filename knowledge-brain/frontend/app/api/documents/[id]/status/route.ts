@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { BACKEND_GATEWAY_SECRET, BACKEND_URL, CURRENT_USER_ID } from "@/lib/config";
+import { BACKEND_URL } from "@/lib/config";
+import { backendAuthHeaders } from "@/lib/auth";
 
 // Same proxy reasoning as the upload route: this keeps BACKEND_GATEWAY_SECRET
 // server-side while the browser polls this same-origin path every couple of
@@ -9,10 +10,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   const { id } = await params;
 
   const response = await fetch(`${BACKEND_URL}/documents/${id}/status`, {
-    headers: {
-      "X-User-Id": CURRENT_USER_ID,
-      "X-Gateway-Secret": BACKEND_GATEWAY_SECRET,
-    },
+    headers: await backendAuthHeaders(),
     cache: "no-store",
   });
 

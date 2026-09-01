@@ -135,6 +135,18 @@ export function UploadDropzone() {
       const timer = setInterval(async () => {
         try {
           const response = await fetch(`/api/documents/${documentId}/status`, { cache: "no-store" });
+          if (response.status === 401) {
+            // Unlike every other terminal branch below, this doesn't call
+            // updateUpload first — there's no card left to update once
+            // we're navigating away. It does still need settleAndRemove,
+            // though, same as the rest: without it, this interval keeps
+            // firing every POLL_INTERVAL_MS (re-hitting a 401 each time)
+            // for as long as the redirect takes to actually unmount this
+            // component.
+            settleAndRemove(key);
+            router.push("/login");
+            return;
+          }
           if (!response.ok) {
             throw new Error(`Status check failed (${response.status})`);
           }
@@ -160,7 +172,7 @@ export function UploadDropzone() {
 
       pollTimers.current.set(key, timer);
     },
-    [settleAndRemove, updateUpload],
+    [router, settleAndRemove, updateUpload],
   );
 
   const uploadFile = useCallback(
@@ -194,6 +206,10 @@ export function UploadDropzone() {
         formData.append("file", file);
 
         const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
+        if (response.status === 401) {
+          router.push("/login");
+          return;
+        }
         if (!response.ok) {
           const body = await response.json().catch(() => null);
           throw new Error(body?.detail ?? `Upload failed (${response.status})`);
@@ -212,7 +228,7 @@ export function UploadDropzone() {
         settleAndRemove(key);
       }
     },
-    [pollStatus, settleAndRemove, updateUpload],
+    [pollStatus, router, settleAndRemove, updateUpload],
   );
 
   const handleFiles = useCallback(

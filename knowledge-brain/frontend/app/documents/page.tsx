@@ -1,6 +1,7 @@
 import { FileText, ShieldAlert } from "lucide-react";
 
-import { getDocuments, type DocumentListItem, type DocumentStatus } from "@/lib/api";
+import type { DocumentListItem, DocumentStatus } from "@/lib/api";
+import { getDocuments } from "@/lib/server-api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { UploadDropzone } from "@/components/upload-dropzone";

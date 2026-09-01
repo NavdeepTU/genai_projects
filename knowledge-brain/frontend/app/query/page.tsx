@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { FileText, MessageCircle, Send } from "lucide-react";
 
-import { postQuery, type QuerySource } from "@/lib/api";
+import { postQuery, UnauthorizedError, type QuerySource } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -97,6 +98,7 @@ function EmptyState() {
 }
 
 export default function QueryPage() {
+  const router = useRouter();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [question, setQuestion] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -126,6 +128,10 @@ export default function QueryPage() {
         ),
       );
     } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        router.push("/login");
+        return;
+      }
       setTurns((current) =>
         current.map((t) =>
           t.key === key
