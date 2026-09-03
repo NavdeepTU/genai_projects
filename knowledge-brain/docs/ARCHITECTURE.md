@@ -208,7 +208,35 @@ best chunk, or nothing at all if reranking itself was unavailable for
 this request, since a real low score and "no score was computed" must
 never look identical to whoever's reading it.
 
-**What's new since the last update:** the frontend can now actually log
+**What's new since the last update:** every LLM and reranker call in
+this system now reports itself to LangSmith — build-order item 15,
+LLM/RAG observability. Not a dashboard built into this app; a
+dedicated external tool, the user's own explicit choice. Every OpenAI
+call (embedding, generation, query rewriting, reference extraction)
+goes through a client wrapped once with `wrap_openai()` — LangSmith's
+own trick for projects, like this one, that call the raw `openai` SDK
+directly rather than through LangChain's model classes. After that one
+line per file, every real call through that client automatically
+reports its exact prompt, exact response, tokens each direction,
+dollar cost, latency, and success or failure, with no other code
+change. The Voyage reranking call has no equivalent automatic wrapper,
+so `rerank_chunks` got an explicit `@traceable` decorator instead —
+same coverage, minus an automatic dollar figure, since LangSmith's
+built-in pricing table only knows OpenAI's rates. Because the query
+pipeline is already a LangGraph graph (ADR-014), turning tracing on
+process-wide captures its whole execution automatically too — every
+node in `retrieval_service.py` shows up as its own step in a trace,
+with zero change to the graph's own logic. The one place real code
+changed to add attribution: `RetrievalService.run_query`'s single
+graph-invocation call now tags the entire trace with who asked and the
+request's correlation_id, reusing the `user_id` the graph already
+threads through `QueryState` rather than a fresh lookup that would
+have quietly broken the moment the same function ran from a background
+context (the exact `ContextVar`-reset trap ADR-030's ingestion path
+already had to solve once). MCP inherits all of this for free — same
+service functions, no MCP-specific change needed. See ADR-038.
+
+**What's new before that:** the frontend can now actually log
 in — the other half of real authentication, completing ADR-036 with
 ADR-037. Login and signup pages exist for real (`/login`, `/signup`),
 each a thin Server Component wrapper around a Client Component form.
@@ -1107,6 +1135,36 @@ stateDiagram-v2
     HalfOpen --> Open: trial call fails
     Closed --> Closed: call succeeds
 ```
+
+**Observability (`app/core/observability.py`, plus one line changed in
+each of `embedding.py`, `generation.py`, `query_rewriting.py`,
+`reference_extraction.py`, and a decorator on `reranking.py`'s
+`rerank_chunks`)** — added with ADR-038, LangSmith tracing for every
+LLM/reranker call. `enable_tracing()` runs once, at the very top of
+`app/main.py`, before any other app module is imported — it mirrors
+this project's own validated `Settings` into the real process
+environment variables (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`,
+`LANGSMITH_PROJECT`) that LangSmith's SDK actually reads, since our own
+`.env` loading only fills a Python object, never `os.environ` itself.
+`wrap_openai()` wraps each service file's OpenAI client once; every
+real call made through it afterward reports its prompt, response,
+tokens, cost, and latency automatically — the mechanism exists
+specifically because this project calls the raw `openai` SDK directly,
+not through LangChain's own model classes, so there was no other way
+to get this without hand-instrumenting every call site individually.
+`RetrievalService.run_query` additionally tags its one graph-invocation
+call with `user_id` and `correlation_id`, covering the whole trace, not
+just one call inside it — reusing the `user_id` already threaded
+through `QueryState`, deliberately not a fresh `ContextVar` read, since
+that would silently break the moment the same function ran from a
+background context (see the ingestion pipeline's own note on this same
+trap). Talks to: LangSmith's hosted API — the one dependency in this
+system that exists purely for visibility, never load-bearing; a
+tracing failure is designed to never break the actual OpenAI/Voyage
+call underneath it, verified live with a deliberately invalid API key
+before a real one was ever configured. If it disappeared, every call
+would still work exactly the same — only the ability to see what
+happened inside them would be gone.
 
 **Evaluation harness (`eval/`)** — a separate, on-demand tool, not part
 of the running app: a fixed set of known-answer test questions
@@ -2633,3 +2691,25 @@ ingestion pipeline). The fast piece hands the slow piece just an id,
 not an in-memory object, since the object it created lived in a
 database session that's gone by the time the slow piece actually runs.
 See ADR-030.
+
+**Observability** — being able to see *inside* what a system did while
+handling one request, not just whether it succeeded. For an LLM call
+specifically: the exact prompt sent, the exact response returned,
+tokens used, cost, and latency — details that are otherwise invisible
+once a request finishes.
+
+**Trace / span** — a trace is everything that happened while handling
+one request, start to finish (here: one full question asked of the
+system). A span is one individual step inside that trace (embed the
+question, rerank candidates, generate the answer) — the same
+relationship as a package's full delivery journey (the trace) and each
+individual leg of it, like "arrived at the depot" (a span). See
+ADR-038.
+
+**LangSmith** — a hosted tool for tracing what happens inside LLM
+calls, built by the same team as LangChain and LangGraph. Because this
+project's query pipeline is already a LangGraph graph, turning
+LangSmith's tracing on captures that graph's execution automatically —
+no code change needed to the graph itself, only to the individual
+OpenAI/Voyage call sites that need their own detail captured. See
+ADR-038.

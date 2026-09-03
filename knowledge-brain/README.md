@@ -95,6 +95,19 @@ and why it was made that way.
   (backend) and
   [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md)
   (frontend).
+- **LLM/RAG observability** — every OpenAI and Voyage call (embedding,
+  generation, query rewriting, reference extraction, reranking) now
+  reports its exact prompt, exact response, tokens, cost, and latency
+  to [LangSmith](https://www.langchain.com/langsmith), a dedicated
+  external tool — not built into this app's own UI, a deliberate
+  choice. Since the query pipeline is already a LangGraph graph,
+  turning tracing on captures its whole execution automatically, node
+  by node; the OpenAI calls get this by wrapping each service file's
+  client once with `wrap_openai()`, Voyage's reranking call via an
+  explicit `@traceable` decorator (no automatic dollar cost there,
+  since LangSmith's pricing table doesn't know Voyage's rates). Every
+  query's trace is tagged with who asked. See
+  [`ADR-038`](docs/adr/ADR-038-llm-rag-observability.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -265,6 +278,10 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Next.js + Tailwind + Shadcn/UI (on Base UI)** — the frontend
   (`frontend/`), complete: a shared shell and all five planned
   pages (see [`ADR-028`](docs/adr/ADR-028-frontend-stack-and-base-ui.md))
+- **LangSmith** — traces every OpenAI/Voyage call: prompt, response,
+  tokens, cost, latency, tied naturally into LangGraph since the query
+  pipeline is already one (see
+  [`ADR-038`](docs/adr/ADR-038-llm-rag-observability.md))
 
 The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in
 `CLAUDE.md` — most of it isn't built yet, and is being added
@@ -305,7 +322,10 @@ deliberately, one justified decision at a time, not upfront.
    locally, sign up a user (see below) and then flip that row's
    `is_admin` to `true` directly in Postgres — there's no allowlist
    setting anymore, since `require_admin` checks a real column now
-   (see `ADR-036`).
+   (see `ADR-036`). `LANGSMITH_API_KEY` needs a real key from a free
+   [LangSmith](https://smith.langchain.com) account — without one,
+   every OpenAI/Voyage call still works exactly the same, it just won't
+   show up anywhere to look at afterward (see `ADR-038`).
 4. **Install dependencies:**
    ```
    uv sync

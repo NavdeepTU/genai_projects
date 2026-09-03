@@ -2,6 +2,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.core.observability import enable_tracing
+
+# Must run before any service module below is imported — they each
+# create their OpenAI/Voyage client at import time, and tracing needs
+# to be armed before any of those clients ever makes a real call.
+enable_tracing()
+
 from app.api.admin import router as admin_router
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router

@@ -64,7 +64,18 @@ class RetrievalService:
             "duration_ms": 0.0,
         }
         start = time.monotonic()
-        final_state = await self._graph.ainvoke(initial_state)
+        # metadata here tags the *entire* trace for this query — every
+        # node inside it, and every OpenAI/Voyage call any node makes —
+        # with who asked and which request this was, so a LangSmith trace
+        # can be filtered by user or cross-referenced back to our own
+        # logs and audit entries via correlation_id.
+        final_state = await self._graph.ainvoke(
+            initial_state,
+            config={
+                "metadata": {"user_id": user_id, "correlation_id": get_correlation_id()},
+                "run_name": "query",
+            },
+        )
         final_state["duration_ms"] = (time.monotonic() - start) * 1000
         return final_state
 

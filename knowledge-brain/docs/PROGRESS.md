@@ -3337,3 +3337,108 @@ migration tool, guardrails (item 16), multi-agent federated retrieval
 still-real test coverage gaps named in prior sessions. At 3–4
 hours/day, that's roughly 10–13 working days left, assuming no further
 scope changes.
+
+## Session: 2026-09-03 — LLM/RAG observability via LangSmith (build-order item 15)
+
+### What we built
+- First asked to build multi-tenancy (the other half of item 14), but
+  after walking through the concept and the real questions — where a
+  user's company comes from at signup, what should actually be walled
+  off — you chose to defer it rather than build it half-thought-out.
+  Nothing built for it this session; picked back up whenever it's
+  actually ready to be designed properly.
+- Picked build-order item 15 instead: real visibility into what an LLM
+  call actually does, not just whether the app responded. You defined
+  the goal yourself before any architecture discussion — token counts
+  in/out, combined cost per query, and observing errors — and chose a
+  separate, dedicated external tool over building tracking into our
+  own Dashboard/Analytics pages.
+- Chose LangSmith over Langfuse, specifically because the query
+  pipeline is already a LangGraph graph (ADR-014) — LangSmith traces a
+  LangGraph graph's execution automatically once tracing is on, with
+  zero change to the graph's own step logic, which Langfuse would need
+  built by hand or via its own separate integration.
+- Chose full prompt/response content in every trace over metadata-only,
+  after being shown the real trade-off explicitly: most useful for
+  debugging why a specific answer came out wrong, at the cost of
+  retrieved document text leaving this project's infrastructure — the
+  same content PII detection screens at upload time, with the same
+  real, named limit (14 categories, not exhaustive).
+- The actual mechanism: `wrap_openai()` wraps each service file's
+  OpenAI client once — `embedding.py`, `generation.py`,
+  `query_rewriting.py`, `reference_extraction.py`, one line each —
+  after which every real call through that client automatically
+  reports its prompt, response, tokens, cost, and latency. Voyage has
+  no equivalent wrapper, so `reranking.py`'s `rerank_chunks` got an
+  explicit `@traceable` decorator instead.
+- New `app/core/observability.py`: `enable_tracing()`, run once at the
+  very top of `app/main.py`, mirrors our own validated `Settings` into
+  the real process environment variables LangSmith's SDK actually
+  reads — a real, non-obvious wiring detail, since `.env` loading only
+  fills our own config object, never `os.environ` itself.
+- Added "which user asked" as the one requested extra beyond the base
+  plan, wired in at the single place the query graph is actually
+  invoked (`RetrievalService.run_query`), tagging the *whole* trace via
+  the `user_id` already threaded through `QueryState` — deliberately
+  not a fresh `ContextVar` read inside each service function, since
+  that would have silently broken the moment the same function ran
+  from a background context (the same trap ADR-030 already solved once
+  for the ingestion pipeline).
+- Verified live, twice: once with a placeholder API key, running a
+  real document upload and two real queries (one with genuine
+  retrieval and reranking against real content) to confirm a tracing
+  failure never breaks the actual pipeline; once with your own real
+  LangSmith account and key, confirming actual traces — prompt,
+  tokens, cost — show up correctly.
+- One new ADR: [`ADR-038`](adr/ADR-038-llm-rag-observability.md).
+  `docs/ARCHITECTURE.md` updated in place with a new component entry,
+  a new "what's new" log entry, and three new glossary terms
+  (observability, trace/span, LangSmith).
+
+### What I struggled with
+- No real corrections this session — the plan held up through both
+  rounds of live verification without needing changes, which is
+  itself worth noting after several sessions in a row that did surface
+  real, live-only bugs.
+
+### Concepts to revisit
+- Why `wrap_openai()` wraps the client object once instead of needing
+  per-call-site instrumentation, and why that specific trick only
+  works because this project calls the raw `openai` SDK directly
+  rather than through LangChain's own model classes — covered in the
+  new Feature 25 section of `INTERVIEW_PREP.md`.
+- The `os.environ`-mirroring pattern in `enable_tracing()` — a real,
+  reusable pattern for any third-party SDK that reads configuration
+  from the real process environment rather than accepting it
+  programmatically.
+
+### What's next
+- Multi-tenancy is still on the table, deliberately deferred, not
+  abandoned — the real questions from this session (where does a
+  user's company come from at signup, what's walled off) are still
+  open and worth answering before building it.
+- Two named gaps from this session: ingestion-time traces aren't
+  tagged with `user_id` the way query traces are, and Voyage's
+  reranking cost has no automatic dollar figure (would need manual
+  computation from its published per-token rate).
+- No alerting or cost ceiling wired up yet — this is visibility, not a
+  guardrail. LangSmith's own automations feature could close that
+  later.
+- Everything else from prior sessions' "what's next" still stands:
+  real per-caller rate limiting/network isolation for APIM, the
+  missing migration tool, the PII review workflow, Postgres' still-open
+  cost fix, and guardrails/multi-agent retrieval/conversation
+  history/streaming (items 16–19).
+
+**Estimated completion: ~67% of the total project, by weighted
+effort** — up from 65%. A real, self-contained build-order item closed
+cleanly in one session, verified live twice, with no scope left
+dangling — a smaller jump than the two authentication sessions, since
+this item was narrower in scope from the start. Rough remaining
+effort: ~36 hours (down from ~40) — multi-tenancy, APIM's remaining
+gaps, the missing migration tool, guardrails (item 16), multi-agent
+federated retrieval (item 17), conversation history (item 18),
+streamed generation (item 19), the PII review workflow, Postgres'
+still-open cost fix, and the still-real test coverage gaps named in
+prior sessions. At 3–4 hours/day, that's roughly 9–12 working days
+left, assuming no further scope changes.

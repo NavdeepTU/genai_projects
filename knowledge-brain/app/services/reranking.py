@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass
 
 import voyageai
+from langsmith import traceable
 
 from app.core.circuit_breaker import CircuitBreaker
 from app.core.config import get_settings
@@ -22,6 +23,7 @@ class RankedChunk:
     relevance_score: float
 
 
+@traceable(run_type="tool", name="voyage_rerank")
 async def rerank_chunks(question: str, chunks: list[Chunk], top_k: int) -> list[RankedChunk]:
     """Reorder candidate chunks by how well each actually answers the question.
 
@@ -32,6 +34,12 @@ async def rerank_chunks(question: str, chunks: list[Chunk], top_k: int) -> list[
     in the database. Returns each chunk's relevance score alongside it,
     not just the chunk, so callers can judge how confident this ranking
     actually is instead of only seeing the reordered list.
+
+    Traced with @traceable rather than wrap_openai (see embedding.py) —
+    Voyage isn't an OpenAI-shaped client, so there's no equivalent
+    automatic wrapper. Still captures input/output/latency/errors; unlike
+    the OpenAI calls, it won't get an automatic dollar cost, since
+    LangSmith's built-in pricing table doesn't know Voyage's rates.
     """
     if not chunks:
         return []

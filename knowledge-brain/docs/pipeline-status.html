@@ -1128,10 +1128,50 @@
     <p class="caveat"><strong>Frontend, verified live in the browser, twice:</strong> signup → auto-login → every protected page loading real cookie-authenticated data → a real question round-tripping through the query proxy → Admin correctly 403ing a non-admin account → logout → re-login → <code>/login</code> while already authenticated correctly bouncing back to <code>/</code> with no loop. A <code>/code-review</code> pass afterward found and fixed 6 real issues (a login route that could return 200 with no session established, a status-poll timer that kept firing after a 401, a logout button that could get stuck on a network failure, and three duplication issues consolidated into shared helpers) — re-verified live after applying the fixes. Type-check, lint, and a full production build all pass clean. See <a href="adr/ADR-037-real-authentication-frontend.md">ADR-037</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 18 — LLM/RAG observability <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 15 · LangSmith, a dedicated external tool, not built into this app's own UI</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/core/observability.py</span>
+        <span class="path mono">enable_tracing() mirrors Settings into real env vars LangSmith's SDK reads</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">wrap_openai() on 4 service clients</span>
+        <span class="path mono">embedding · generation · query_rewriting · reference_extraction — one line each</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">@traceable on rerank_chunks</span>
+        <span class="path mono">Voyage has no automatic wrapper — same coverage, no auto cost</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">user_id + correlation_id on every trace</span>
+        <span class="path mono">tagged once, at the one graph-invocation call in RetrievalService.run_query</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Not built, deferred on purpose:</strong> ingestion-time traces (embedding, reference extraction at upload) aren't tagged with <code>user_id</code> the way query traces are — attribution scoped to what was actually asked for. Voyage's reranking cost has no automatic dollar figure — would need manual computation from its published per-token rate. No alerting or cost ceiling wired up — this is visibility, not a guardrail.</p>
+    <p class="caveat"><strong>Verified live, twice:</strong> once with a placeholder API key — a real document upload and two real queries (one with genuine retrieval and reranking against real content) all completed successfully, confirming a tracing failure never breaks the actual pipeline. Once with a real LangSmith account and key, confirming actual traces — prompt, tokens, cost — show up correctly. Full test suite (39 tests) passed unchanged throughout, since this is instrumentation around already-tested functions, not new business logic. See <a href="adr/ADR-038-llm-rag-observability.md">ADR-038</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">15</span>LLM/RAG observability</li>
       <li><span class="n mono">16</span>Real-time answer guardrails</li>
       <li><span class="n mono">17</span>Multi-agent federated retrieval</li>
       <li><span class="n mono">18</span>Conversation history &amp; context condensing</li>

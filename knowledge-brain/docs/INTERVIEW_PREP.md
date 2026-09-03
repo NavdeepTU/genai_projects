@@ -2674,6 +2674,114 @@ actually wanted, a small UX cost that's real but not a security gap.
 
 ---
 
+## Feature 25: LLM/RAG Observability via LangSmith
+
+**What does this feature do, in one sentence?**
+Every OpenAI and Voyage call in the system now automatically reports
+its exact prompt, exact response, token counts, cost, latency, and
+success or failure to LangSmith, a dedicated external tool — visibility
+this project never had before, closing the "not tracked yet" gap the
+Dashboard and Analytics pages have shown since they shipped.
+
+```mermaid
+flowchart LR
+    Q["A query comes in"] --> GRAPH["LangGraph runs the graph —<br/>auto-traced as one parent trace,<br/>tagged with user_id + correlation_id"]
+    GRAPH --> RETRIEVE["_retrieve_node:<br/>embed_chunks() (wrapped client)"]
+    GRAPH --> RERANK["_rerank_node:<br/>rerank_chunks() (@traceable)"]
+    GRAPH --> GENERATE["_generate_node:<br/>generate_answer() (wrapped client)"]
+    RETRIEVE -->|"prompt, tokens,<br/>cost, latency"| LANGSMITH[(LangSmith)]
+    RERANK -->|"input/output,<br/>latency, no auto cost"| LANGSMITH
+    GENERATE -->|"prompt, tokens,<br/>cost, latency"| LANGSMITH
+```
+
+**Why LangSmith over Langfuse, given Langfuse is open source and this
+project generally prefers self-hosting things (Postgres, Neo4j)?**
+Because the query pipeline is already a LangGraph graph, built two
+build-order items earlier. Turning LangSmith's tracing on process-wide
+captures that graph's *entire execution* automatically — every node
+shows up as its own step in a trace — with zero change to the graph's
+actual step logic. Langfuse would need that same result built by hand,
+or its own separate LangGraph integration. Self-hosting Langfuse would
+also mean standing up its own Postgres, ClickHouse, and Redis stack —
+real, ongoing operational weight that isn't proportionate here, versus
+one hosted service with a generous free tier.
+
+**This project calls the raw `openai` SDK directly, not through
+LangChain's own wrapper classes. How does automatic tracing actually
+work here, mechanically?**
+`wrap_openai()` wraps the *client object* itself, once, at the point
+each service file creates it — `client = wrap_openai(AsyncOpenAI(...))`
+— not each individual call site. After that one line, every real call
+made through that client instruments itself automatically: prompt,
+response, tokens, cost (LangSmith knows OpenAI's per-model pricing),
+and latency, with the rest of the file completely unchanged. Voyage AI
+has no equivalent wrapper, so `rerank_chunks` got an explicit
+`@traceable` decorator instead — same input/output/latency/error
+capture, but no automatic dollar cost, since LangSmith's pricing table
+doesn't know Voyage's rates.
+
+**Our own `.env` file already has an API key system. Why did tracing
+need a whole separate `enable_tracing()` function instead of just
+reading `settings.langsmith_api_key` directly?**
+Because LangSmith's SDK doesn't read our `Settings` object at all — it
+reads real process environment variables (`LANGSMITH_TRACING`,
+`LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`) directly, and our own `.env`
+loading only ever populates a Python object, it never touches
+`os.environ` itself. `enable_tracing()` is the one place that bridges
+the two — it reads our validated `Settings`, then explicitly copies
+those values into `os.environ` under the names LangSmith's SDK expects.
+It has to run before any other app module is imported, since each
+service file builds its OpenAI client at import time, not inside a
+function — by the time any request could arrive, tracing needs to
+already be armed.
+
+**You chose to log full prompt and response content, not just token
+counts. What's the actual cost of that choice, given this project
+already built a whole PII-detection layer?**
+Retrieved document text — the same text PII detection screens at
+upload time — now leaves this project's infrastructure and lives on
+LangSmith's servers. The PII allowlist is deliberately narrow (14
+categories, not exhaustive), so this isn't a fully closed risk; it's a
+real trade-off, made explicitly rather than defaulted into, because the
+actual value of this feature is seeing *why* one specific answer came
+out wrong — which metadata alone can't show you.
+
+**How does a trace know *which user* asked a given query, and why was
+it wired in at the graph-invocation call specifically, not inside each
+individual service function?**
+`RetrievalService.run_query` is the one place the query graph actually
+runs, and it already receives `user_id` as an explicit parameter,
+threaded through `QueryState` for every node to use. Passing that same
+`user_id` into the graph's `config={"metadata": {...}}` at that one
+call site tags the *entire* trace — every node, every call inside it —
+in one place, rather than repeating the same lookup five times. Doing
+it via a fresh `ContextVar` read inside each service function instead
+would have worked for a synchronous query request, but would have
+quietly broken the moment the exact same function ran from a
+background context — the identical trap this project's own ingestion
+pipeline already had to solve once, explicitly, back in ADR-030.
+
+**What would you change here if this needed to run at genuine
+production scale?**
+Two concrete gaps, both named rather than silently accepted: ingestion
+traces (embedding a document's chunks, extracting its references) get
+recorded but aren't tagged with `user_id` the way query traces are —
+attribution was scoped to what was actually asked for; and there's no
+cost ceiling or alerting wired up at all — this is pure visibility, not
+a guardrail, and LangSmith's own "automations" feature could close that
+gap later without needing anything rebuilt. Also worth naming: this is
+the first dependency in this whole project that exists purely for
+observability rather than being load-bearing — every other external
+call (OpenAI, Voyage, Azure AI Language, Neo4j) is something the app
+actually needs to function; LangSmith isn't. That's exactly why tracing
+failures are designed to never break the underlying call — verified
+live, deliberately, with an invalid API key before a real one was ever
+configured.
+
+*Further reading: [LangSmith — Trace with `wrap_openai`](https://docs.smith.langchain.com/observability/how_to_guides/annotate_code) — the official source for how the client-wrapping mechanism this feature relies on actually works.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

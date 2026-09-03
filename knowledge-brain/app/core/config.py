@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # API Management gateway
     apim_gateway_secret: str
 
+    # LLM/RAG observability (LangSmith) — every OpenAI/Voyage call in the
+    # query and ingestion pipelines gets traced: prompt, response, tokens,
+    # cost, latency. See app/core/observability.py for why this has to be
+    # mirrored into real environment variables rather than just living here.
+    langsmith_api_key: str
+    langsmith_project: str = "knowledge-brain"
+
 
 @lru_cache
 def get_settings() -> Settings:
