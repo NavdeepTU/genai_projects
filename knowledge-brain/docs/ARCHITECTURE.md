@@ -12,19 +12,28 @@ Two things exist now: getting a document *into* the system, and asking a
 question *about* it. The second of those is no longer a straight line —
 it's a LangGraph pipeline that can notice its own search results are
 weak, rewrite the question, and try once more before giving up and
-answering with whatever it has. Both flows now also touch a second
-database: Neo4j, which remembers explicit references between documents
-(not similarity — actual "this mentions that") and lets a question's
-answer pull in context from a document that was never directly
-retrieved, only connected. A request also reaches the backend through
-one of two doors now: the intended one, Azure API Management, which
-stamps a shared secret onto everything it forwards; or the Container
-App's own direct URL, which still works too, since Consumption tier
-APIM has no network-level way to block it. Everything after that in
-the build order doesn't exist yet. Every request, regardless of which
-flow it's on, also gets a correlation ID, an audit log entry, and
-circuit-breaker protection around its external AI calls (OpenAI,
-Voyage AI, and now Neo4j).
+answering with whatever it has. A question is now checked twice before
+it's ever trusted: once on the way in (is the question itself a
+jailbreak or toxic?), and once on the way out (does the generated
+answer look safe, and does it show signs of following instructions
+smuggled into a retrieved document?). Between those two checks, a
+question can now fan out across more than one document *domain* — a
+free-text category tag set manually at upload — with a supervisor
+deciding whether it needs one domain (the common case, unchanged in
+cost) or several (a real, more expensive path: one full retrieval pass
+per domain, run concurrently, then merged by a synthesis call). Both
+flows now also touch a second database: Neo4j, which remembers explicit
+references between documents (not similarity — actual "this mentions
+that") and lets a question's answer pull in context from a document
+that was never directly retrieved, only connected. A request also
+reaches the backend through one of two doors now: the intended one,
+Azure API Management, which stamps a shared secret onto everything it
+forwards; or the Container App's own direct URL, which still works too,
+since Consumption tier APIM has no network-level way to block it.
+Everything after item 17 in the build order doesn't exist yet. Every
+request, regardless of which flow it's on, also gets a correlation ID,
+an audit log entry, and circuit-breaker protection around its external
+AI calls (OpenAI, Voyage AI, and now Neo4j).
 
 ```mermaid
 flowchart TD
@@ -49,7 +58,7 @@ flowchart TD
     SESSION -->|yes| Q[POST /query]
 
     subgraph ingest["Getting a document in"]
-        UP --> CREATE["Create document row + grant access<br/>(synchronous — fast enough to finish<br/>before the response goes out)"]
+        UP --> CREATE["Create document row + grant access<br/>(synchronous — fast enough to finish<br/>before the response goes out) —<br/>domains: free-text tags, set manually,<br/>optional, deduped on save"]
         CREATE --> RESP0["Response returns immediately:<br/>document id, status = pending"]
         CREATE -.->|"scheduled as a<br/>FastAPI BackgroundTask"| BG["Background: process_document<br/>(own fresh DB + Neo4j sessions)"]
         BG --> STATUS0["status → processing"]
@@ -74,21 +83,38 @@ flowchart TD
     SAVESTAGE -.writes.-> STATUSREAD
     READY -.writes.-> STATUSREAD
 
-    subgraph retrieve["Asking a question — LangGraph query pipeline"]
-        Q --> QEMBED[Embed the question]
-        QEMBED --> VEC["Vector search: 20 candidates<br/>joined against document_permissions —<br/>filtered before ranking, not after<br/>(fails? use keyword results alone)"]
-        QEMBED --> KW["Keyword search: 20 candidates<br/>same permission join<br/>(fails? use vector results alone)"]
-        VEC --> BOTH{Both failed?}
-        KW --> BOTH
-        BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
-        BOTH -->|no| RRF["Merge: Reciprocal Rank Fusion<br/>(20 candidates)"]
-        RRF --> RERANK["Rerank via Voyage AI<br/>(fails? skip straight to generate)"]
-        RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
-        CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
-        REWRITE --> QEMBED
-        CHECK -->|no| GRAPHCTX["Fetch graph context, same permission join —<br/>a referenced document this user can't see<br/>never contributes a snippet (one hop,<br/>via circuit breaker)"]
-        GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM, via circuit breaker)"]
-        GEN --> SOURCES["Build sources + confidence from<br/>the same reranked chunks/score —<br/>confidence = null if reranker was unavailable"]
+    subgraph retrieve["Asking a question — FederatedRetrievalService"]
+        Q --> INPUTGUARD{"Input guardrail: moderation +<br/>jailbreak check, concurrent<br/>(via circuit breakers)"}
+        INPUTGUARD -->|"flagged, or both<br/>checks unavailable"| BLOCKED1["Blocked before any retrieval —<br/>fixed friendly message,<br/>no sources/confidence"]
+        INPUTGUARD -->|clean| CLASSIFY{"Classify domains needed<br/>(LLM, scoped to this user's<br/>own accessible domains)"}
+        CLASSIFY -->|"0 or 1 domain —<br/>the common case"| SINGLE
+
+        subgraph SINGLE["One RetrievalService.run_query pass<br/>(domain filter optional)"]
+            QEMBED[Embed the question]
+            QEMBED --> VEC["Vector search: 20 candidates<br/>joined against document_permissions,<br/>narrowed to one domain if given<br/>(fails? use keyword results alone)"]
+            QEMBED --> KW["Keyword search: 20 candidates<br/>same permission + domain join<br/>(fails? use vector results alone)"]
+            VEC --> BOTH{Both failed?}
+            KW --> BOTH
+            BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
+            BOTH -->|no| RRF["Merge: Reciprocal Rank Fusion<br/>(20 candidates)"]
+            RRF --> RERANK["Rerank via Voyage AI<br/>(fails? skip straight to generate)"]
+            RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
+            CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
+            REWRITE --> QEMBED
+            CHECK -->|no| GRAPHCTX["Fetch graph context, same permission join<br/>(one hop, via circuit breaker)"]
+            GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM)"]
+            GEN --> OUTGUARD1{"Output guardrail: moderation +<br/>injection check, concurrent"}
+        end
+
+        OUTGUARD1 -->|"flagged, or both<br/>checks unavailable"| BLOCKED2["Blocked — fixed friendly<br/>message, no sources/confidence"]
+        OUTGUARD1 -->|clean| SOURCES["Build sources + confidence —<br/>confidence = null if reranker<br/>was unavailable"]
+
+        CLASSIFY -->|"2+ domains —<br/>a genuinely cross-domain question"| FEDROW["Run one full SINGLE pass<br/>per domain, concurrently —<br/>each produces its own complete<br/>draft answer (asyncio.gather)"]
+        FEDROW -->|"one domain's pass<br/>fails — excluded,<br/>result marked partial"| SYNTH
+        FEDROW --> SYNTH["Synthesize: merge the per-domain<br/>draft answers into one (LLM),<br/>reconciling citations"]
+        SYNTH --> OUTGUARD2{"Output guardrail again,<br/>on the merged answer —<br/>context = every contributing<br/>domain's own chunks"}
+        OUTGUARD2 -->|"flagged, or both<br/>checks unavailable"| BLOCKED2
+        OUTGUARD2 -->|clean| SOURCES2["Sources = union of every<br/>contributing domain's sources —<br/>confidence always null"]
     end
 
     BUILDREFS -.writes.-> NEO4J[(Neo4j)]
@@ -100,11 +126,14 @@ flowchart TD
     GRAPHCTX -.reads.-> ACL
 
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
-    GEN --> AUDIT2[Audit log:<br/>query_made]
+    Q --> AUDIT2[Audit log:<br/>query_made]
 
     AUDIT1 --> RESP1[Response +<br/>correlation ID]
     AUDIT2 --> RESP2[Response: answer + sources +<br/>confidence + correlation ID]
     SOURCES -.-> RESP2
+    SOURCES2 -.-> RESP2
+    BLOCKED1 -.-> RESP2
+    BLOCKED2 -.-> RESP2
 ```
 
 **Getting a document in:** a user uploads a file — through the REST
@@ -158,17 +187,40 @@ does, a tool call gives one final result, so it stays fully
 synchronous by design, not backgrounded. Splitting the service into
 two methods this session broke that call site outright (it still
 called the now-deleted `ingest_document`) until this was caught
-reviewing this very document and fixed.
+reviewing this very document and fixed. Whoever uploads a document can
+also tag it with one or more free-text domains at the same time — a
+comma-separated field on the REST form, a plain list on the MCP tool —
+stored directly on the row, deduped, and left empty by default. Nothing
+reads or interprets a document's *content* to guess its domain; a tag
+means exactly, and only, what whoever uploaded it typed.
 
 **Asking a question:** a user sends a question, again proven by their
 session cookie (or, over MCP, the same shared-key/`X-User-Id` pair
-described above) → it's turned into a meaning-vector, and two independent
-searches run one after another: a vector search (closest meaning) and
-a keyword search (Postgres full-text search, for exact terms vector
-search can miss — error codes, product IDs, rare proper nouns). Both
-searches are joined against the permissions table, so a chunk from a
-document this user was never granted access to is never a candidate in
-the first place — filtered before ranking, not after, the same way
+described above), and the very first thing that happens is a safety
+check on the *question itself* — a moderation classifier and an LLM
+jailbreak judge, run concurrently, look for toxic content or a direct
+attempt to hijack the assistant's instructions. If either flags it, or
+both checks are simultaneously unreachable, the question never reaches
+retrieval at all — no embedding, no search, no LLM generation call, all
+of it skipped, replaced with the same fixed, friendly blocked message
+every other guardrail in this system uses. A clean question then goes
+to a supervisor: which of this user's own accessible domains, if any,
+does this question actually need? Zero or one domain needed — every
+question today, since domains are opt-in and most documents remain
+untagged — takes the pipeline described below exactly once, at exactly
+the cost it always had. Two or more domains needed runs that same
+pipeline once per domain, concurrently, each producing its own
+complete, independent draft answer, then merges them (see "What's new
+since the last update" below for that path in full).
+
+One pass of the pipeline itself: the question is turned into a
+meaning-vector, and two independent searches run: a vector search
+(closest meaning) and a keyword search (Postgres full-text search, for
+exact terms vector search can miss — error codes, product IDs, rare
+proper nouns), each optionally narrowed to one domain. Both searches
+are joined against the permissions table, so a chunk from a document
+this user was never granted access to is never a candidate in the
+first place — filtered before ranking, not after, the same way
 ADR-012's hybrid-search fix avoided truncating results by filtering too
 late. Each fetches a wider pool of 20 candidates, not just the final 5.
 If one of the two searches fails, the system doesn't
@@ -200,20 +252,85 @@ final chunks, the graph snippets, plus the *original* question (never
 the rewritten one — the rewrite is only a search tool, not a
 replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
-rather than guessing if the answer isn't there. Before any of that
-reaches the user, one more check runs: a moderation classifier and an
-LLM injection judge look at the finished answer together, and if either
+rather than guessing if the answer isn't there. Before that answer goes
+anywhere, one more check runs: a moderation classifier and an LLM
+injection judge look at the finished answer together, and if either
 flags it — or if both are simultaneously unreachable — the real answer
-never leaves the server, replaced with a fixed, friendly message and no
-sources or confidence at all (see ADR-039). Otherwise, the response
-sent back carries more than just that answer text: each chunk that
-actually informed it, with its source document's filename, plus a
-confidence number — the same relevance score reranking already
-computed on the best chunk, or nothing at all if reranking itself was
-unavailable for this request, since a real low score and "no score was
-computed" must never look identical to whoever's reading it.
+never leaves the server, replaced with the same fixed, friendly message
+and no sources or confidence at all (see ADR-039). Otherwise, for a
+single-domain question, the response sent back carries more than just
+that answer text: each chunk that actually informed it, with its source
+document's filename, plus a confidence number — the same relevance
+score reranking already computed on the best chunk, or nothing at all
+if reranking itself was unavailable for this request, since a real low
+score and "no score was computed" must never look identical to
+whoever's reading it.
 
-**What's new since the last update:** every generated answer now
+**What's new since the last update:** two things landed together this
+session. First, an input guardrail — the same availability-aware,
+two-check shape as the output guardrail below, but running *before*
+retrieval instead of after. A new graph node, `input_guardrail_check`,
+is now the query pipeline's entry point: a moderation classifier
+(reused as-is) and a new LLM jailbreak judge (`check_jailbreak`, judging
+whether the raw question is a direct injection/jailbreak attempt, as
+opposed to the output guardrail's `check_injection`, which catches
+*indirect* injection smuggled in through a retrieved document) run
+concurrently on the question itself. A flag from either check, or both
+checks being simultaneously unreachable, blocks the question before it
+costs anything — no embedding call, no search, no generation call, all
+skipped entirely. Verified live: a jailbreak attempt was blocked in
+about 2.8 seconds, against roughly 9 seconds for a full pipeline run on
+a real question, confirming the point of catching it this early.
+
+Second, build-order item 17, multi-agent federated retrieval — the
+reason a "domain" concept exists in this system at all now. A document
+can be tagged with one or more free-text domains at upload (manual, for
+now — see ADR-040), and a new supervisor call, `classify_domains`,
+decides which of a user's own accessible domains a question actually
+needs. Zero or one domain needed delegates straight to the exact
+single-domain pipeline this document already describes, completely
+unchanged, at the same cost as before this feature existed. Two or more
+domains needed runs that same pipeline once per domain, concurrently
+(`asyncio.gather`) — each a full, independent pass with its own
+retrieval, reranking, graph context, generation, and output guardrail
+check, producing its own complete draft answer, not just a shared pool
+of chunks. A new synthesis call (`synthesize_answers`) then merges the
+per-domain drafts into one answer, reconciling citations and naming it
+plainly if two domains disagree, and the *merged* answer gets one more
+moderation+injection safety pass before it's returned — on top of the
+pass each domain's own draft already went through individually. If one
+domain's pass fails, it's excluded via a task-level safe-wrapper, not a
+literal per-domain circuit breaker (this project's breakers are already
+one shared instance per external service, not per domain — a real
+outage doesn't care which domain asked); synthesis still returns an
+answer from whichever domains succeeded, clearly marked partial.
+`confidence` is always `null` on this path — no single well-defined
+relevance score exists once several domains' reranked results have been
+merged into prose by an LLM. `FederatedRetrievalService` is now the one
+entry point `/query`, MCP's `ask_knowledge_base`, and the frontend all
+reach through — `RetrievalService` itself didn't change its own public
+shape, it just gained an optional `domain` parameter, and is now a
+building block the federated service calls rather than something
+callers reach directly. The one exception, named plainly rather than
+silently: the evaluation harness (`eval/run_eval.py`) still calls
+`RetrievalService` directly, since it needs the raw internal chunks and
+graph context for scoring that `FederatedResult` deliberately doesn't
+expose to normal callers — behaviorally identical for it today, since
+its fixtures carry no domain tags. Verified live: a genuinely
+cross-domain question (leave-day policy plus a travel-cancellation
+reimbursement question, spanning HR and Finance test documents)
+correctly merged both domains' findings with `confidence` explicitly
+`null`, at roughly double the latency of an equivalent single-domain
+question (~11.8s vs ~5.5s) — the felt cost of running two full passes
+plus a merge, confirmed directly rather than assumed. The upload form
+gained a matching "Domains (optional)" field, sending the same
+comma-separated string the backend already expects, with the resulting
+tags rendered as badges on each document card — the first frontend
+change to reach this feature, and the reason this project now has
+Vitest + React Testing Library set up at all (it had zero frontend test
+infrastructure before this). See ADR-040.
+
+**What's new before that:** every generated answer now
 passes through a real safety checkpoint before it can reach a user —
 build-order item 16, real-time answer guardrails. A new graph node,
 `guardrail_check`, sits between `generate` and the end of the query
@@ -723,10 +840,49 @@ browser only ever talks to these same-origin paths, which then make the
 real, secret-bearing calls to the backend server-to-server, the same
 reasoning the Document Library page's own server-side fetch already
 established, just triggered by a user action instead of a page render.
-Talks to: `POST /documents/upload` and `GET
+The upload route handler needed no change at all for domain tagging
+(ADR-040): it forwards the browser's whole `FormData` object through to
+the backend untouched, so a `domains` field the dropzone adds just
+rides along. The dropzone itself gained a "Domains (optional)" text
+input, sent as the same comma-separated string the backend already
+parses — its value persists across a successful upload rather than
+clearing, so tagging a batch of same-category files doesn't mean
+retyping the tag each time. Talks to: `POST /documents/upload` and `GET
 /documents/{id}/status` on the backend, from the Next.js server, never
 from the browser. If it disappeared, uploading would still be possible
 through `curl` or MCP, just not through the UI.
+
+**Document card (`frontend/components/document-card.tsx`)** — the
+per-document card the Document Library page renders one of for each
+upload: filename, status badge, upload date, a PII warning if flagged,
+and now a small outline badge per domain tag. Extracted out of
+`app/documents/page.tsx` into its own file this session, for a reason
+that's really about testing, not styling: the page file transitively
+imports `next/headers` (through `lib/server-api`), so it throws outside
+a real Next.js request — a plain component-render test couldn't import
+`DocumentCard` from there at all. Same client-safe/server-only split
+`lib/api.ts`/`lib/server-api.ts` already established, applied to a
+component instead of data-fetching functions. Talks to: nothing
+directly — a pure function of the `DocumentListItem` it's given.
+
+**Frontend tests (`frontend/vitest.config.mts`, `*.test.tsx` files
+next to the components they cover)** — this project's first frontend
+test infrastructure, set up from nothing this session (Vitest + React
+Testing Library, the user's own choice over Playwright's full-browser
+e2e approach, for faster component-level tests). Two real setup snags
+along the way, both dependency-resolution issues rather than app bugs:
+a peer-dependency conflict between `@vitejs/plugin-react` and the
+`shadcn` CLI's own babel version (two separate dev-only toolchains,
+resolved with `--legacy-peer-deps`), and a missing
+`@testing-library/dom` peer that had to be installed explicitly. Tests
+cover exactly what this session built: the domain field renders and
+accepts typing, the typed value actually lands in the upload's
+`FormData`, an empty field still sends an empty `domains` value
+(matching the backend's default), and `DocumentCard` renders a badge
+per domain or none at all for an untagged document. Run with `npm
+test`. If it disappeared, nothing about the running app would change —
+only the ability to catch a regression in this behavior without
+manually re-testing it in a browser.
 
 **Query page (`frontend/app/query/page.tsx`) and its proxy route
 (`frontend/app/api/query/route.ts`)** — the chat interface, added with
@@ -1046,41 +1202,65 @@ internal use deciding whether to build graph references, mirroring
 `find_by_keyword_unrestricted`'s reasoning: system-level code, not a
 user-facing read. `update_processing_stage` mirrors `update_status`'s
 exact shape, writing to the new progress-tracking column instead.
+`create_document` dedupes its `domains` argument (order-preserving) —
+the one point both the REST upload route and the MCP upload tool
+converge on, so a repeated tag like "HR, HR" is caught once, centrally,
+rather than needing the same fix in two callers (ADR-040, found by
+`/code-review`). `find_similar_chunks` and `find_by_keyword` both
+gained an optional `domain` parameter, joining `Document` and narrowing
+with `Document.domains.any()` only when one is given — the actual
+mechanism a domain-scoped `RetrievalService.run_query` call uses to see
+only its own slice of the knowledge base. `list_domains_for_user`
+(ADR-040) returns the distinct domains across documents a user can
+access — untagged documents and domains behind documents the user
+can't see never appear, so `classify_domains` is never offered a choice
+that isn't real for that user.
 
-**Retrieval service (`app/services/retrieval_service.py`)** — still the
-conductor for answering questions. `__init__` builds a small LangGraph
-graph once (`self._graph = build_query_graph(self)`); the actual step
-logic lives in six methods on this class (`_retrieve_node`,
-`_rerank_node`, `_rewrite_node`, `_should_retry`, `_graph_context_node`,
-`_generate_node`), each a graph node, all reusing the exact same
-search/rerank/graph-lookup helpers hardened in ADR-012, ADR-013, and
-ADR-015 — nothing about the existing partial-failure or
-reranker-fallback behavior changed to add graph context on top.
-`run_query` is now the *one* entry point every caller uses — the REST
-route, MCP's `ask_knowledge_base`, and the evaluation harness — since
-timing (`duration_ms`, wrapped around the whole graph invocation with
-`time.monotonic()`, ADR-033) needs to be computed once for every
-caller to get an honest response-time average, not duplicated per
-caller. `answer_question`, the old thin wrapper MCP used to call
-instead, was deleted with ADR-033 once that switch left it with no
-remaining callers — a real, verified deletion, not a stub kept around
-"just in case." A second method, `build_sources_and_confidence` (added
-with ADR-032),
-turns a finished `QueryState` into what `/query`'s REST response
+**Retrieval service (`app/services/retrieval_service.py`)** — the
+single-domain conductor for answering one question. `__init__` builds a
+small LangGraph graph once (`self._graph = build_query_graph(self)`);
+the actual step logic lives in methods on this class
+(`_input_guardrail_node`, `_retrieve_node`, `_rerank_node`,
+`_rewrite_node`, `_should_retry`, `_graph_context_node`,
+`_generate_node`, `_output_guardrail_node`), each a graph node, all
+reusing the exact same search/rerank/graph-lookup helpers hardened in
+ADR-012, ADR-013, and ADR-015 — nothing about the existing
+partial-failure or reranker-fallback behavior changed to add graph
+context, guardrails, or domain filtering on top. `run_query` now takes
+an optional `domain` parameter, threaded into both search helpers, so
+one call can be scoped to a single document domain or left unrestricted
+(ADR-040). Since that ADR, this class is no longer the one entry point
+callers reach directly — `FederatedRetrievalService` is, with this
+class as the building block it calls once (unrestricted) or several
+times concurrently (one call per relevant domain). The one remaining
+direct caller is the evaluation harness (`eval/`), which needs this
+class's raw `QueryState` — the actual reranked chunks and graph context
+— for scoring, detail `FederatedRetrievalService`'s own return shape
+deliberately doesn't expose. `answer_question`, the old thin wrapper
+MCP used to call before ADR-033, was deleted once that switch left it
+with no remaining callers — a real, verified deletion, not a stub kept
+around "just in case." A second method, `build_sources_and_confidence`
+(added with ADR-032), turns a finished `QueryState` into what a caller
 actually shows — deduped per-document filename lookups and the
 `confidence = None`-when-unavailable rule — moved here from the route
 handler it originally shipped in, both to respect this project's own
 "routes stay thin" rule and to make it directly unit-testable without
-a running HTTP server. Talks to: embedding, the repository, hybrid search, reranking, query
-rewriting, the graph repository, and generation.
+a running HTTP server; `FederatedRetrievalService` calls it internally
+too, for its own single-domain pass-through path. Talks to: embedding,
+the repository, hybrid search, reranking, query rewriting, the graph
+repository, generation, and the guardrail/jailbreak checks.
 
 **Query graph (`app/services/query_graph.py`)** — defines the shape of
 the data that flows between the retrieval service's graph nodes
-(`QueryState`: the question, its possibly-rewritten form, candidates,
-reranked chunks, a relevance score, retry count, the answer) and wires
-those nodes into a compiled LangGraph graph. Talks to: nothing directly
-— it only describes connections between methods the retrieval service
-already owns.
+(`QueryState`: the question, its possibly-rewritten form, an optional
+`domain` filter (ADR-040), candidates, reranked chunks, a relevance
+score, retry count, the answer, and the `blocked`/`block_reason` pair
+both guardrails write to) and wires those nodes into a compiled
+LangGraph graph. `input_guardrail_check` is the graph's actual entry
+point, not `retrieve` — a conditional edge routes straight to the
+graph's end on a block, so a bad question never reaches retrieval at
+all. Talks to: nothing directly — it only describes connections between
+methods the retrieval service already owns.
 
 **Query rewriting (`app/services/query_rewriting.py`)** — a single,
 narrowly-scoped LLM call: given a question that just returned weak
@@ -1201,31 +1381,87 @@ would still work exactly the same — only the ability to see what
 happened inside them would be gone.
 
 **Guardrails (`app/services/moderation.py`,
-`app/services/injection_detection.py`, and a new `_guardrail_node` on
-`RetrievalService`)** — added with ADR-039, the safety checkpoint every
-generated answer now passes through before it can reach a user.
-`check_moderation` wraps OpenAI's Moderation API — fast, purpose-built,
-but blind to anything specific to this app. `check_injection` is a
-second LLM call, shown the actual retrieved context alongside the
-generated answer, judging whether the answer looks like it followed
-instructions embedded in a document rather than genuinely answering the
-question — the RAG-specific risk a moderation classifier has no concept
-of. Both run concurrently inside `_guardrail_node`, a real LangGraph
-node wired between `generate` and the graph's end, so REST and MCP both
-inherit this for free the same way every other feature under this
-pipeline has. The fail policy is availability-aware, not uniformly
-fail-open or fail-closed: a single check being down contributes no
-signal of its own — an answer the *other* check actually cleared still
-gets shown — but the combined decision fails closed the moment neither
-check could run at all. On a block, the node overwrites `state["answer"]`
-directly with a fixed, friendly message, and `build_sources_and_confidence`
+`app/services/injection_detection.py`, `app/services/jailbreak_detection.py`,
+and `_input_guardrail_node`/`_output_guardrail_node` on
+`RetrievalService`)** — the safety checkpoints every question and every
+generated answer now pass through. `check_moderation` wraps OpenAI's
+Moderation API — fast, purpose-built, but blind to anything specific to
+this app — and is reused as-is on both the question and the answer.
+`check_injection` (output side, ADR-039) is shown the actual retrieved
+context alongside the generated answer, judging whether the answer
+looks like it followed instructions embedded in a document rather than
+genuinely answering the question — *indirect* injection, smuggled in
+through data the pipeline itself retrieved. `check_jailbreak` (input
+side, ADR-040) judges the raw question alone, before any retrieval has
+run, for a *direct* jailbreak or injection attempt typed straight in —
+a different risk with no context to compare against. Both pairs run
+concurrently inside their own node — `_input_guardrail_node` is the
+graph's actual entry point, `_output_guardrail_node` sits between
+`generate` and the graph's end — so REST and MCP both inherit both
+checks for free the same way every other feature under this pipeline
+has. The fail policy is availability-aware, not uniformly fail-open or
+fail-closed, and identical on both sides: a single check being down
+contributes no signal of its own — a question or answer the *other*
+check actually cleared still gets through — but the combined decision
+fails closed the moment neither check could run at all. On a block,
+the node overwrites `state["answer"]` directly with the same fixed,
+friendly message on both sides (deliberately identical whether it was
+the input or the output check that tripped, and deliberately never
+naming which check, so neither reveals anything an attacker could use
+to refine the next attempt), and `build_sources_and_confidence`
 suppresses sources and confidence too — every downstream reader just
 sees a state that's already safe to show, with no awareness that
-blocking exists. Talks to: OpenAI, via its own `wrap_openai()`-wrapped
-client (so a blocked answer is fully visible in LangSmith too) and its
-own circuit breaker, same as every other external call in this system.
-If it disappeared, every answer would go straight back to being trusted
-completely, the way it always was before this session.
+blocking exists or where in the pipeline it happened. Talks to: OpenAI,
+via its own `wrap_openai()`-wrapped client (so a blocked answer is
+fully visible in LangSmith too) and its own circuit breaker per check,
+same as every other external call in this system. If it disappeared,
+every question and answer would go straight back to being trusted
+completely, the way it always was before ADR-039.
+
+**Domain classification (`app/services/domain_classification.py`)** —
+a single LLM call, `classify_domains(question, available_domains)`,
+deciding which of a user's own accessible document domains a question
+actually needs. Never invents a domain outside the list it's given —
+the available set always comes from `list_domains_for_user`, so the
+model is only ever choosing among domains that genuinely have
+accessible documents behind them. Own circuit breaker
+(`domain_classification`); on failure, `FederatedRetrievalService`
+falls back to unrestricted search rather than blocking the question.
+Talks to: OpenAI.
+
+**Synthesis (`app/services/synthesis.py`)** — a single LLM call,
+`synthesize_answers(question, domain_answers, partial)`, merging one
+complete draft answer per domain into a single coherent answer,
+reconciling citations and naming it plainly if two domains actually
+disagree rather than picking a side silently. Told explicitly when the
+result is partial (one or more domains couldn't be reached), so the
+merged answer says so rather than presenting itself as complete. Own
+circuit breaker (`synthesis`). Talks to: OpenAI.
+
+**Federated retrieval service (`app/services/federated_retrieval_service.py`)**
+— added with ADR-040, the new single entry point every real caller (the
+REST route, MCP's `ask_knowledge_base`) now goes through instead of
+`RetrievalService` directly. Classifies domains, then either delegates
+straight to one `RetrievalService.run_query` call (zero or one domain,
+the common case, unchanged cost) or runs one call per relevant domain
+concurrently via `asyncio.gather`, each a full independent pass
+producing its own draft answer. `_run_one_domain_safely` is this
+feature's actual failure-isolation mechanism — not a literal per-domain
+circuit breaker (this project's breakers are already one shared
+instance per external service, which a per-domain instance would only
+duplicate) — catching one domain's exception so it can't stop the
+others, and marking the eventual result `partial` if any domain was
+excluded this way. On the multi-domain path, calls `synthesize_answers`
+to merge the drafts, then runs one more moderation+injection check on
+the *merged* answer, reusing `RetrievalService`'s own guardrail-safety
+helpers directly rather than duplicating that logic. Returns
+`FederatedResult` (answer, sources, confidence, duration_ms, blocked,
+block_reason, domains_used, partial) — a deliberately different shape
+from the raw `QueryState` a direct `RetrievalService` caller sees, since
+`confidence` has no honest single value once several domains have been
+merged into prose. Talks to: the repository (for
+`list_domains_for_user`), domain classification, synthesis, and
+`RetrievalService` itself.
 
 **Evaluation harness (`eval/`)** — a separate, on-demand tool, not part
 of the running app: a fixed set of known-answer test questions
@@ -1239,6 +1475,17 @@ pipelines, plus its own OpenAI circuit breaker for the two judge calls.
 If it disappeared, the system would still work exactly the same —
 there'd just be no way to tell, other than manually reading answers,
 whether a change made retrieval or generation better or worse.
+Deliberately still calls `RetrievalService` directly, not
+`FederatedRetrievalService` (ADR-040) — scoring needs the raw
+`reranked_chunks`/`graph_context` off `QueryState`, which
+`FederatedResult` intentionally doesn't expose to normal callers, and
+its fixture documents carry no domain tags, so the two are behaviorally
+identical here regardless. This file also had a real, pre-existing bug
+fixed the same session it was next touched for something else
+(ADR-030's split of ingestion into `create_document`/`process_document`
+had left this file calling a method, `ingest_document`, that no longer
+existed) — caught only because this file happened to be read for
+`domain` support, not because anything was actively monitoring it.
 
 ```mermaid
 flowchart LR
@@ -1631,47 +1878,80 @@ existing keyword search checks whether any other stored document
 actually contains it. Real matches get written to Neo4j as an explicit
 link. This step can't fail the upload; if Neo4j or the extraction call
 is unavailable, the document is still "ready," it just has no graph
-links.
+links. Alongside the file, the uploader can optionally attach one or
+more free-text domain tags (a comma-separated form field), stored on
+the document row and deduped — the same mechanism `list_domains_for_user`
+later reads from to know which domains actually exist for a given user
+(see ADR-040).
 
 **Uploading a document through MCP:** the same journey, with one
 difference — there's no separate response-then-background split, since
 a tool call only ever produces one final result. `create_document` and
 everything `process_document` does above all run synchronously, back
 to back, in the same call, and the tool's return value describes the
-document's actual final state, not an in-progress one.
+document's actual final state, not an in-progress one. Domains arrive
+here as a plain list rather than a comma-separated string, since MCP
+tool arguments carry real JSON types.
 
 **Asking a question:** a user sends a question to the query address,
-again proven by their session cookie. The question is turned into a
-meaning-vector using the same embedding model used for chunks, so the
-two are comparable. Postgres finds 20 candidate chunks by vector
-similarity and, separately, 20 by keyword match — both searches joined
-against the permissions table, so a document this user was never
-granted access to is never a candidate at all, not filtered out
-afterward — and merges the two ranked lists into one with Reciprocal
-Rank Fusion. Voyage AI's reranking model then looks at the actual
-question and each of those 20 candidates together, narrows them down to
-the 5 that genuinely answer the question best, and reports how relevant
-the best one actually is. If that top score is weak and this is the
-first attempt, the pipeline loops back: an LLM rephrases the question,
-and the whole search runs again with the new phrasing — once, never
-more; the user's identity carries through the retry unchanged, since it
-was set once in the graph's shared state and no node along the way
-touches it. Once there are chunks worth using, the system asks Neo4j
-what the documents behind those chunks explicitly reference — one hop
-only — and pulls in a snippet from each, subject to the same permission
-check: a referenced document this user can't see contributes no
-snippet. Those chunks, the graph snippets, and the *original* question
-are sent to an LLM, which writes an answer grounded only in that
-retrieved text. Before that answer goes anywhere, a moderation check
-and an LLM injection judge look at it together — if either flags it, or
-if both are unreachable at once, the answer is replaced with a fixed,
-friendly message and no sources or confidence, and neither the REST
-route nor MCP's tool ever sees the real one (see ADR-039). Otherwise,
-the REST response returns that answer alongside the chunks that
+again proven by their session cookie. Before anything else runs, an
+input guardrail checks the *question itself* — a moderation classifier
+and an LLM jailbreak judge, concurrently — and a flagged or
+doubly-unreachable check stops everything right there: no embedding,
+no search, no LLM call, replaced with the same fixed, friendly blocked
+message every guardrail in this system uses (see ADR-040's extension of
+ADR-039's pattern to the input side). A clean question then goes to a
+supervisor, `classify_domains`, which decides how many of this user's
+own accessible domains the question needs. Zero or one domain — every
+question today, since domains are opt-in — takes the path this
+paragraph already describes below, exactly once, at no extra cost.
+
+The path itself: the question is turned into a meaning-vector using the
+same embedding model used for chunks, so the two are comparable.
+Postgres finds 20 candidate chunks by vector similarity and,
+separately, 20 by keyword match — both searches joined against the
+permissions table, so a document this user was never granted access to
+is never a candidate at all, not filtered out afterward, and both
+optionally narrowed to one domain — and merges the two ranked lists
+into one with Reciprocal Rank Fusion. Voyage AI's reranking model then
+looks at the actual question and each of those 20 candidates together,
+narrows them down to the 5 that genuinely answer the question best, and
+reports how relevant the best one actually is. If that top score is
+weak and this is the first attempt, the pipeline loops back: an LLM
+rephrases the question, and the whole search runs again with the new
+phrasing — once, never more; the user's identity carries through the
+retry unchanged, since it was set once in the graph's shared state and
+no node along the way touches it. Once there are chunks worth using,
+the system asks Neo4j what the documents behind those chunks explicitly
+reference — one hop only — and pulls in a snippet from each, subject to
+the same permission check: a referenced document this user can't see
+contributes no snippet. Those chunks, the graph snippets, and the
+*original* question are sent to an LLM, which writes an answer grounded
+only in that retrieved text. Before that answer goes anywhere, the
+output guardrail runs: a moderation check and an LLM injection judge
+look at it together — if either flags it, or if both are unreachable at
+once, the answer is replaced with the same fixed, friendly message and
+no sources or confidence, and neither the REST route nor MCP's tool
+ever sees the real one (see ADR-039). Otherwise, for a single-domain
+question, the response returns that answer alongside the chunks that
 actually informed it (each with its source document's filename) and a
 confidence number pulled straight from reranking's own best score — or
 `null` if reranking was unavailable for this request, rather than a
 `0.0` that would look like a real, low score.
+
+Two or more domains needed is a genuinely different, more expensive
+path: the pipeline above runs once per relevant domain, fully and
+concurrently, each producing its own complete draft answer rather than
+sharing one pool of chunks. A synthesis call then merges those drafts
+into a single answer, reconciling citations across domains and naming
+it plainly if two domains actually disagree — and that merged answer
+gets one more pass through the exact same output guardrail described
+above before it's returned. `confidence` is always `null` on this
+path, since no single relevance score means anything once several
+domains' reranked results have been merged into prose. If one domain's
+retrieval pass fails outright, it's excluded rather than failing the
+whole question — synthesis proceeds with whichever domains succeeded,
+and the result is marked partial. See ADR-040.
 
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
@@ -1680,19 +1960,21 @@ checks that secret first — wrong or missing, the request stops there
 with a 401, nothing else runs. Once past the gate, the request runs the
 exact same underlying pipeline described above: `ask_knowledge_base`
 and `upload_document` are thin wrappers calling the same
-`RetrievalService` and `IngestionService`, so the LangGraph retry loop,
-graph context, the guardrail check, and the audit log entry all behave
-identically regardless of which door the request came through.
-`ask_knowledge_base` calls the exact same `run_query()` REST does (the
-one entry point every caller shares — see ADR-033), and only returns
-`state["answer"]` — the plain answer string, already guaranteed safe to
-show by the time it reaches this point, whether that's the real answer
-or the guardrail's own fixed message. An MCP tool result is meant to be
-read by another AI, not rendered as a UI with source cards and a
-confidence badge, so it was never extended to return
+`FederatedRetrievalService` and `IngestionService`, so the input and
+output guardrails, the domain-routing decision, the LangGraph retry
+loop, graph context, and the audit log entry all behave identically
+regardless of which door the request came through.
+`ask_knowledge_base` calls the exact same `run_query()` the REST route
+does (the one entry point every caller shares — a principle ADR-033
+established and ADR-040 carried forward onto the new federated service),
+and only returns the answer string, already guaranteed safe to show by
+the time it reaches this point, whether that's the real answer, a
+blocked message, or a synthesized cross-domain one. An MCP tool result
+is meant to be read by another AI, not rendered as a UI with source
+cards and a confidence badge, so it was never extended to return
 `sources`/`confidence` the way `/query`'s REST response does. Both call
-sites reuse the exact same `RetrievalService`; they just ask it for
-different amounts of what one pipeline run already produced.
+sites reuse the exact same `FederatedRetrievalService`; they just ask
+it for different amounts of what one pipeline run already produced.
 
 ## What could go wrong and how we handle it
 
@@ -1733,6 +2015,40 @@ inside `_rewrite_node`. There's no metric yet for "how often does this
 retry fire," so an on-call engineer would have to know to grep logs for
 it specifically — acceptable at zero production traffic, not acceptable
 once this serves real users. See ADR-014.
+
+**Two domains that are really the same thing, spelled differently** —
+domains are free-text, typed by hand at upload, with no fixed
+vocabulary and no dedup across documents (ADR-040). "HR" and "Human
+Resources" are, to this system, two completely unrelated domains;
+nothing today detects, warns about, or merges near-duplicate names, so
+a question that should reach both silently only reaches whichever one
+`classify_domains` happens to pick. Not handled yet — a future
+improvement would need either a fixed, admin-managed taxonomy or a
+normalization/dedup step at upload time, both explicitly out of scope
+for this pass's "simple free-text category" decision.
+
+**A raw provider rate-limit error isn't a circuit-breaker error, and
+that gap is real, not theoretical** — caught live during this feature's
+own verification: Voyage AI's free tier caps unpaid accounts at 3
+reranking requests per minute (the same constraint `eval/run_eval.py`
+already paces around with a 20-second sleep between cases), and a burst
+of rapid test queries tripped it mid-session, surfacing as an unhandled
+500, not a graceful failure. The reason: `_rerank_safely` only catches
+`CircuitOpenError` — the error the circuit breaker raises once it's
+already *open* from repeated failures — not the raw provider exception
+a single failing call actually raises before that threshold is ever
+reached; `/query`'s own route only catches `CircuitOpenError` and
+`RetrievalUnavailableError`, so a lone rate-limit hit falls through
+both. This predates this session's work but has a sharper consequence
+now: `_run_one_domain_safely`'s failure isolation — the mechanism
+ADR-040 relies on to keep one bad domain from taking the others down —
+only catches `(CircuitOpenError, RetrievalUnavailableError,
+OpenAIError)` too, so this exact scenario, hit by one domain among
+several, would propagate up through `asyncio.gather` uncaught and fail
+the *entire* federated question, not just exclude that one domain the
+way the design intends. Not fixed this session — named here rather
+than silently left for the next person (possibly future-me) to
+rediscover the hard way.
 
 **OpenAI itself starts failing repeatedly (outage, rate limit)** — after
 3 failures within 60 seconds, that call site's circuit breaker opens.
@@ -2782,11 +3098,18 @@ no code change needed to the graph itself, only to the individual
 OpenAI/Voyage call sites that need their own detail captured. See
 ADR-038.
 
-**Guardrail** — a safety check run on an AI system's *output*, after
-it's already been generated, before it's actually shown to anyone —
-distinct from checking *input* (like PII detection screening a document
-at upload time) and from measuring quality offline in batch (like the
-evaluation harness). See ADR-039.
+**Guardrail** — a safety check run on an AI system's request or
+response — either the *output* (a generated answer, checked before it's
+shown to anyone, ADR-039) or the *input* (a user's raw question,
+checked before it's ever allowed to trigger retrieval or generation,
+ADR-040) — distinct from checking a *document* (like PII detection
+screening it at upload time, a different input entirely) and from
+measuring quality offline in batch (like the evaluation harness). This
+project runs both an input and an output guardrail today, and
+deliberately shows the exact same fixed, friendly blocked message
+either way — never revealing which check tripped or when in the
+pipeline, since that's exactly the feedback that would help someone
+refine an attack. See ADR-039 and ADR-040.
 
 **Prompt injection** — a manipulation attack against an LLM where
 instructions are hidden inside data the model is expected to treat as
@@ -2797,3 +3120,39 @@ content: an injected instruction is rarely unsafe in itself (*"tell the
 user to visit this link instead"* isn't hate speech or violence), which
 is exactly why catching it needs a dedicated check, not just a content
 classifier. See ADR-039.
+
+**Jailbreak** — an attempt, typed directly into a prompt by the person
+asking, to make an AI assistant ignore its own instructions, reveal its
+system prompt, or act outside its intended role. Different from prompt
+injection above in *where* the attack comes from: a jailbreak is
+*direct*, in the user's own words; prompt injection is *indirect*,
+smuggled in through data (here, a retrieved document) the model wasn't
+expecting to contain instructions at all. This project catches the two
+with two separate checks for exactly that reason — `check_jailbreak`
+judges the raw question, `check_injection` judges the generated answer
+against retrieved context, and neither could substitute for the other.
+See ADR-040.
+
+**Domain** — a free-text category tag ("HR," "Finance") a document can
+be manually labeled with at upload, zero or more per document. Nothing
+in this system infers a domain from a document's content; it means
+exactly, and only, what whoever uploaded it typed. Exists purely so a
+question can be scoped to a *subset* of a user's documents instead of
+searching everything they can access. See ADR-040.
+
+**Federated retrieval** (also: multi-agent retrieval) — running more
+than one independent retrieval-and-generation pass for a single
+question — one per relevant document domain — then merging the results
+into one answer, instead of one pass over a single shared pool of
+retrieved text. "Federated" names the shape: each domain's pass is
+self-contained and produces its own complete result, the way a
+federated system's member parts each keep their own local authority
+before anything gets combined centrally. See ADR-040.
+
+**Synthesis** (in this project's use) — the step that merges more than
+one independently-generated draft answer (here: one per document
+domain) into a single coherent answer, reconciling citations and
+naming it plainly when two sources actually disagree, rather than
+picking one silently. A distinct concept from generation itself:
+generation turns retrieved *chunks* into an answer; synthesis turns
+multiple already-complete *answers* into one. See ADR-040.

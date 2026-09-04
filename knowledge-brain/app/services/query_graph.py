@@ -22,6 +22,7 @@ class QueryState(TypedDict):
     original_question: str
     question: str
     user_id: str
+    domain: str | None
     candidates: list[Chunk]
     reranked_chunks: list[Chunk]
     top_relevance_score: float
@@ -44,14 +45,20 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     """
     graph = StateGraph(QueryState)
 
+    graph.add_node("input_guardrail_check", service._input_guardrail_node)
     graph.add_node("retrieve", service._retrieve_node)
     graph.add_node("rerank", service._rerank_node)
     graph.add_node("rewrite_query", service._rewrite_node)
     graph.add_node("graph_context", service._graph_context_node)
     graph.add_node("generate", service._generate_node)
-    graph.add_node("guardrail_check", service._guardrail_node)
+    graph.add_node("output_guardrail_check", service._output_guardrail_node)
 
-    graph.set_entry_point("retrieve")
+    graph.set_entry_point("input_guardrail_check")
+    graph.add_conditional_edges(
+        "input_guardrail_check",
+        service._should_proceed_after_input_check,
+        {"proceed": "retrieve", "block": END},
+    )
     graph.add_edge("retrieve", "rerank")
     graph.add_conditional_edges(
         "rerank",
@@ -60,7 +67,7 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     )
     graph.add_edge("rewrite_query", "retrieve")
     graph.add_edge("graph_context", "generate")
-    graph.add_edge("generate", "guardrail_check")
-    graph.add_edge("guardrail_check", END)
+    graph.add_edge("generate", "output_guardrail_check")
+    graph.add_edge("output_guardrail_check", END)
 
     return graph.compile()

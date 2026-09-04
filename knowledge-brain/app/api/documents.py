@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.circuit_breaker import CircuitOpenError
@@ -68,25 +68,33 @@ async def _process_uploaded_document(
 async def upload_document(
     file: UploadFile,
     background_tasks: BackgroundTasks,
+    domains: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentUploadResponse:
-    """Accept one uploaded file, record it, and process it in the background."""
+    """Accept one uploaded file, record it, and process it in the background.
+
+    domains is a comma-separated string, not a real list — multipart form
+    fields don't carry structured types the way a JSON body would. Set
+    manually at upload, for now (see ADR-040); empty means untagged, same
+    as before this feature existed.
+    """
     if not file.filename or not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(status_code=400, detail="Only .pdf and .txt files are supported")
 
+    domain_list = [d.strip() for d in domains.split(",") if d.strip()]
     content = await file.read()
     user_id = get_current_user_id()
     correlation_id = get_correlation_id()
 
     service = IngestionService(DocumentRepository(db), PermissionRepository(db))
-    document = await service.create_document(file.filename, user_id)
+    document = await service.create_document(file.filename, user_id, domain_list)
 
     await AuditRepository(db).log_action(
         correlation_id=correlation_id,
         action="document_upload",
         resource_type="document",
         resource_id=str(document.id),
-        extra_data={"filename": document.filename, "status": document.status.value},
+        extra_data={"filename": document.filename, "status": document.status.value, "domains": domain_list},
         user_id=user_id,
     )
 
@@ -98,6 +106,7 @@ async def upload_document(
         id=document.id,
         filename=document.filename,
         status=document.status,
+        domains=document.domains,
         correlation_id=correlation_id,
     )
 

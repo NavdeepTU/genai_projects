@@ -22,9 +22,17 @@ class DocumentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_document(self, filename: str) -> Document:
-        """Insert a new document row (status defaults to pending)."""
-        document = Document(filename=filename)
+    async def create_document(self, filename: str, domains: list[str] | None = None) -> Document:
+        """Insert a new document row (status defaults to pending).
+
+        Deduped here, in the one place both the REST upload route (parsing
+        a comma-separated string) and the MCP upload tool (taking a list
+        directly) funnel through — a repeated tag like "HR, HR" would
+        otherwise store as two identical entries, which the frontend then
+        renders as two React list items sharing the same key.
+        """
+        deduped_domains = list(dict.fromkeys(domains or []))
+        document = Document(filename=filename, domains=deduped_domains)
         self.session.add(document)
         try:
             await self.session.commit()
@@ -108,7 +116,11 @@ class DocumentRepository:
             raise
 
     async def find_similar_chunks(
-        self, query_embedding: list[float], user_id: str, limit: int = 5
+        self,
+        query_embedding: list[float],
+        user_id: str,
+        limit: int = 5,
+        domain: str | None = None,
     ) -> list[Chunk]:
         """Return the chunks whose embeddings are closest to a query vector.
 
@@ -119,6 +131,12 @@ class DocumentRepository:
         this user can access are ever candidates — filtered before the
         ranking and the limit, not after, so an inaccessible chunk can
         never take a slot in the results a promotable one should've had.
+        `domain`, when given, narrows candidates further to documents
+        tagged with that domain — the actual mechanism a domain-scoped
+        retrieval agent uses to only see its own slice of the knowledge
+        base (see FederatedRetrievalService). Omitted, this searches
+        exactly as it always has: every document the user can access,
+        regardless of domain.
         """
         stmt = (
             select(Chunk)
@@ -127,6 +145,10 @@ class DocumentRepository:
             .order_by(Chunk.embedding.cosine_distance(query_embedding))
             .limit(limit)
         )
+        if domain is not None:
+            stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
+                Document.domains.any(domain)
+            )
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
@@ -134,7 +156,9 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
-    async def find_by_keyword(self, query: str, user_id: str, limit: int = 5) -> list[Chunk]:
+    async def find_by_keyword(
+        self, query: str, user_id: str, limit: int = 5, domain: str | None = None
+    ) -> list[Chunk]:
         """Return the chunks that best match a query via Postgres full-text search.
 
         Both the chunk text and the query are normalized the same way
@@ -142,7 +166,7 @@ class DocumentRepository:
         `to_tsvector`/`plainto_tsquery` before comparing, and `ts_rank`
         scores how well each match is, not just whether one exists. Same
         permission join as find_similar_chunks, same reasoning: filtered
-        before ranking, not after.
+        before ranking, not after. Same optional `domain` narrowing too.
         """
         tsquery = func.plainto_tsquery("english", query)
         tsvector = func.to_tsvector("english", Chunk.text)
@@ -154,10 +178,35 @@ class DocumentRepository:
             .order_by(func.ts_rank(tsvector, tsquery).desc())
             .limit(limit)
         )
+        if domain is not None:
+            stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
+                Document.domains.any(domain)
+            )
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
             logger.exception("Failed to search for chunks by keyword")
+            raise
+        return list(result.scalars().all())
+
+    async def list_domains_for_user(self, user_id: str) -> list[str]:
+        """Return every distinct domain tag across documents this user can see.
+
+        The set the domain-classification supervisor actually chooses
+        from — a domain this user has no accessible documents in isn't a
+        meaningful choice, so it's never even offered. Untagged documents
+        (an empty domains array) contribute nothing here.
+        """
+        stmt = (
+            select(func.unnest(Document.domains).label("domain"))
+            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
+            .where(DocumentPermission.user_id == user_id)
+            .distinct()
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to list domains for user %s", user_id)
             raise
         return list(result.scalars().all())
 

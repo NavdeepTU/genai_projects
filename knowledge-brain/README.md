@@ -108,22 +108,50 @@ and why it was made that way.
   since LangSmith's pricing table doesn't know Voyage's rates). Every
   query's trace is tagged with who asked. See
   [`ADR-038`](docs/adr/ADR-038-llm-rag-observability.md).
-- **Real-time answer guardrails** — every generated answer now passes
-  through a moderation check (OpenAI's Moderation API) and an LLM
-  injection judge, run concurrently, before it can reach a user. The
-  injection judge is shown the actual retrieved context alongside the
-  answer and asked whether the answer looks like it followed
-  instructions smuggled into a document rather than genuinely answering
-  the question — the RAG-specific risk a moderation classifier alone
-  can't catch. A flagged answer is replaced with a fixed, friendly
-  message, with sources and confidence both suppressed too. The fail
-  policy is availability-aware: a single check being down contributes
-  no signal of its own, but the combined decision still fails closed if
-  neither check could run at all. Verified live against a real
-  injection payload uploaded as a document, not just mocked tests. Runs
-  as a real step in the query pipeline's LangGraph graph, so MCP
-  inherits it automatically — nothing MCP-specific needed changing. See
+- **Real-time guardrails, input and output** — every question and every
+  generated answer each pass through their own pair of independent
+  checks. On the way in: a moderation check plus an LLM jailbreak
+  judge, run before retrieval — a flagged or doubly-unreachable
+  question never triggers an embedding call, a search, or a generation
+  call at all. On the way out: a moderation check plus an LLM injection
+  judge, shown the actual retrieved context alongside the generated
+  answer, asked whether the answer looks like it followed instructions
+  smuggled into a document rather than genuinely answering the question
+  — the RAG-specific risk a moderation classifier alone can't catch.
+  Either side's flag replaces the real content with the same fixed,
+  friendly message, sources and confidence both suppressed too, never
+  revealing which check tripped. The fail policy is availability-aware
+  on both sides: a single check being down contributes no signal of its
+  own, but the combined decision still fails closed if neither check
+  could run at all. Verified live: a real injection payload uploaded as
+  a document was correctly blocked on the way out; a real jailbreak
+  attempt was blocked on the way in roughly 3x faster than a full
+  pipeline run, since nothing downstream ever executes. Both run as
+  real steps in the query pipeline's LangGraph graph — the input check
+  is now the graph's actual entry point — so MCP inherits both
+  automatically. See
   [`ADR-039`](docs/adr/ADR-039-real-time-answer-guardrails.md).
+- **Multi-agent federated retrieval** — documents can now be tagged
+  with one or more free-text domains at upload (manual, for now); a
+  supervisor LLM call decides which of a user's own domains a question
+  actually needs. Zero or one domain — every question today, since
+  domains are opt-in — costs exactly what it always did. Two or more
+  domains runs one full retrieval-and-generation pass per domain,
+  concurrently, each producing its own independent draft answer, then a
+  synthesis call merges them into one response with reconciled
+  citations, which gets one more guardrails pass before it returns. A
+  failing domain is excluded via task-level isolation rather than a
+  literal per-domain circuit breaker — this project's breakers are
+  already one shared instance per external service, not per domain — a
+  deliberate deviation from the build spec's literal wording, flagged
+  and approved before building. Verified live: a genuinely cross-domain
+  question correctly merged findings from two real domain-tagged
+  documents, at roughly double a single-domain question's latency. A
+  real, unfixed gap found the same session: a raw provider rate-limit
+  error isn't caught by this feature's failure isolation the way a
+  circuit-breaker error is, so one domain hitting it today can still
+  fail the whole question — documented, not hidden. See
+  [`ADR-040`](docs/adr/ADR-040-multi-agent-federated-retrieval.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -211,24 +239,43 @@ release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
 for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`) covers ingestion end-to-end,
-  chunking, extraction, PII detection's "flag and stop" branch, the
-  dashboard's and analytics page's repository/service methods, the
-  query pipeline's source/confidence-building logic, `require_admin`,
-  real authentication (signup, login, logout, session expiry), and the
-  answer guardrail node's full decision table (both checks clean,
-  either flagging alone, one down with the other clean, one down with
-  the other flagging, both down) — it does not yet cover hybrid search,
-  the circuit breaker, the audit log's write path, LangGraph's retry
-  logic, the Neo4j graph feature, MCP, PII detection's own
-  splitting/batching logic, or document-level ACL (`grant_access`/
-  `has_access`).
+- The automated test suite (`tests/`, 70 tests) covers ingestion
+  end-to-end, chunking, extraction, PII detection's "flag and stop"
+  branch, the dashboard's and analytics page's repository/service
+  methods, the query pipeline's source/confidence-building logic,
+  `require_admin`, real authentication (signup, login, logout, session
+  expiry), both guardrail nodes' full decision tables (input and
+  output, each: both checks clean, either flagging alone, one down with
+  the other clean, one down with the other flagging, both down), and
+  federated retrieval's own routing logic (single/multi-domain,
+  classification-unavailable fallback, a failing domain marked partial,
+  every domain failing, every domain's own guardrail blocking, the
+  synthesized answer itself getting blocked) — it does not yet cover
+  hybrid search, the circuit breaker, the audit log's write path,
+  LangGraph's retry logic, the Neo4j graph feature, MCP, PII detection's
+  own splitting/batching logic, or document-level ACL (`grant_access`/
+  `has_access`). The frontend has its own test suite now too
+  (`frontend/`, 7 tests, Vitest + React Testing Library) — this
+  project's first, covering the domain-tagging upload field and its
+  document-card badges; run with `npm test` inside `frontend/`.
 - The answer guardrails add two real LLM calls to every query, safe
-  ones included — a genuine, felt cost, not a false-positive concern.
-  The injection judge reuses `generation_model` rather than a
+  ones included, and the input guardrail adds two more on top before
+  retrieval even starts — a genuine, felt cost, not a false-positive
+  concern. The injection judge reuses `generation_model` rather than a
   cheaper/faster model, and runs even when nothing was actually
   retrieved. Neither is wrong, both are real, un-taken levers if the
-  added cost ever needs trimming. See `ADR-039`.
+  added cost ever needs trimming. See `ADR-039` and `ADR-040`.
+- Federated retrieval's failure isolation (`_run_one_domain_safely`)
+  only catches circuit-breaker-related errors, not a raw provider
+  exception thrown before a breaker has actually tripped open — found
+  live when Voyage AI's free-tier rate limit was hit mid-verification
+  and surfaced as an unhandled 500. One domain hitting this today would
+  fail the whole federated question rather than just being excluded.
+  See `ADR-040`.
+- Domain tags are free-text with no vocabulary control and no dedup
+  across documents — "HR" and "Human Resources" are two unrelated
+  domains to this system, and nothing today detects or merges
+  near-duplicate names. See `ADR-040`.
 - There's no rate limiting on `/auth/login` — nothing beyond Argon2id's
   own deliberately-slow hashing cost stands between a script and a
   password-guessing attempt. Sessions also have a fixed 7-day lifetime
@@ -470,6 +517,12 @@ first if you don't have a session yet. Sign up (or log in, if you
 already have an account) and you're in; see real authentication, above,
 and [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md) for
 how the frontend and backend sessions connect.
+
+Run the frontend's own test suite with:
+
+```
+npm test
+```
 
 One real gotcha worth knowing about: documents uploaded through the
 browser *before* real auth existed were granted to a placeholder

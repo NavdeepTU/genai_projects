@@ -3537,3 +3537,156 @@ generation (item 19), the PII review workflow, Postgres' still-open
 cost fix, and the still-real test coverage gaps named in prior
 sessions. At 3–4 hours/day, that's roughly 8–11 working days left,
 assuming no further scope changes.
+
+## Session: 2026-09-04 — Input guardrails + multi-agent federated retrieval (build-order item 16 extension, item 17)
+
+### What we built
+- An input guardrail, extending the previous session's output guardrail
+  (ADR-039) to the other side of the pipeline. New
+  `check_jailbreak(question)` — an LLM judge for *direct* jailbreak/
+  injection attempts typed straight into a question, distinct from the
+  existing `check_injection`'s job of catching *indirect* injection
+  smuggled in through a retrieved document. `_input_guardrail_node` is
+  now the query graph's actual entry point, not `retrieve` — a
+  conditional edge sends a flagged question straight to the graph's
+  end, so it never pays for embedding, search, or generation. Same
+  availability-aware fail policy as the output side, reused exactly,
+  not reinvented. Verified live: a jailbreak attempt blocked in ~2.8s
+  against ~9s for a real question running the full pipeline; a benign
+  question with a poisoned document among its sources still answered
+  correctly, confirming the input check passing doesn't weaken the
+  output check.
+- Multi-agent federated retrieval (item 17) — and, as a genuine
+  prerequisite this session had to solve first, the *domain* concept
+  itself, which didn't exist anywhere in the codebase before today. You
+  answered the three open questions directly: free-text category, set
+  manually at upload, multiple domains allowed per document. Documents
+  gained a `domains` array column; a new supervisor call,
+  `classify_domains`, decides which of a user's own accessible domains
+  a question needs. Zero or one domain needed (every question today,
+  since domains are opt-in) delegates straight to the unchanged
+  single-domain pipeline, at the same cost as before this feature
+  existed. Two or more domains needed runs that same pipeline once per
+  domain, concurrently, each producing its own complete draft answer —
+  not just a shared pool of chunks — then a new `synthesize_answers`
+  call merges the drafts, and the merged answer gets one more
+  moderation+injection check before it's returned.
+  `FederatedRetrievalService` is now the one entry point `/query`, MCP,
+  and the frontend all reach through; `RetrievalService` itself is
+  unchanged in its own public shape, just gained an optional `domain`
+  parameter and became a building block the federated service calls.
+- A deliberate, explicitly-flagged deviation from the build spec's
+  literal wording: CLAUDE.md describes a *per-domain* circuit breaker
+  tripping when one domain fails. This project's breakers are already
+  one shared instance per *external service*, not per domain — a real
+  outage doesn't care which domain asked — so a second breaker instance
+  per domain would just duplicate the same protection redundantly.
+  Built task-level failure isolation instead (`_run_one_domain_safely`,
+  catching one domain's exception so it can't cancel the others'
+  concurrent calls), reaching the same outcome the spec asks for
+  through this project's actual architecture. Flagged to you and
+  approved before being built, not decided silently.
+- A frontend follow-up you asked for after noticing the upload form
+  never actually asked for a domain: a "Domains (optional)" field added
+  to the upload dropzone, sending the same comma-separated string the
+  backend already expected — the proxy route needed zero changes,
+  since it already forwards the whole `FormData` object untouched.
+  Domain tags now render as badges on each document card. This
+  required setting up this project's first-ever frontend test
+  infrastructure (Vitest + React Testing Library, your choice over
+  Playwright's full-browser approach) and extracting `DocumentCard` out
+  of `app/documents/page.tsx` into its own file, since the page
+  transitively imports `next/headers` and can't be imported in a
+  non-Next.js test context.
+- A `/code-review` pass on the frontend change caught one real bug:
+  domain badges keyed by `key={domain}` would collide if a document had
+  a repeated tag (typing "HR, HR"). Fixed centrally in
+  `DocumentRepository.create_document`, the one point both the REST and
+  MCP upload paths converge on, rather than patching the render or each
+  caller separately.
+- A real, pre-existing bug found and fixed while touching
+  `eval/run_eval.py` for domain support: it still called
+  `ingestion.ingest_document(...)`, a method ADR-030 split into
+  `create_document`/`process_document` two sessions ago — the eval
+  harness would have crashed if run today. Named plainly, not folded in
+  silently. The harness deliberately still calls `RetrievalService`
+  directly rather than the new federated service, since it needs raw
+  internal chunk/context data for scoring that the federated service's
+  return shape intentionally doesn't expose — behaviorally identical
+  for it today, since its fixtures carry no domain tags.
+- A real, unfixed gap found live, not glossed over: Voyage AI's free
+  tier's 3-requests/minute rate limit was hit mid-verification and
+  surfaced as an unhandled 500, not a graceful degradation, because
+  `_run_one_domain_safely`'s (and the pre-existing `_rerank_safely`'s)
+  exception handling only catches circuit-breaker-related errors, not a
+  raw provider exception a single failing call throws before the
+  breaker has actually tripped open. One domain hitting this would
+  currently crash an entire federated question rather than just being
+  excluded, undermining the isolation guarantee this feature otherwise
+  provides. Documented honestly in ADR-040 and both interview-prep docs
+  rather than left to be rediscovered.
+- Two new ADRs: [`ADR-040`](adr/ADR-040-multi-agent-federated-retrieval.md)
+  (the input-guardrails extension itself wasn't given a separate ADR,
+  by your own choice — covered in spirit by ADR-039, and named as such).
+- Backend suite: 52 → 70 passing (18 new tests: federated routing,
+  domain-filtered search, `list_domains_for_user`, domain dedup, plus
+  the 6 input-guardrail tests from earlier in this same session).
+  Frontend: 0 → 7 passing, this project's first frontend tests ever.
+- Verified live end to end, twice over: uploaded two real domain-tagged
+  documents (HR, Finance policy text), asked a genuinely cross-domain
+  question — synthesis correctly merged both domains' findings with
+  `confidence` explicitly `null`; a single-domain question took the
+  cheap pass-through route with a real relevance score; an off-topic
+  question fell back to unrestricted search and correctly said "I
+  don't know." Also drove the actual upload form in a real browser:
+  typed a domain tag, uploaded a file, confirmed the badge rendered.
+
+### What I struggled with
+- Nothing corrected mid-build this session — the one real "stop" was
+  you declining the input-guardrails ADR prompt outright, which was
+  respected immediately, not pushed on. The federated retrieval
+  architecture proposal was approved as presented ("Yes, go ahead").
+
+### Concepts to revisit
+- Why a direct jailbreak (input side) and indirect prompt injection
+  (output side) need two separate checks, not one — covered in the
+  updated Feature 26 section of `INTERVIEW_PREP.md`.
+- Why domain-scoped retrieval agents beat one retrieval step with a
+  wider permission filter, and what that costs — covered in the new
+  Feature 27 section.
+- The gap between this feature's claimed failure isolation and what it
+  actually catches today (circuit-breaker errors only, not a raw
+  provider exception before the breaker trips) — a good one to be able
+  to explain honestly if asked "is this actually resilient," since the
+  honest answer is "not completely, and here's the specific gap."
+
+### What's next
+- The Voyage-rate-limit failure-isolation gap named above is real and
+  unfixed — the most concrete, scoped next task if reliability work is
+  next.
+- Two real, un-taken cost levers for the multi-domain path, named but
+  not built: a cheaper first-pass filter to avoid paying for N full
+  pipeline passes when N is large, and reusing a smaller/faster model
+  for classification and synthesis specifically.
+- Domain vocabulary drift (no dedup or normalization across
+  near-duplicate domain names) is a real, unaddressed gap in the
+  "simple free-text" design, named in ADR-040's own consequences.
+- Everything else from prior sessions' "what's next" still stands:
+  multi-tenancy, APIM's remaining gaps, the missing migration tool
+  (now the third feature in a row needing a hand-run `ALTER TABLE`),
+  conversation history (item 18), streamed generation (item 19), the
+  PII review workflow, Postgres' still-open cost fix, and prior
+  test-coverage gaps.
+
+**Estimated completion: ~74% of the total project, by weighted
+effort** — up from 69%. Item 17 was a substantial, multi-file feature
+(a new domain concept from scratch, a new orchestration service, a
+frontend follow-up, and this project's first-ever frontend test setup)
+closed in one session alongside the smaller input-guardrails extension.
+Rough remaining effort: ~26 hours (down from ~32) — multi-tenancy,
+APIM's remaining gaps, the missing migration tool, conversation history
+(item 18), streamed generation (item 19), the PII review workflow,
+Postgres' still-open cost fix, this session's own named gaps (the
+failure-isolation hole, domain vocabulary drift), and prior test
+coverage gaps. At 3–4 hours/day, that's roughly 7–9 working days left,
+assuming no further scope changes.

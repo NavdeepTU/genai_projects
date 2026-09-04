@@ -4,7 +4,7 @@ from enum import Enum
 
 from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import DateTime
+from sqlalchemy import ARRAY, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -62,6 +62,13 @@ class Document(Base):
     )
     pii_detected: Mapped[bool] = mapped_column(default=False)
     failure_reason: Mapped[str | None] = mapped_column(Text, default=None)
+    # Free-text category tags, set manually at upload — "HR", "Finance", and
+    # so on. A document can belong to more than one domain at once, hence a
+    # plain array column here rather than a single string field. Empty by
+    # default: an untagged document simply never participates in domain
+    # classification (see app/services/domain_classification.py) and stays
+    # reachable only through the original, domain-agnostic search path.
+    domains: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
@@ -90,6 +97,7 @@ class DocumentUploadResponse(BaseModel):
     id: uuid.UUID
     filename: str
     status: DocumentStatus
+    domains: list[str]
     correlation_id: str
 
 
@@ -103,6 +111,7 @@ class DocumentListItem(BaseModel):
     status: DocumentStatus
     uploaded_at: datetime
     pii_detected: bool
+    domains: list[str]
 
 
 class DocumentListResponse(BaseModel):

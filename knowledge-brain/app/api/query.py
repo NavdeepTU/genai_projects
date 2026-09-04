@@ -10,7 +10,8 @@ from app.models.query import QueryRequest, QueryResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
-from app.services.retrieval_service import RetrievalService, RetrievalUnavailableError
+from app.services.federated_retrieval_service import FederatedRetrievalService
+from app.services.retrieval_service import RetrievalUnavailableError
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -21,12 +22,18 @@ async def query(
     db: AsyncSession = Depends(get_db),
     graph_session: Neo4jAsyncSession = Depends(get_graph_session),
 ) -> QueryResponse:
-    """Answer a question using retrieval-augmented generation."""
-    service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
+    """Answer a question using retrieval-augmented generation.
+
+    Routes through FederatedRetrievalService, not RetrievalService
+    directly, so a question needing more than one document domain (see
+    ADR-040) is handled transparently — this route has no awareness of
+    whether one domain answered or several did.
+    """
+    service = FederatedRetrievalService(DocumentRepository(db), GraphRepository(graph_session))
     user_id = get_current_user_id()
 
     try:
-        state = await service.run_query(request.question, user_id)
+        result = await service.run_query(request.question, user_id)
     except CircuitOpenError:
         raise HTTPException(
             status_code=503,
@@ -44,21 +51,19 @@ async def query(
         correlation_id=correlation_id,
         user_id=user_id,
         question=request.question,
-        duration_ms=state["duration_ms"],
+        duration_ms=result.duration_ms,
     )
-    if state["blocked"]:
+    if result.blocked:
         await audit.log_answer_blocked(
             correlation_id=correlation_id,
             user_id=user_id,
             question=request.question,
-            block_reason=state["block_reason"] or "unknown",
+            block_reason=result.block_reason or "unknown",
         )
 
-    sources, confidence = await service.build_sources_and_confidence(state)
-
     return QueryResponse(
-        answer=state["answer"],
-        sources=sources,
-        confidence=confidence,
+        answer=result.answer,
+        sources=result.sources,
+        confidence=result.confidence,
         correlation_id=correlation_id,
     )

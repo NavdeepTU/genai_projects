@@ -17,6 +17,7 @@ from app.services.embedding import embed_chunks
 from app.services.generation import generate_answer
 from app.services.hybrid_search import reciprocal_rank_fusion
 from app.services.injection_detection import check_injection
+from app.services.jailbreak_detection import check_jailbreak
 from app.services.moderation import check_moderation
 from app.services.query_graph import MAX_RETRIES, QueryState, build_query_graph
 from app.services.query_rewriting import rewrite_query
@@ -25,10 +26,12 @@ from app.services.reranking import rerank_chunks
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-BLOCKED_ANSWER_MESSAGE = (
-    "I can't share this answer — it didn't pass a safety check. "
-    "Try rephrasing your question."
-)
+# Deliberately the same message whether a question got blocked before
+# retrieval even ran, or an answer got blocked after generation — never
+# telling the caller *which* check tripped, or *when* in the pipeline,
+# since that's exactly the kind of feedback that helps someone refine
+# an attack.
+BLOCKED_MESSAGE = "I can't help with that — it didn't pass a safety check. Try rephrasing your question."
 
 
 class RetrievalUnavailableError(Exception):
@@ -51,18 +54,20 @@ class RetrievalService:
         self.graph_repository = graph_repository
         self._graph = build_query_graph(self)
 
-    async def run_query(self, question: str, user_id: str) -> QueryState:
+    async def run_query(self, question: str, user_id: str, domain: str | None = None) -> QueryState:
         """Run one question through the query graph and return the full final state.
 
-        Exposed as the one entry point every caller uses — the REST route,
-        MCP's ask_knowledge_base, and the evaluation harness — so timing,
-        sources, and confidence are all computed once, in one place, not
-        duplicated per caller.
+        domain optionally restricts retrieval to documents tagged with that
+        one domain — used by FederatedRetrievalService to run one domain-
+        scoped pass per relevant domain. Left as None, this is the exact
+        same unrestricted single-domain pipeline that existed before that
+        feature — the common case pays nothing extra.
         """
         initial_state: QueryState = {
             "original_question": question,
             "question": question,
             "user_id": user_id,
+            "domain": domain,
             "candidates": [],
             "reranked_chunks": [],
             "top_relevance_score": 0.0,
@@ -122,6 +127,52 @@ class RetrievalService:
         confidence = None if state["reranker_unavailable"] else state["top_relevance_score"]
         return sources, confidence
 
+    async def _input_guardrail_node(self, state: QueryState) -> dict:
+        """Graph node, and the graph's entry point: block a bad question before it costs anything.
+
+        Same two-check, availability-aware shape as the output guardrail
+        (see _output_guardrail_node) — a moderation classifier (reused as-is;
+        it works on any text, not just answers) and check_jailbreak, a
+        judge for direct injection/jailbreak attempts typed straight
+        into the question, as opposed to check_injection's job of
+        catching *indirect* injection smuggled in through a document.
+        Running this first, before retrieval or generation happen at
+        all, means a bad question never pays for either.
+        """
+        (moderation_flagged, moderation_available), (jailbreak_flagged, jailbreak_available) = (
+            await asyncio.gather(
+                self._check_moderation_safely(state["question"]),
+                self._check_jailbreak_safely(state["question"]),
+            )
+        )
+
+        if not moderation_available and not jailbreak_available:
+            return {
+                "answer": BLOCKED_MESSAGE,
+                "blocked": True,
+                "block_reason": "input_guardrails_unavailable",
+            }
+
+        if moderation_flagged or jailbreak_flagged:
+            reason = "input_moderation" if moderation_flagged else "jailbreak"
+            return {"answer": BLOCKED_MESSAGE, "blocked": True, "block_reason": reason}
+
+        return {"blocked": False, "block_reason": None}
+
+    def _should_proceed_after_input_check(self, state: QueryState) -> str:
+        """Route to retrieval if the question passed, straight to the end if it didn't."""
+        return "block" if state["blocked"] else "proceed"
+
+    async def _check_jailbreak_safely(self, question: str) -> tuple[bool, bool]:
+        """Run the jailbreak check; on failure, report unavailable rather than raising."""
+        try:
+            return await check_jailbreak(question), True
+        except (CircuitOpenError, OpenAIError):
+            logger.error(
+                "Jailbreak check unavailable", extra={"correlation_id": get_correlation_id()}
+            )
+            return False, False
+
     async def _retrieve_node(self, state: QueryState) -> dict:
         """Graph node: hybrid search for the current question, merged with RRF."""
         [query_embedding] = await embed_chunks([state["question"]])
@@ -129,10 +180,10 @@ class RetrievalService:
         # Run sequentially, not concurrently: both share one AsyncSession,
         # which isn't safe for two queries running at the same time.
         vector_chunks, vector_failed = await self._find_similar_chunks_safely(
-            query_embedding, state["user_id"]
+            query_embedding, state["user_id"], state["domain"]
         )
         keyword_chunks, keyword_failed = await self._find_by_keyword_safely(
-            state["question"], state["user_id"]
+            state["question"], state["user_id"], state["domain"]
         )
 
         if vector_failed and keyword_failed:
@@ -224,7 +275,7 @@ class RetrievalService:
         answer = await generate_answer(state["original_question"], context_chunks)
         return {"answer": answer}
 
-    async def _guardrail_node(self, state: QueryState) -> dict:
+    async def _output_guardrail_node(self, state: QueryState) -> dict:
         """Graph node: block the answer if a safety check flags it.
 
         Two independent checks run concurrently — a moderation classifier
@@ -247,14 +298,14 @@ class RetrievalService:
 
         if not moderation_available and not injection_available:
             return {
-                "answer": BLOCKED_ANSWER_MESSAGE,
+                "answer": BLOCKED_MESSAGE,
                 "blocked": True,
                 "block_reason": "guardrails_unavailable",
             }
 
         if moderation_flagged or injection_flagged:
             reason = "moderation" if moderation_flagged else "injection"
-            return {"answer": BLOCKED_ANSWER_MESSAGE, "blocked": True, "block_reason": reason}
+            return {"answer": BLOCKED_MESSAGE, "blocked": True, "block_reason": reason}
 
         return {"blocked": False, "block_reason": None}
 
@@ -263,7 +314,7 @@ class RetrievalService:
 
         Returns (flagged, available) — unavailable contributes no signal
         of its own, it's not treated as "checked and clean." See
-        _guardrail_node for what happens when both checks end up
+        _output_guardrail_node for what happens when both checks end up
         unavailable at once.
         """
         try:
@@ -287,12 +338,12 @@ class RetrievalService:
             return False, False
 
     async def _find_similar_chunks_safely(
-        self, query_embedding: list[float], user_id: str
+        self, query_embedding: list[float], user_id: str, domain: str | None = None
     ) -> tuple[list[Chunk], bool]:
         """Run vector search; on failure, roll back and report no results rather than raising."""
         try:
             chunks = await self.repository.find_similar_chunks(
-                query_embedding, user_id, limit=settings.retrieval_candidate_pool
+                query_embedding, user_id, limit=settings.retrieval_candidate_pool, domain=domain
             )
             self.repository.detach(chunks)
             return chunks, False
@@ -304,11 +355,13 @@ class RetrievalService:
             await self.repository.rollback()
             return [], True
 
-    async def _find_by_keyword_safely(self, question: str, user_id: str) -> tuple[list[Chunk], bool]:
+    async def _find_by_keyword_safely(
+        self, question: str, user_id: str, domain: str | None = None
+    ) -> tuple[list[Chunk], bool]:
         """Run keyword search; on failure, roll back and report no results rather than raising."""
         try:
             chunks = await self.repository.find_by_keyword(
-                question, user_id, limit=settings.retrieval_candidate_pool
+                question, user_id, limit=settings.retrieval_candidate_pool, domain=domain
             )
             self.repository.detach(chunks)
             return chunks, False

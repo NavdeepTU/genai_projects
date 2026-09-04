@@ -22,12 +22,14 @@ export type DocumentListItem = {
   status: DocumentStatus;
   uploaded_at: string;
   pii_detected: boolean;
+  domains: string[];
 };
 
 export type DocumentUploadResponse = {
   id: string;
   filename: string;
   status: DocumentStatus;
+  domains: string[];
   correlation_id: string;
 };
 

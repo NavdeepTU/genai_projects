@@ -15,7 +15,8 @@ from app.repositories.permission_repository import PermissionRepository
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
 from app.services.ingestion_service import IngestionService
-from app.services.retrieval_service import RetrievalService, RetrievalUnavailableError
+from app.services.federated_retrieval_service import FederatedRetrievalService
+from app.services.retrieval_service import RetrievalUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +34,18 @@ mcp = MCPServer(name="knowledge-brain")
     )
 )
 async def ask_knowledge_base(question: str) -> str:
-    """Wrap RetrievalService.run_query() as a tool an MCP client can call directly."""
+    """Wrap FederatedRetrievalService.run_query() as a tool an MCP client can call directly.
+
+    Same entry point the REST route uses (see ADR-040) — a question
+    spanning more than one document domain is handled transparently here
+    too, with no separate MCP-specific logic for it.
+    """
     user_id = get_current_user_id()
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
-        service = RetrievalService(DocumentRepository(db), GraphRepository(graph_session))
+        service = FederatedRetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
         try:
-            state = await service.run_query(question, user_id)
+            result = await service.run_query(question, user_id)
         except (CircuitOpenError, RetrievalUnavailableError):
             return "The knowledge base is temporarily unavailable. Please try again in a moment."
 
@@ -49,17 +55,17 @@ async def ask_knowledge_base(question: str) -> str:
             correlation_id=correlation_id,
             user_id=user_id,
             question=question,
-            duration_ms=state["duration_ms"],
+            duration_ms=result.duration_ms,
         )
-        if state["blocked"]:
+        if result.blocked:
             await audit.log_answer_blocked(
                 correlation_id=correlation_id,
                 user_id=user_id,
                 question=question,
-                block_reason=state["block_reason"] or "unknown",
+                block_reason=result.block_reason or "unknown",
             )
 
-        return state["answer"]
+        return result.answer
 
 
 @mcp.tool(
@@ -68,10 +74,13 @@ async def ask_knowledge_base(question: str) -> str:
         "be answered from it. Only .pdf and .txt files are supported. "
         "content_base64 must be the raw file bytes, base64-encoded — not "
         "plain text — since MCP tool arguments can only carry JSON-safe "
-        "strings, not binary data."
+        "strings, not binary data. domains is an optional list of free-text "
+        "category tags (e.g. [\"HR\", \"Finance\"]) — set manually, for now."
     )
 )
-async def upload_document(filename: str, content_base64: str) -> str:
+async def upload_document(
+    filename: str, content_base64: str, domains: list[str] | None = None
+) -> str:
     """Wrap the same ingest-then-link pipeline documents.py uses, for MCP callers."""
     if not filename.lower().endswith(ALLOWED_EXTENSIONS):
         return "Only .pdf and .txt files are supported."
@@ -82,7 +91,7 @@ async def upload_document(filename: str, content_base64: str) -> str:
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         repository = DocumentRepository(db)
         service = IngestionService(repository, PermissionRepository(db))
-        document = await service.create_document(filename, user_id)
+        document = await service.create_document(filename, user_id, domains)
         await service.process_document(document.id, filename, content)
 
         correlation_id = get_correlation_id()
@@ -91,7 +100,11 @@ async def upload_document(filename: str, content_base64: str) -> str:
             action="document_upload",
             resource_type="document",
             resource_id=str(document.id),
-            extra_data={"filename": document.filename, "status": document.status.value},
+            extra_data={
+                "filename": document.filename,
+                "status": document.status.value,
+                "domains": document.domains,
+            },
             user_id=user_id,
         )
 

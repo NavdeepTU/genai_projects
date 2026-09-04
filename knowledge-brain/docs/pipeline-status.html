@@ -323,7 +323,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 12 of 19 features complete · 1 partial</p>
+      <p class="eyebrow">Knowledge Brain · 16 of 19 build-order items complete · 2 partial</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -1211,10 +1211,83 @@
     <p class="caveat"><strong>Verified live against a real attack, not just mocks:</strong> a document uploaded with a genuine prompt-injection payload (a fake "system override" instruction embedded in normal-looking policy text) — the resulting answer came back correctly blocked, no sources, no confidence. A separate, genuinely benign question came back with its real answer unaffected, confirming the checks don't block by default. Per-query token cost confirmed visibly higher afterward, checked directly in LangSmith. Test suite grew 39 → 46 passing. See <a href="adr/ADR-039-real-time-answer-guardrails.md">ADR-039</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 20 — Input guardrails <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 16, extended · same checks, run before retrieval instead of after</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/services/jailbreak_detection.py</span>
+        <span class="path mono">LLM judge · direct jailbreak/injection in the raw question</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">input_guardrail_check graph node</span>
+        <span class="path mono">now the graph's entry point, not retrieve</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Same availability-aware fail policy</span>
+        <span class="path mono">reused from the output guardrail, not reinvented</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Verified live:</strong> a jailbreak attempt sent to <code>/query</code> was blocked in ~2.8s, against ~9s for a real question running the full pipeline — no embedding, search, or generation call paid for on a blocked question. A benign question with a poisoned document among its sources still answered correctly, confirming the input check passing doesn't weaken the output check. Test suite grew 46 → 52 passing. No dedicated ADR for this extension, by design — covered in spirit by ADR-039.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 21 — Multi-agent federated retrieval <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 17 · domain classification, parallel per-domain retrieval, synthesis</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Document.domains</span>
+        <span class="path mono">free-text tags, manual at upload, multiple allowed, deduped</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">domain_classification.py</span>
+        <span class="path mono">supervisor LLM call · which domains does this question need</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">FederatedRetrievalService</span>
+        <span class="path mono">0-1 domain → unchanged single pass · 2+ → concurrent passes</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">synthesis.py</span>
+        <span class="path mono">merges per-domain drafts, then one more guardrail pass</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A deliberate deviation from the build spec's literal wording, flagged and approved before building:</strong> task-level failure isolation (<code>_run_one_domain_safely</code>) instead of a literal per-domain circuit breaker — this project's breakers are already one shared instance per external service, not per domain, so a second instance per domain would only duplicate the same protection.</p>
+    <p class="caveat"><strong>A real, unfixed gap found live, not glossed over:</strong> Voyage AI's free-tier rate limit was hit mid-verification and surfaced as an unhandled 500 — <code>_run_one_domain_safely</code> only catches circuit-breaker-related errors, not a raw provider exception thrown before the breaker actually trips. One domain hitting this today would crash the whole federated question instead of just being excluded. Documented honestly in ADR-040, not fixed this session.</p>
+    <p class="caveat"><strong>Verified live end to end:</strong> two real domain-tagged documents (HR, Finance) uploaded; a genuinely cross-domain question correctly merged both domains' findings with <code>confidence</code> explicitly <code>null</code>, at roughly double the latency of an equivalent single-domain question (~11.8s vs ~5.5s). A single-domain question took the unchanged, cheap pass-through route. An off-topic question fell back to unrestricted search and correctly said "I don't know." The upload form gained a matching "Domains" field, driven end to end in a real browser — the first frontend change on this feature, and the reason this project now has Vitest + React Testing Library set up at all. Backend suite: 52 → 70 passing; frontend: 0 → 7 passing. See <a href="adr/ADR-040-multi-agent-federated-retrieval.md">ADR-040</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">17</span>Multi-agent federated retrieval</li>
       <li><span class="n mono">18</span>Conversation history &amp; context condensing</li>
       <li><span class="n mono">19</span>Streamed answer generation</li>
     </ul>

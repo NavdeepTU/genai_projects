@@ -6,6 +6,7 @@ import { CheckCircle2, ShieldAlert, UploadCloud, XCircle } from "lucide-react";
 
 import type { DocumentStatusResponse, DocumentUploadResponse, ProcessingStage } from "@/lib/api";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ProgressBar } from "@/components/progress-bar";
 import { cn } from "@/lib/utils";
 
@@ -102,6 +103,7 @@ export function UploadDropzone() {
   const router = useRouter();
   const [isDragging, setIsDragging] = useState(false);
   const [uploads, setUploads] = useState<InFlightUpload[]>([]);
+  const [domains, setDomains] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollTimers = useRef(new Map<string, ReturnType<typeof setInterval>>());
 
@@ -204,6 +206,7 @@ export function UploadDropzone() {
       try {
         const formData = new FormData();
         formData.append("file", file);
+        formData.append("domains", domains);
 
         const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
         if (response.status === 401) {
@@ -228,7 +231,7 @@ export function UploadDropzone() {
         settleAndRemove(key);
       }
     },
-    [pollStatus, router, settleAndRemove, updateUpload],
+    [domains, pollStatus, router, settleAndRemove, updateUpload],
   );
 
   const handleFiles = useCallback(
@@ -243,6 +246,22 @@ export function UploadDropzone() {
 
   return (
     <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="upload-domains" className="text-xs font-medium text-muted-foreground">
+          Domains (optional)
+        </label>
+        <Input
+          id="upload-domains"
+          placeholder="e.g. HR, Finance"
+          value={domains}
+          onChange={(e) => setDomains(e.target.value)}
+          className="max-w-xs"
+        />
+        <p className="text-[0.65rem] text-muted-foreground">
+          Comma-separated tags applied to whatever you upload next — leave blank for untagged.
+        </p>
+      </div>
+
       <div
         role="button"
         tabIndex={0}

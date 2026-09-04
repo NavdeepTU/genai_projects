@@ -38,7 +38,8 @@ async def ensure_fixtures_ingested(
             continue
 
         content = fixture_path.read_bytes()
-        document = await ingestion.ingest_document(fixture_path.name, content, EVAL_USER_ID)
+        document = await ingestion.create_document(fixture_path.name, EVAL_USER_ID)
+        await ingestion.process_document(document.id, fixture_path.name, content)
         filename_to_document_id[fixture_path.name] = document.id
 
     return filename_to_document_id

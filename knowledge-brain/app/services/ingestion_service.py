@@ -24,14 +24,17 @@ class IngestionService:
         self.repository = repository
         self.permission_repository = permission_repository
 
-    async def create_document(self, filename: str, user_id: str) -> Document:
+    async def create_document(
+        self, filename: str, user_id: str, domains: list[str] | None = None
+    ) -> Document:
         """Record a new upload and give the uploader access to it.
 
         Deliberately just this much and nothing more: fast enough to finish
         before the HTTP response goes out, so the caller has a real
-        document.id to hand back to the browser right away.
+        document.id to hand back to the browser right away. domains are
+        set manually at upload, for now — see ADR-040.
         """
-        document = await self.repository.create_document(filename)
+        document = await self.repository.create_document(filename, domains)
         await self.permission_repository.grant_access(document.id, user_id)
         return document
 

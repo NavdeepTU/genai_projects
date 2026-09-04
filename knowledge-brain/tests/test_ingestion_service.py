@@ -33,6 +33,18 @@ async def test_ingest_document_succeeds(db_session):
     assert chunks[0].text == "hello world"
 
 
+async def test_create_document_stores_domains_and_still_grants_access(db_session):
+    """domains flows through to the repository without breaking the existing access grant."""
+    repository = DocumentRepository(db_session)
+    permission_repository = PermissionRepository(db_session)
+    service = IngestionService(repository, permission_repository)
+
+    document = await service.create_document("handbook.pdf", "test-user", domains=["HR"])
+
+    assert document.domains == ["HR"]
+    assert await permission_repository.has_access(document.id, "test-user")
+
+
 async def test_ingest_document_marks_failed_on_embedding_error(db_session):
     """If OpenAI fails, the document should end up failed, not stuck pending."""
     repository = DocumentRepository(db_session)
