@@ -39,12 +39,20 @@ async def query(
         ) from None
 
     correlation_id = get_correlation_id()
-    await AuditRepository(db).log_query_made(
+    audit = AuditRepository(db)
+    await audit.log_query_made(
         correlation_id=correlation_id,
         user_id=user_id,
         question=request.question,
         duration_ms=state["duration_ms"],
     )
+    if state["blocked"]:
+        await audit.log_answer_blocked(
+            correlation_id=correlation_id,
+            user_id=user_id,
+            question=request.question,
+            block_reason=state["block_reason"] or "unknown",
+        )
 
     sources, confidence = await service.build_sources_and_confidence(state)
 

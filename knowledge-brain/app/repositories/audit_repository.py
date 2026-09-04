@@ -67,6 +67,24 @@ class AuditRepository:
             user_id=user_id,
         )
 
+    async def log_answer_blocked(
+        self, *, correlation_id: str, user_id: str, question: str, block_reason: str
+    ) -> None:
+        """Record one answer_blocked action — same shared-shape reasoning as log_query_made.
+
+        Written alongside, not instead of, that method's own entry: this
+        records the safety event specifically, query_made still records
+        that the query happened at all.
+        """
+        await self.log_action(
+            correlation_id=correlation_id,
+            action="answer_blocked",
+            resource_type="query",
+            resource_id=correlation_id,
+            extra_data={"question": question, "block_reason": block_reason},
+            user_id=user_id,
+        )
+
     async def get_recent_queries_for_user(self, user_id: str, limit: int = 5) -> list[AuditLog]:
         """Return this user's most recent query_made entries, newest first.
 

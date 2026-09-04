@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     langsmith_api_key: str
     langsmith_project: str = "knowledge-brain"
 
+    # Answer guardrails — a moderation check and an LLM-judge injection
+    # check, both run on every generated answer before it reaches a user.
+    moderation_model: str = "omni-moderation-latest"
+
 
 @lru_cache
 def get_settings() -> Settings:

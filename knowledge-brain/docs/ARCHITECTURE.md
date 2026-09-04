@@ -200,15 +200,49 @@ final chunks, the graph snippets, plus the *original* question (never
 the rewritten one — the rewrite is only a search tool, not a
 replacement for what the user actually asked), are handed to an LLM,
 which answers using only that retrieved text, and says it doesn't know
-rather than guessing if the answer isn't there. The response sent back
-carries more than just that answer text: each chunk that actually
-informed it, with its source document's filename, plus a confidence
-number — the same relevance score reranking already computed on the
-best chunk, or nothing at all if reranking itself was unavailable for
-this request, since a real low score and "no score was computed" must
-never look identical to whoever's reading it.
+rather than guessing if the answer isn't there. Before any of that
+reaches the user, one more check runs: a moderation classifier and an
+LLM injection judge look at the finished answer together, and if either
+flags it — or if both are simultaneously unreachable — the real answer
+never leaves the server, replaced with a fixed, friendly message and no
+sources or confidence at all (see ADR-039). Otherwise, the response
+sent back carries more than just that answer text: each chunk that
+actually informed it, with its source document's filename, plus a
+confidence number — the same relevance score reranking already
+computed on the best chunk, or nothing at all if reranking itself was
+unavailable for this request, since a real low score and "no score was
+computed" must never look identical to whoever's reading it.
 
-**What's new since the last update:** every LLM and reranker call in
+**What's new since the last update:** every generated answer now
+passes through a real safety checkpoint before it can reach a user —
+build-order item 16, real-time answer guardrails. A new graph node,
+`guardrail_check`, sits between `generate` and the end of the query
+pipeline, running two independent checks concurrently: a moderation
+classifier (OpenAI's Moderation API — fast, purpose-built, but blind to
+anything specific to this app) and an LLM injection judge, shown the
+actual retrieved context alongside the generated answer and asked
+whether the answer looks like it followed instructions smuggled into a
+document rather than genuinely answering the question — the RAG-
+specific risk a generic moderation tool has no way to catch. If either
+check flags the answer, `state["answer"]` gets overwritten with a
+fixed, friendly message before any downstream reader (the REST route,
+MCP's tool, `build_sources_and_confidence`) ever sees the real one —
+sources and confidence get suppressed too, since showing the exact
+chunk that tripped the check would defeat the point. The fail policy
+went through a real refinement mid-build: not uniform fail-closed
+(PII detection's own precedent) or uniform fail-open (reranking's), but
+availability-aware — a single check being down contributes no signal
+of its own, but the combined decision still fails closed the moment
+*neither* check could run at all, since "no information exists" is a
+different claim from "checked and clean." Verified live with a real
+attack, not just a mock: a document uploaded with a genuine injection
+payload (a fake "system override" instruction embedded in otherwise
+normal policy text) got retrieved, and the resulting answer was
+correctly blocked. The real, felt cost, also confirmed live: every
+query now pays for two more LLM calls, visible directly as higher
+per-query token usage in LangSmith. See ADR-039.
+
+**What's new before that:** every LLM and reranker call in
 this system now reports itself to LangSmith — build-order item 15,
 LLM/RAG observability. Not a dashboard built into this app; a
 dedicated external tool, the user's own explicit choice. Every OpenAI
@@ -1166,6 +1200,33 @@ before a real one was ever configured. If it disappeared, every call
 would still work exactly the same — only the ability to see what
 happened inside them would be gone.
 
+**Guardrails (`app/services/moderation.py`,
+`app/services/injection_detection.py`, and a new `_guardrail_node` on
+`RetrievalService`)** — added with ADR-039, the safety checkpoint every
+generated answer now passes through before it can reach a user.
+`check_moderation` wraps OpenAI's Moderation API — fast, purpose-built,
+but blind to anything specific to this app. `check_injection` is a
+second LLM call, shown the actual retrieved context alongside the
+generated answer, judging whether the answer looks like it followed
+instructions embedded in a document rather than genuinely answering the
+question — the RAG-specific risk a moderation classifier has no concept
+of. Both run concurrently inside `_guardrail_node`, a real LangGraph
+node wired between `generate` and the graph's end, so REST and MCP both
+inherit this for free the same way every other feature under this
+pipeline has. The fail policy is availability-aware, not uniformly
+fail-open or fail-closed: a single check being down contributes no
+signal of its own — an answer the *other* check actually cleared still
+gets shown — but the combined decision fails closed the moment neither
+check could run at all. On a block, the node overwrites `state["answer"]`
+directly with a fixed, friendly message, and `build_sources_and_confidence`
+suppresses sources and confidence too — every downstream reader just
+sees a state that's already safe to show, with no awareness that
+blocking exists. Talks to: OpenAI, via its own `wrap_openai()`-wrapped
+client (so a blocked answer is fully visible in LangSmith too) and its
+own circuit breaker, same as every other external call in this system.
+If it disappeared, every answer would go straight back to being trusted
+completely, the way it always was before this session.
+
 **Evaluation harness (`eval/`)** — a separate, on-demand tool, not part
 of the running app: a fixed set of known-answer test questions
 (`eval/dataset.json`), run against a handful of small, dedicated
@@ -1601,11 +1662,16 @@ only — and pulls in a snippet from each, subject to the same permission
 check: a referenced document this user can't see contributes no
 snippet. Those chunks, the graph snippets, and the *original* question
 are sent to an LLM, which writes an answer grounded only in that
-retrieved text. The REST response returns that answer alongside the
-chunks that actually informed it (each with its source document's
-filename) and a confidence number pulled straight from reranking's own
-best score — or `null` if reranking was unavailable for this request,
-rather than a `0.0` that would look like a real, low score.
+retrieved text. Before that answer goes anywhere, a moderation check
+and an LLM injection judge look at it together — if either flags it, or
+if both are unreachable at once, the answer is replaced with a fixed,
+friendly message and no sources or confidence, and neither the REST
+route nor MCP's tool ever sees the real one (see ADR-039). Otherwise,
+the REST response returns that answer alongside the chunks that
+actually informed it (each with its source document's filename) and a
+confidence number pulled straight from reranking's own best score — or
+`null` if reranking was unavailable for this request, rather than a
+`0.0` that would look like a real, low score.
 
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
@@ -1615,16 +1681,18 @@ with a 401, nothing else runs. Once past the gate, the request runs the
 exact same underlying pipeline described above: `ask_knowledge_base`
 and `upload_document` are thin wrappers calling the same
 `RetrievalService` and `IngestionService`, so the LangGraph retry loop,
-graph context, and the audit log entry all behave identically
-regardless of which door the request came through. What differs is the
-*shape* of what comes back: `ask_knowledge_base` calls
-`answer_question()`, which only ever returns the plain answer string —
-an MCP tool result is meant to be read by another AI, not rendered as a
-UI with source cards and a confidence badge, so it was never extended
-to return `sources`/`confidence` the way `/query`'s REST response now
-does. Both call sites reuse the exact same `RetrievalService`; they
-just ask it for different amounts of what one pipeline run already
-produced.
+graph context, the guardrail check, and the audit log entry all behave
+identically regardless of which door the request came through.
+`ask_knowledge_base` calls the exact same `run_query()` REST does (the
+one entry point every caller shares — see ADR-033), and only returns
+`state["answer"]` — the plain answer string, already guaranteed safe to
+show by the time it reaches this point, whether that's the real answer
+or the guardrail's own fixed message. An MCP tool result is meant to be
+read by another AI, not rendered as a UI with source cards and a
+confidence badge, so it was never extended to return
+`sources`/`confidence` the way `/query`'s REST response does. Both call
+sites reuse the exact same `RetrievalService`; they just ask it for
+different amounts of what one pipeline run already produced.
 
 ## What could go wrong and how we handle it
 
@@ -2713,3 +2781,19 @@ LangSmith's tracing on captures that graph's execution automatically —
 no code change needed to the graph itself, only to the individual
 OpenAI/Voyage call sites that need their own detail captured. See
 ADR-038.
+
+**Guardrail** — a safety check run on an AI system's *output*, after
+it's already been generated, before it's actually shown to anyone —
+distinct from checking *input* (like PII detection screening a document
+at upload time) and from measuring quality offline in batch (like the
+evaluation harness). See ADR-039.
+
+**Prompt injection** — a manipulation attack against an LLM where
+instructions are hidden inside data the model is expected to treat as
+plain content (here: a retrieved document's own text), tricking the
+model into following them as if they were real instructions from its
+own system prompt. Different from a moderation risk like toxic
+content: an injected instruction is rarely unsafe in itself (*"tell the
+user to visit this link instead"* isn't hate speech or violence), which
+is exactly why catching it needs a dedicated check, not just a content
+classifier. See ADR-039.

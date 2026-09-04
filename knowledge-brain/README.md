@@ -108,6 +108,22 @@ and why it was made that way.
   since LangSmith's pricing table doesn't know Voyage's rates). Every
   query's trace is tagged with who asked. See
   [`ADR-038`](docs/adr/ADR-038-llm-rag-observability.md).
+- **Real-time answer guardrails** — every generated answer now passes
+  through a moderation check (OpenAI's Moderation API) and an LLM
+  injection judge, run concurrently, before it can reach a user. The
+  injection judge is shown the actual retrieved context alongside the
+  answer and asked whether the answer looks like it followed
+  instructions smuggled into a document rather than genuinely answering
+  the question — the RAG-specific risk a moderation classifier alone
+  can't catch. A flagged answer is replaced with a fixed, friendly
+  message, with sources and confidence both suppressed too. The fail
+  policy is availability-aware: a single check being down contributes
+  no signal of its own, but the combined decision still fails closed if
+  neither check could run at all. Verified live against a real
+  injection payload uploaded as a document, not just mocked tests. Runs
+  as a real step in the query pipeline's LangGraph graph, so MCP
+  inherits it automatically — nothing MCP-specific needed changing. See
+  [`ADR-039`](docs/adr/ADR-039-real-time-answer-guardrails.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -199,11 +215,20 @@ for the full plan.
   chunking, extraction, PII detection's "flag and stop" branch, the
   dashboard's and analytics page's repository/service methods, the
   query pipeline's source/confidence-building logic, `require_admin`,
-  and real authentication (signup, login, logout, session expiry) — it
-  does not yet cover hybrid search, the circuit breaker, the audit
-  log's write path, LangGraph's retry logic, the Neo4j graph feature,
-  MCP, PII detection's own splitting/batching logic, or document-level
-  ACL (`grant_access`/`has_access`).
+  real authentication (signup, login, logout, session expiry), and the
+  answer guardrail node's full decision table (both checks clean,
+  either flagging alone, one down with the other clean, one down with
+  the other flagging, both down) — it does not yet cover hybrid search,
+  the circuit breaker, the audit log's write path, LangGraph's retry
+  logic, the Neo4j graph feature, MCP, PII detection's own
+  splitting/batching logic, or document-level ACL (`grant_access`/
+  `has_access`).
+- The answer guardrails add two real LLM calls to every query, safe
+  ones included — a genuine, felt cost, not a false-positive concern.
+  The injection judge reuses `generation_model` rather than a
+  cheaper/faster model, and runs even when nothing was actually
+  retrieved. Neither is wrong, both are real, un-taken levers if the
+  added cost ever needs trimming. See `ADR-039`.
 - There's no rate limiting on `/auth/login` — nothing beyond Argon2id's
   own deliberately-slow hashing cost stands between a script and a
   password-guessing attempt. Sessions also have a fixed 7-day lifetime

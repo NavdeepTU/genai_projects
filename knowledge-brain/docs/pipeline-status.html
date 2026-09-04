@@ -1169,10 +1169,51 @@
     <p class="caveat"><strong>Verified live, twice:</strong> once with a placeholder API key — a real document upload and two real queries (one with genuine retrieval and reranking against real content) all completed successfully, confirming a tracing failure never breaks the actual pipeline. Once with a real LangSmith account and key, confirming actual traces — prompt, tokens, cost — show up correctly. Full test suite (39 tests) passed unchanged throughout, since this is instrumentation around already-tested functions, not new business logic. See <a href="adr/ADR-038-llm-rag-observability.md">ADR-038</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 19 — Real-time answer guardrails <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 16 · moderation + LLM injection judge, run on every generated answer</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/services/moderation.py</span>
+        <span class="path mono">OpenAI Moderation API · fast, purpose-built, blind to injection</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/services/injection_detection.py</span>
+        <span class="path mono">LLM judge, shown retrieved context + answer together</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">guardrail_check graph node</span>
+        <span class="path mono">both checks run concurrently, between generate and the graph's end</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Availability-aware fail policy</span>
+        <span class="path mono">one check down + other clean → shown · both down → blocked</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Not built, deferred on purpose:</strong> no cheaper/faster model for the injection judge specifically — it reuses <code>generation_model</code>. No skip-if-nothing-retrieved optimization for the injection check. Neither changes correctness, both are real, un-taken cost levers if the added per-query cost ever needs trimming.</p>
+    <p class="caveat"><strong>A real, honest structural limit, not solved:</strong> the injection judge is itself an LLM — content specifically crafted against its own prompt could, in principle, evade it, the same class of risk every LLM-as-judge mechanism carries.</p>
+    <p class="caveat"><strong>Verified live against a real attack, not just mocks:</strong> a document uploaded with a genuine prompt-injection payload (a fake "system override" instruction embedded in normal-looking policy text) — the resulting answer came back correctly blocked, no sources, no confidence. A separate, genuinely benign question came back with its real answer unaffected, confirming the checks don't block by default. Per-query token cost confirmed visibly higher afterward, checked directly in LangSmith. Test suite grew 39 → 46 passing. See <a href="adr/ADR-039-real-time-answer-guardrails.md">ADR-039</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">16</span>Real-time answer guardrails</li>
       <li><span class="n mono">17</span>Multi-agent federated retrieval</li>
       <li><span class="n mono">18</span>Conversation history &amp; context condensing</li>
       <li><span class="n mono">19</span>Streamed answer generation</li>

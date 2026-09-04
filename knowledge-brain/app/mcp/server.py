@@ -44,12 +44,20 @@ async def ask_knowledge_base(question: str) -> str:
             return "The knowledge base is temporarily unavailable. Please try again in a moment."
 
         correlation_id = get_correlation_id()
-        await AuditRepository(db).log_query_made(
+        audit = AuditRepository(db)
+        await audit.log_query_made(
             correlation_id=correlation_id,
             user_id=user_id,
             question=question,
             duration_ms=state["duration_ms"],
         )
+        if state["blocked"]:
+            await audit.log_answer_blocked(
+                correlation_id=correlation_id,
+                user_id=user_id,
+                question=question,
+                block_reason=state["block_reason"] or "unknown",
+            )
 
         return state["answer"]
 

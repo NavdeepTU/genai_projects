@@ -30,6 +30,8 @@ class QueryState(TypedDict):
     graph_context: list[str]
     answer: str
     duration_ms: float
+    blocked: bool
+    block_reason: str | None
 
 
 def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
@@ -47,6 +49,7 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     graph.add_node("rewrite_query", service._rewrite_node)
     graph.add_node("graph_context", service._graph_context_node)
     graph.add_node("generate", service._generate_node)
+    graph.add_node("guardrail_check", service._guardrail_node)
 
     graph.set_entry_point("retrieve")
     graph.add_edge("retrieve", "rerank")
@@ -57,6 +60,7 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     )
     graph.add_edge("rewrite_query", "retrieve")
     graph.add_edge("graph_context", "generate")
-    graph.add_edge("generate", END)
+    graph.add_edge("generate", "guardrail_check")
+    graph.add_edge("guardrail_check", END)
 
     return graph.compile()

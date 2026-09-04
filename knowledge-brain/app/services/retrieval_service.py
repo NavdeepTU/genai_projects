@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import time
 import uuid
 
+from openai import OpenAIError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.circuit_breaker import CircuitOpenError
@@ -14,12 +16,19 @@ from app.repositories.graph_repository import GraphRepository
 from app.services.embedding import embed_chunks
 from app.services.generation import generate_answer
 from app.services.hybrid_search import reciprocal_rank_fusion
+from app.services.injection_detection import check_injection
+from app.services.moderation import check_moderation
 from app.services.query_graph import MAX_RETRIES, QueryState, build_query_graph
 from app.services.query_rewriting import rewrite_query
 from app.services.reranking import rerank_chunks
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+BLOCKED_ANSWER_MESSAGE = (
+    "I can't share this answer — it didn't pass a safety check. "
+    "Try rephrasing your question."
+)
 
 
 class RetrievalUnavailableError(Exception):
@@ -62,6 +71,8 @@ class RetrievalService:
             "graph_context": [],
             "answer": "",
             "duration_ms": 0.0,
+            "blocked": False,
+            "block_reason": None,
         }
         start = time.monotonic()
         # metadata here tags the *entire* trace for this query — every
@@ -88,6 +99,12 @@ class RetrievalService:
         HTTP server — the route should stay a thin translation from
         QueryState to QueryResponse, not the place this logic runs.
         """
+        if state["blocked"]:
+            # A blocked answer shows no sources and no confidence — showing
+            # the exact retrieved chunk that tripped the guardrail would
+            # defeat the point of blocking in the first place.
+            return [], None
+
         filenames: dict[uuid.UUID, str] = {}
         sources: list[QuerySource] = []
         for chunk in state["reranked_chunks"]:
@@ -206,6 +223,68 @@ class RetrievalService:
         context_chunks = [chunk.text for chunk in state["reranked_chunks"]] + state["graph_context"]
         answer = await generate_answer(state["original_question"], context_chunks)
         return {"answer": answer}
+
+    async def _guardrail_node(self, state: QueryState) -> dict:
+        """Graph node: block the answer if a safety check flags it.
+
+        Two independent checks run concurrently — a moderation classifier
+        (unsafe content) and an LLM judge (prompt injection smuggled in
+        through retrieved document text). If a check's own circuit is
+        open, that check contributes no signal rather than forcing a
+        block on its own — but if *neither* check could run at all,
+        there's no signal whatsoever, and that's treated as unsafe: a
+        clean answer proven safe by nothing is not the same as a clean
+        answer actually checked.
+        """
+        context_chunks = [chunk.text for chunk in state["reranked_chunks"]] + state["graph_context"]
+
+        (moderation_flagged, moderation_available), (injection_flagged, injection_available) = (
+            await asyncio.gather(
+                self._check_moderation_safely(state["answer"]),
+                self._check_injection_safely(state["original_question"], state["answer"], context_chunks),
+            )
+        )
+
+        if not moderation_available and not injection_available:
+            return {
+                "answer": BLOCKED_ANSWER_MESSAGE,
+                "blocked": True,
+                "block_reason": "guardrails_unavailable",
+            }
+
+        if moderation_flagged or injection_flagged:
+            reason = "moderation" if moderation_flagged else "injection"
+            return {"answer": BLOCKED_ANSWER_MESSAGE, "blocked": True, "block_reason": reason}
+
+        return {"blocked": False, "block_reason": None}
+
+    async def _check_moderation_safely(self, answer: str) -> tuple[bool, bool]:
+        """Run the moderation check; on failure, report unavailable rather than raising.
+
+        Returns (flagged, available) — unavailable contributes no signal
+        of its own, it's not treated as "checked and clean." See
+        _guardrail_node for what happens when both checks end up
+        unavailable at once.
+        """
+        try:
+            return await check_moderation(answer), True
+        except (CircuitOpenError, OpenAIError):
+            logger.error(
+                "Moderation check unavailable", extra={"correlation_id": get_correlation_id()}
+            )
+            return False, False
+
+    async def _check_injection_safely(
+        self, question: str, answer: str, context_chunks: list[str]
+    ) -> tuple[bool, bool]:
+        """Run the injection check; on failure, report unavailable rather than raising."""
+        try:
+            return await check_injection(question, answer, context_chunks), True
+        except (CircuitOpenError, OpenAIError):
+            logger.error(
+                "Injection check unavailable", extra={"correlation_id": get_correlation_id()}
+            )
+            return False, False
 
     async def _find_similar_chunks_safely(
         self, query_embedding: list[float], user_id: str
