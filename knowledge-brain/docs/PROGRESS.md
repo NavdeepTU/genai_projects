@@ -3690,3 +3690,130 @@ Postgres' still-open cost fix, this session's own named gaps (the
 failure-isolation hole, domain vocabulary drift), and prior test
 coverage gaps. At 3–4 hours/day, that's roughly 7–9 working days left,
 assuming no further scope changes.
+
+## Session: 2026-09-05 — Conversation history and the sidebar (build-order item 18, storage half)
+
+### What we built
+- Storage for conversation history — the half of build-order item 18
+  you explicitly asked for this session, with condensing (the other
+  half) deliberately left for later. New `Conversation` and `Turn`
+  tables in Postgres: a conversation is a named thread (title = a
+  plain truncation of its first question, your own choice over paying
+  for an LLM call to generate one), a turn is one question/answer pair
+  storing its sources and which domains it used as JSONB/array columns
+  directly on the row — the same shape `AuditLog.extra_data` already
+  established, not a new pattern.
+- A real decision, made together before any code: Redis stays out of
+  this session entirely. Its only real job in the spec is caching
+  recent turns for the condensing step, and condensing isn't built —
+  standing up Redis now would mean infrastructure with nothing reading
+  from it yet. `condensed_question` exists as a column already, stored
+  equal to the raw question for now, so next session's condensing work
+  has somewhere to write the real rewritten question without a schema
+  change.
+- `app/api/query.py` now resolves a named conversation *before*
+  running the safety/retrieval pipeline at all — a bad or someone
+  else's `conversation_id` fails fast with a 404 rather than after
+  paying for a full pipeline run. A new conversation is only actually
+  created in Postgres once its first answer comes back successfully,
+  so a failed attempt (a 503) never leaves an empty thread in the
+  sidebar.
+- The frontend Query page split into two routes sharing one chat
+  component: `/query` for a new conversation, `/query/[conversationId]`
+  to resume an old one, both wrapped in a shared layout that fetches
+  the conversation list once and renders a sidebar around whichever
+  page is active. The existing single-file chat UI was extracted into
+  `QueryChat` specifically so it could be reused by both routes instead
+  of duplicated. A conversation's URL updates the moment its first
+  answer comes back — no full page navigation, so the transcript
+  already on screen isn't lost — and the sidebar refreshes to show the
+  new entry.
+- Two real, unrelated snags along the way, both caught and fixed before
+  they became real problems: Next.js's own generated route-typing
+  validator rejected my first hand-written `params`/`children` prop
+  types for the new layout and dynamic page — fixed by switching to the
+  framework's own auto-generated `LayoutProps<"/query">` /
+  `PageProps<"/query/[conversationId]">` helpers, matching how the root
+  layout already does it, confirmed correct against the actual Next.js
+  16 docs bundled in `node_modules` rather than guessed. Separately,
+  jsdom has no `scrollIntoView` implementation at all, which this
+  project's own auto-scroll-to-latest-turn behavior depends on —
+  polyfilled once, globally, in `vitest.setup.ts`.
+- You hit a real, unrelated environment snag running the table-creation
+  script yourself: `python scripts/create_tables.py` failed with
+  `ModuleNotFoundError: No module named 'app'` because Python only adds
+  the script's own folder to its import path, not the project root.
+  Fixed with `PYTHONPATH=.` — already the exact invocation this
+  project's own README documents, just something you hadn't needed to
+  run by hand before.
+- One new ADR: [`ADR-041`](adr/ADR-041-conversation-history-and-sidebar.md).
+- Also fixed while updating the interview-prep doc for this feature: a
+  real, pre-existing staleness in Feature 18's own section, from before
+  this session — it still described MCP's `ask_knowledge_base` as
+  calling `answer_question()`, a method deleted two features ago
+  (ADR-033) once ADR-040 switched everything to
+  `FederatedRetrievalService`. Corrected in place, not left standing
+  next to the newer, accurate material.
+- Tests: 7 new backend (`ConversationRepository` — creation, turn
+  storage, the `updated_at` bump that drives sidebar ordering,
+  user-scoped listing, the stranger-gets-`None` permission check, turns
+  returned in order). 8 new frontend (`ConversationSidebar` rendering;
+  `QueryChat` rendering turns passed in from a resumed conversation,
+  and sending the right `conversation_id` — `null` for a new one, the
+  real id for a follow-up). Backend suite: 70 → 77 passing. Frontend:
+  7 → 15.
+- Verified live, end to end, twice over: first against the raw API — a
+  question with no `conversation_id` got one back, showed up in `GET
+  /conversations`, and a follow-up using that id landed both turns in
+  order in `GET /conversations/{id}`; a nonexistent or someone else's
+  id correctly 404'd on both endpoints. Then in a real browser: a fresh
+  question created a conversation and updated the URL without a full
+  reload; navigating directly to that URL (the actual test of "resume
+  any time," not just client state) brought back the identical
+  transcript; "New conversation" correctly reset to blank; an invalid
+  conversation URL rendered the custom not-found page.
+
+### What I struggled with
+- Nothing you needed to correct mid-build — the two real decisions
+  (Redis timing, title generation) were both settled cleanly before any
+  code was written, and you picked the recommended option both times.
+  The `PYTHONPATH` snag was environmental, not a design mistake, and
+  resolved in two exchanges.
+
+### Concepts to revisit
+- Why storage has to exist before condensing can be built at all, and
+  what specifically condensing will add on top of what's here now —
+  covered in the new Feature 28 section of `INTERVIEW_PREP.md`.
+- Why a named conversation's ownership is checked *before* the
+  safety/retrieval pipeline runs, not after — the cost argument for
+  checking cheap things first.
+- Why a conversation is only created after a successful answer, not
+  when the question first arrives.
+
+### What's next
+- Context condensing itself — the other half of item 18, and the
+  reason Redis still isn't in this project. This is the natural very
+  next session, now that storage exists for it to build on.
+- A real, named-but-not-built cost lever: `router.refresh()` currently
+  re-fetches the entire conversation list after every single question,
+  not just the one that changed — fine at today's scale, a real
+  inefficiency once a user has hundreds of conversations.
+- Conversations have no delete or rename yet — once created, permanent.
+- Everything else from prior sessions' "what's next" still stands:
+  multi-tenancy, APIM's remaining gaps, the missing migration tool,
+  streamed generation (item 19), the PII review workflow, Postgres'
+  still-open cost fix, last session's own named gaps (the
+  federated-retrieval failure-isolation hole, domain vocabulary drift),
+  and prior test-coverage gaps.
+
+**Estimated completion: ~76% of the total project, by weighted
+effort** — up from 74%. Storage and a real, resumable sidebar are a
+genuine, complete feature on their own, even though condensing (the
+harder, more novel half of item 18) is still ahead — weighted
+accordingly as a partial step, not a full one. Rough remaining effort:
+~24 hours (down from ~26) — condensing, multi-tenancy, APIM's remaining
+gaps, the missing migration tool, streamed generation (item 19), the
+PII review workflow, Postgres' still-open cost fix, and the standing
+test-coverage and reliability gaps named in prior sessions. At 3–4
+hours/day, that's roughly 6–8 working days left, assuming no further
+scope changes.

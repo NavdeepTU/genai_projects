@@ -1946,29 +1946,28 @@ their source filenames, and a confidence score.
 
 ```mermaid
 flowchart LR
-    UI["query/page.tsx<br/>Client Component"] -->|"POST /api/query"| PROXY["Route Handler<br/>(secret stays server-side)"]
+    UI["query-chat.tsx<br/>Client Component"] -->|"POST /api/query"| PROXY["Route Handler<br/>(secret stays server-side)"]
     PROXY -->|"POST /query"| API["app/api/query.py"]
-    API --> RUN["RetrievalService.run_query()<br/>(unchanged pipeline)"]
-    RUN --> STATE["QueryState:<br/>reranked_chunks, top_relevance_score"]
-    STATE --> BUILD["Build sources[] + confidence<br/>(null if reranker_unavailable)"]
-    BUILD --> RESP["QueryResponse"]
+    API --> RUN["FederatedRetrievalService.run_query()<br/>(unchanged pipeline)"]
+    RUN --> STATE["FederatedResult:<br/>sources, confidence"]
+    STATE --> RESP["QueryResponse"]
     RESP --> UI
 ```
 
 **CLAUDE.md's own spec for this page describes streaming text and a
-sidebar of past conversations. Neither is built. Why not, and was that
-a shortcut?**
-Not a shortcut — a scope decision made explicit before writing any
-code. Both depend on real backend features that don't exist yet and
-sit later in the build order: token streaming is item 19, with its own
+sidebar of past conversations. Neither was built at first. What's the
+status now?**
+Streaming still isn't built — token streaming is item 19, with its own
 Enterprise Requirement covering SSE transport and sentence-chunked
-guardrail checks; conversation history is item 18 in the *build order*
-(a different numbering than this doc's own feature list), needing a
-real conversations/turns schema and a context-condensing step. Building
-either as part of "just a page" would mean either faking them (a
-client-side typewriter effect that looks like streaming but isn't a
-real SSE connection) or quietly pulling a much bigger feature forward
-out of order, which this project's own rules say not to do.
+guardrail checks, and building a fake client-side typewriter effect
+instead was explicitly rejected in ADR-031 since it would look like
+streaming without being architecturally anything like it. The sidebar
+*is* now built (ADR-041, Feature 28 below) — but only half of what
+"conversation history" (item 18) actually means: conversations and
+turns are stored and resumable, but nothing yet rewrites a follow-up
+question like "what about the other one" into something retrieval can
+actually use on its own. That's the deliberately deferred other half,
+not a gap discovered later.
 
 **Why does `confidence` come back as `null` instead of `0.0` when the
 reranker is unavailable?**
@@ -2004,14 +2003,18 @@ that hasn't been built, not a missing setting in today's code.
 
 **MCP's `ask_knowledge_base` tool answers the same questions. Does it
 also return sources and confidence now?**
-No, and that's deliberate, not a gap that was missed. It still calls
-`answer_question()`, the thin wrapper that only unpacks the plain
-answer string from the same `QueryState` — an MCP tool result is read
-by another AI program, not rendered as a UI with source cards and a
-confidence badge, so there was nothing to gain by extending it the same
-way. Both REST and MCP still run through the exact same
-`RetrievalService`; they just ask it for different amounts of what one
-pipeline run already produces.
+No, and that's deliberate, not a gap that was missed. It only unpacks
+the plain answer string from the same result the REST route gets back
+— an MCP tool result is read by another AI program, not rendered as a
+UI with source cards and a confidence badge, so there was nothing to
+gain by extending it the same way. Both REST and MCP run through the
+exact same `FederatedRetrievalService` (the single entry point since
+ADR-040 — `answer_question()`, the older thin wrapper this answer used
+to describe, was deleted back in ADR-033 once nothing called it
+anymore); they just ask it for different amounts of what one pipeline
+run already produces. Conversation tracking (ADR-041) is REST/frontend
+only for the same reason — a one-shot tool call has no browser session
+for a "thread" to attach to.
 
 **What would you change here if this needed to run at genuine
 production scale?**
@@ -3061,6 +3064,91 @@ classifier names. That filter doesn't exist today; it's a real,
 un-built lever, not a claim this design already handles that case.
 
 *Further reading: [Anthropic — Building Effective Agents, "Orchestrator-workers"](https://www.anthropic.com/research/building-effective-agents) — the closest published pattern to this feature's supervisor-plus-domain-scoped-workers-plus-synthesis shape, including when a multi-step orchestration is actually worth its added complexity over a single call.*
+
+---
+
+## Feature 28: Conversation History and the Sidebar
+
+**What does this feature do, in one sentence?**
+Every question now belongs to a real, persisted conversation — stored
+in Postgres, listed in a sidebar most-recently-active first, and
+resumable by URL at any time — though the raw question is still what
+enters retrieval, unchanged; nothing yet rewrites a follow-up against
+earlier turns.
+
+```mermaid
+flowchart TD
+    Q[POST /query] --> HASID{"conversation_id given?"}
+    HASID -->|"yes, not found or<br/>not this user's"| E404["404 — before any<br/>retrieval runs"]
+    HASID -->|"yes, valid"| RUN
+    HASID -->|no| RUN["FederatedRetrievalService.run_query<br/>(unchanged)"]
+    RUN --> RESULT{Answer came back<br/>successfully?}
+    RESULT -->|"no — 503"| FAIL["No conversation created,<br/>no turn saved"]
+    RESULT -->|yes| CREATE{"Was conversation_id<br/>given?"}
+    CREATE -->|no| NEWCONV["Create conversation now<br/>(title = truncated question)"]
+    CREATE -->|yes| ADDTURN
+    NEWCONV --> ADDTURN["Add turn: question, answer,<br/>sources, confidence, domains_used"]
+    ADDTURN --> RESP["Response includes<br/>conversation_id"]
+```
+
+**"What about the other one" is the classic hard follow-up question for
+a RAG system. Does this feature solve that?**
+No, and that's an honest answer, not a dodge. This session built the
+*storage* half of build-order item 18 — a conversation and its turns
+persist, and can be resumed — but the raw question still goes straight
+into retrieval unchanged, exactly as it did before this feature. "What
+about the other one" would fail today the same way it always has,
+since nothing yet looks at the conversation's prior turns to figure out
+what "the other one" refers to. That's context condensing, the other
+half of item 18, deliberately scoped out of this session so Redis
+wouldn't need to be introduced with nothing yet reading from it.
+
+**Why does storing conversations matter at all, then, if follow-ups
+don't work yet?**
+Two independent things had to exist before condensing could be built at
+all: somewhere to store turns, and something to read from when
+condensing needs "the last few turns." Building the sidebar and
+resuming now means next session's condensing work is pure logic —
+reading already-stored turns and rewriting a question — with no new
+schema or storage decisions competing for attention in the same pass.
+It's also a complete, real feature on its own even without condensing:
+a user closing the tab and coming back tomorrow can already pick up
+exactly where they left off, which the old client-state-only page could
+never do.
+
+**Could a follow-up question in a resumed conversation leak access to a
+document the user was never permitted to see?**
+No — document-level ACL is checked at retrieval time, on every single
+call to `RetrievalService.run_query`, the same join it's always used.
+A conversation carries no access rights of its own; resuming an old
+thread doesn't skip retrieval or its permission check for the new
+question, it just supplies the thread's *id* to attach the new turn to.
+If a user's access to a document changed between two turns in the same
+conversation, the second turn's retrieval reflects the *current* state
+of their access, not whatever the first turn could see — there's no
+mechanism here that could let an old turn's permissions leak forward.
+
+**Why does the backend check a named conversation's ownership before
+running the safety/retrieval pipeline, instead of after?**
+Cost and blast radius. A 404 is cheap — one database lookup. Running
+the full pipeline first (input guardrail, domain classification,
+retrieval, generation, output guardrail) only to discard the answer
+because the conversation id turned out to be someone else's, or didn't
+exist, would waste every one of those calls on a request that was
+always going to be rejected. Checking ownership first means a bad id
+costs one query, not an entire question's worth of LLM calls.
+
+**Why is a new conversation only created after the answer succeeds,
+not immediately when the question comes in?**
+Because the alternative has a real, visible cost: if conversations were
+created up front and the pipeline then failed (a 503 — both search
+backends down, or a circuit breaker open), the sidebar would show an
+empty, nameless thread with no way to tell it apart from one nobody had
+asked anything in yet. Waiting until there's a real answer to attach
+means every conversation in the sidebar represents an actual
+successful exchange, never a failed attempt.
+
+*Further reading: [Postgres's own JSONB documentation](https://www.postgresql.org/docs/current/datatype-json.html) — the type this feature uses to store each turn's sources and this project already uses for the audit log's own metadata column, including when JSONB is the right call versus a normalized table.*
 
 ---
 

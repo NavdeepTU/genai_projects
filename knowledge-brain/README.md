@@ -152,6 +152,22 @@ and why it was made that way.
   circuit-breaker error is, so one domain hitting it today can still
   fail the whole question — documented, not hidden. See
   [`ADR-040`](docs/adr/ADR-040-multi-agent-federated-retrieval.md).
+- **Conversation history and a real sidebar** *(storage half only — see
+  below)* — every question now belongs to a persisted conversation, not
+  just whatever the browser's memory still holds. A sidebar lists a
+  user's conversations, most recently active first; resuming one is a
+  real route (`/query/[conversationId]`), not client-side state, so a
+  reload actually brings back the same thread. A new conversation is
+  only created once its first answer comes back successfully, so a
+  failed attempt never leaves an empty thread behind, and a named
+  conversation's ownership is checked *before* the safety/retrieval
+  pipeline runs, so a bad or someone else's id fails with a 404 rather
+  than after paying for a full pipeline run. What's still missing:
+  context condensing — a follow-up like "what about the other one"
+  still goes straight into retrieval unrewritten, and Redis (only
+  needed to cache turns for that condensing step) hasn't been
+  introduced yet either. See
+  [`ADR-041`](docs/adr/ADR-041-conversation-history-and-sidebar.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -239,25 +255,28 @@ release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
 for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 70 tests) covers ingestion
+- The automated test suite (`tests/`, 77 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
   `require_admin`, real authentication (signup, login, logout, session
   expiry), both guardrail nodes' full decision tables (input and
   output, each: both checks clean, either flagging alone, one down with
-  the other clean, one down with the other flagging, both down), and
+  the other clean, one down with the other flagging, both down),
   federated retrieval's own routing logic (single/multi-domain,
   classification-unavailable fallback, a failing domain marked partial,
   every domain failing, every domain's own guardrail blocking, the
-  synthesized answer itself getting blocked) — it does not yet cover
-  hybrid search, the circuit breaker, the audit log's write path,
-  LangGraph's retry logic, the Neo4j graph feature, MCP, PII detection's
-  own splitting/batching logic, or document-level ACL (`grant_access`/
-  `has_access`). The frontend has its own test suite now too
-  (`frontend/`, 7 tests, Vitest + React Testing Library) — this
-  project's first, covering the domain-tagging upload field and its
-  document-card badges; run with `npm test` inside `frontend/`.
+  synthesized answer itself getting blocked), and conversation storage
+  (creation, turn storage, the sidebar-ordering timestamp bump,
+  user-scoped listing, the stranger-gets-`None` permission check) — it
+  does not yet cover hybrid search, the circuit breaker, the audit
+  log's write path, LangGraph's retry logic, the Neo4j graph feature,
+  MCP, PII detection's own splitting/batching logic, or document-level
+  ACL (`grant_access`/`has_access`). The frontend has its own test
+  suite too (`frontend/`, 15 tests, Vitest + React Testing Library) —
+  covering the domain-tagging upload field and its document-card
+  badges, the conversation sidebar, and the chat component's resume
+  behavior; run with `npm test` inside `frontend/`.
 - The answer guardrails add two real LLM calls to every query, safe
   ones included, and the input guardrail adds two more on top before
   retrieval even starts — a genuine, felt cost, not a false-positive

@@ -57,6 +57,35 @@ export type QueryResponse = {
   answer: string;
   sources: QuerySource[];
   confidence: number | null;
+  conversation_id: string;
+  correlation_id: string;
+};
+
+export type ConversationListItem = {
+  id: string;
+  title: string;
+  updated_at: string;
+};
+
+export type ConversationListResponse = {
+  conversations: ConversationListItem[];
+  correlation_id: string;
+};
+
+export type Turn = {
+  id: string;
+  raw_question: string;
+  answer: string;
+  sources: QuerySource[];
+  confidence: number | null;
+  domains_used: string[];
+  created_at: string;
+};
+
+export type ConversationDetailResponse = {
+  id: string;
+  title: string;
+  turns: Turn[];
   correlation_id: string;
 };
 
@@ -124,12 +153,14 @@ export class UnauthorizedError extends Error {
 // Called from the browser (a Client Component's submit handler), so this
 // hits the same-origin Next.js proxy at /api/query, never the backend
 // directly — the proxy is what attaches the session cookie and the
-// gateway secret server-side.
-export async function postQuery(question: string): Promise<QueryResponse> {
+// gateway secret server-side. conversationId is omitted to start a new
+// conversation; the response's own conversation_id is what the caller
+// should send on every question after that.
+export async function postQuery(question: string, conversationId: string | null): Promise<QueryResponse> {
   const response = await fetch("/api/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, conversation_id: conversationId }),
   });
 
   if (response.status === 401) {

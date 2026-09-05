@@ -11,6 +11,9 @@ import { backendAuthHeaders } from "@/lib/auth";
 import type {
   AdminResponse,
   AnalyticsResponse,
+  ConversationDetailResponse,
+  ConversationListItem,
+  ConversationListResponse,
   DashboardResponse,
   DocumentListItem,
   DocumentListResponse,
@@ -78,4 +81,32 @@ export async function getDocuments(): Promise<DocumentListItem[]> {
 
   const data: DocumentListResponse = await response.json();
   return data.documents;
+}
+
+export async function getConversations(): Promise<ConversationListItem[]> {
+  const response = await authenticatedFetch("/conversations");
+
+  if (!response.ok) {
+    throw new Error(`Failed to load conversations (status ${response.status})`);
+  }
+
+  const data: ConversationListResponse = await response.json();
+  return data.conversations;
+}
+
+// Returns null for a 404 specifically (doesn't exist, or belongs to
+// someone else — the backend doesn't distinguish the two) so the page
+// can render a real "not found" state instead of the generic error
+// boundary; any other failure still throws.
+export async function getConversation(id: string): Promise<ConversationDetailResponse | null> {
+  const response = await authenticatedFetch(`/conversations/${id}`);
+
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to load conversation (status ${response.status})`);
+  }
+
+  return response.json();
 }

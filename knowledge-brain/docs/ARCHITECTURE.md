@@ -25,12 +25,18 @@ per domain, run concurrently, then merged by a synthesis call). Both
 flows now also touch a second database: Neo4j, which remembers explicit
 references between documents (not similarity — actual "this mentions
 that") and lets a question's answer pull in context from a document
-that was never directly retrieved, only connected. A request also
-reaches the backend through one of two doors now: the intended one,
-Azure API Management, which stamps a shared secret onto everything it
-forwards; or the Container App's own direct URL, which still works too,
-since Consumption tier APIM has no network-level way to block it.
-Everything after item 17 in the build order doesn't exist yet. Every
+that was never directly retrieved, only connected. Every question now
+also belongs to a *conversation* — a real, resumable thread stored in
+Postgres, not just whatever the browser happens to still have in
+memory — though nothing about the question's own wording is rewritten
+against earlier turns yet; that's a later half of the same build item,
+still to come. A request also reaches the backend through one of two
+doors now: the intended one, Azure API Management, which stamps a
+shared secret onto everything it forwards; or the Container App's own
+direct URL, which still works too, since Consumption tier APIM has no
+network-level way to block it. Everything after item 17 in the build
+order doesn't exist yet (item 18, conversation history, is partially
+built — storage and resuming, not yet the condensing half). Every
 request, regardless of which flow it's on, also gets a correlation ID,
 an audit log entry, and circuit-breaker protection around its external
 AI calls (OpenAI, Voyage AI, and now Neo4j).
@@ -83,8 +89,13 @@ flowchart TD
     SAVESTAGE -.writes.-> STATUSREAD
     READY -.writes.-> STATUSREAD
 
+    Q --> CONVCHECK{"conversation_id given?"}
+    CONVCHECK -->|"yes, but not found<br/>or not this user's"| CONV404["404 — before any<br/>retrieval ever runs"]
+    CONVCHECK -->|"yes, valid"| INPUTGUARD
+    CONVCHECK -->|"no — will create<br/>a new one, later"| INPUTGUARD
+
     subgraph retrieve["Asking a question — FederatedRetrievalService"]
-        Q --> INPUTGUARD{"Input guardrail: moderation +<br/>jailbreak check, concurrent<br/>(via circuit breakers)"}
+        INPUTGUARD{"Input guardrail: moderation +<br/>jailbreak check, concurrent<br/>(via circuit breakers)"}
         INPUTGUARD -->|"flagged, or both<br/>checks unavailable"| BLOCKED1["Blocked before any retrieval —<br/>fixed friendly message,<br/>no sources/confidence"]
         INPUTGUARD -->|clean| CLASSIFY{"Classify domains needed<br/>(LLM, scoped to this user's<br/>own accessible domains)"}
         CLASSIFY -->|"0 or 1 domain —<br/>the common case"| SINGLE
@@ -128,12 +139,18 @@ flowchart TD
     SAVE --> AUDIT1[Audit log:<br/>document_upload]
     Q --> AUDIT2[Audit log:<br/>query_made]
 
+    SOURCES --> TURNSAVE
+    SOURCES2 --> TURNSAVE
+    BLOCKED1 --> TURNSAVE
+    BLOCKED2 --> TURNSAVE
+    TURNSAVE["Create conversation now,<br/>if none was given<br/>(title = truncated question)"] --> ADDTURN["Add turn: raw question, answer,<br/>sources, confidence, domains_used,<br/>correlation_id"]
+
     AUDIT1 --> RESP1[Response +<br/>correlation ID]
-    AUDIT2 --> RESP2[Response: answer + sources +<br/>confidence + correlation ID]
-    SOURCES -.-> RESP2
-    SOURCES2 -.-> RESP2
-    BLOCKED1 -.-> RESP2
-    BLOCKED2 -.-> RESP2
+    AUDIT2 --> RESP2[Response: answer + sources +<br/>confidence + conversation_id +<br/>correlation ID]
+    ADDTURN -.-> RESP2
+
+    ADDTURN -.writes.-> CONVDB[(conversations + turns)]
+    CONVCHECK -.reads.-> CONVDB
 ```
 
 **Getting a document in:** a user uploads a file — through the REST
@@ -196,8 +213,16 @@ means exactly, and only, what whoever uploaded it typed.
 
 **Asking a question:** a user sends a question, again proven by their
 session cookie (or, over MCP, the same shared-key/`X-User-Id` pair
-described above), and the very first thing that happens is a safety
-check on the *question itself* — a moderation classifier and an LLM
+described above). If it names an existing conversation, that
+conversation is checked — and only checked, nothing else runs yet —
+before anything else: it has to actually belong to this user, or the
+request stops right there with a 404, the same shape as a document this
+user was never granted access to. This is the one place in the whole
+flow that runs *before* the safety check below, deliberately, so a bad
+or someone-else's conversation id never gets to cost a full pipeline
+run first. With that settled (or with no conversation named at all, in
+which case one is created only once an answer actually comes back), the
+very first real work is a safety check on the *question itself* — a moderation classifier and an LLM
 jailbreak judge, run concurrently, look for toxic content or a direct
 attempt to hijack the assistant's instructions. If either flags it, or
 both checks are simultaneously unreachable, the question never reaches
@@ -264,9 +289,40 @@ document's filename, plus a confidence number — the same relevance
 score reranking already computed on the best chunk, or nothing at all
 if reranking itself was unavailable for this request, since a real low
 score and "no score was computed" must never look identical to
-whoever's reading it.
+whoever's reading it. Whatever the outcome — a real answer, a blocked
+one, or a partial cross-domain one — it gets written as one turn in the
+conversation this question belonged to, and the response now carries
+that conversation's id back too, so the caller can ask a follow-up
+inside the same thread (see ADR-041). Only an outright failure (a 503,
+both search backends down or a circuit already open) skips this
+entirely — nothing about a request that never got a real answer is
+recorded as if it did.
 
-**What's new since the last update:** two things landed together this
+**What's new since the last update:** questions now live somewhere —
+build-order item 18, the storage-and-sidebar half of it (the other
+half, condensing a follow-up into a standalone question before it
+enters retrieval, is a deliberate scope cut for a later session, not
+forgotten). Every question now belongs to a `Conversation`, and every
+answer to it is saved as a `Turn` — question, answer, sources,
+confidence, which domains were used, all in one row. A new conversation
+is only actually created once its first answer comes back successfully
+(a failed attempt never leaves an empty thread behind), and a named
+conversation is checked for ownership *before* the safety/retrieval
+pipeline runs at all, so a bad id fails fast with a 404 rather than
+after paying for a full pass. The frontend Query page changed shape to
+match: a sidebar (new component, `ConversationSidebar`) lists every
+conversation a user has started, most recently active first, and the
+page itself is now two routes instead of one — `/query` for a new
+conversation, `/query/[conversationId]` to resume an old one — sharing
+the same chat UI (extracted into `QueryChat`) rather than duplicating
+it. Verified live: a question with no conversation id gets one back,
+which then shows up in the sidebar without a page reload; navigating
+directly to that conversation's URL — the real test of "resume any
+time," not just client-side state — brings back the exact same
+transcript; a stranger's or nonexistent conversation id returns a
+clean 404 on both the API and the page itself. See ADR-041.
+
+**What's new before that:** two things landed together this
 session. First, an input guardrail — the same availability-aware,
 two-check shape as the output guardrail below, but running *before*
 retrieval instead of after. A new graph node, `input_guardrail_check`,
@@ -884,24 +940,53 @@ test`. If it disappeared, nothing about the running app would change —
 only the ability to catch a regression in this behavior without
 manually re-testing it in a browser.
 
-**Query page (`frontend/app/query/page.tsx`) and its proxy route
-(`frontend/app/api/query/route.ts`)** — the chat interface, added with
-ADR-031. A `"use client"` component holding one array of past
-question/answer turns in React state (nothing persisted — gone on
-reload, since real conversation history is build-order item 18, not
-built); a scrolling transcript above an input box pinned to the
-bottom. Submitting a question posts to `POST /api/query`, the same
+**Query chat (`frontend/components/query-chat.tsx`) and its proxy route
+(`frontend/app/api/query/route.ts`)** — the chat interface itself,
+originally added with ADR-031, extracted into its own component with
+ADR-041 so it could be shared between two routes instead of living
+directly in one page file. A `"use client"` component holding one
+array of turns in React state, seeded from whatever initial turns its
+caller passes in — empty for a new conversation, a real transcript for
+a resumed one (see the Query page/conversation page entries below).
+Submitting a question posts to `POST /api/query`, the same
 same-origin-proxy pattern as the upload routes and for the same
 reason — keeping `BACKEND_GATEWAY_SECRET` out of client-side
-JavaScript for this client-triggered action. Each turn shows a loading
-skeleton while waiting, then the complete answer at once (not
-token-by-token — real streaming is item 19, also not built), a
-confidence badge, and a card per source chunk with its document's
-filename. Talks to: `POST /query` on the backend, from the Next.js
-server, never from the browser. If it
-disappeared, the same question could still be asked through `curl` or
-MCP's `ask_knowledge_base`, just not through the UI, and without the
-per-source citations the REST response now carries.
+JavaScript for this client-triggered action, now also carrying whichever
+conversation id this component currently holds (or `null`, to start a
+new one). Each turn shows a loading skeleton while waiting, then the
+complete answer at once (not token-by-token — real streaming is item
+19, still not built), a confidence badge, and a card per source chunk
+with its document's filename. The moment a brand-new conversation's
+first answer comes back, this component adopts the id the backend
+handed back, swaps the URL to `/query/{id}` with `router.replace` (no
+full navigation, so the transcript already in state isn't lost), and
+calls `router.refresh()` so the sidebar's server-fetched list picks up
+the new entry. Talks to: `POST /query` on the backend, from the Next.js
+server, never from the browser. If it disappeared, the same question
+could still be asked through `curl` or MCP's `ask_knowledge_base`, just
+not through the UI.
+
+**Query routes and sidebar (`frontend/app/query/layout.tsx`,
+`frontend/app/query/page.tsx`, `frontend/app/query/[conversationId]/page.tsx`,
+`frontend/components/conversation-sidebar.tsx`)** — added with ADR-041.
+The layout is the one thing both routes share: it fetches this user's
+conversation list once, server-side, and wraps whichever page renders
+below it in `ConversationSidebar`. Plain `/query` renders `QueryChat`
+with no initial state — a new conversation. `/query/[conversationId]`
+fetches that one conversation's turns server-side first (`getConversation`,
+in `lib/server-api.ts`) and hands them to `QueryChat` as its starting
+state; a conversation that doesn't exist, or belongs to someone else,
+renders a dedicated `not-found.tsx` rather than a generic error.
+`ConversationSidebar` itself renders the same conversation list twice —
+a static column on `md`+ screens, the same list again inside a mobile
+`Sheet` triggered by a button, mirroring the exact split `Navbar`
+already uses for its own hamburger menu — so there's one list-rendering
+function, not two independently-maintained ones. Talks to: `GET
+/conversations` and `GET /conversations/{id}` on the backend, both
+through same-origin proxy routes for the usual gateway-secret reason.
+If the sidebar disappeared, conversations would still exist and be
+resumable by URL, just not discoverable without already knowing the
+link.
 
 **Dashboard page (`frontend/app/page.tsx`) and its endpoint
 (`app/api/dashboard.py`)** — the first thing anyone sees, added with
@@ -1332,6 +1417,30 @@ audit viewer. Same contract as `list_all_permissions`: it does no
 authorization itself, `require_admin` does. Talks to: called directly
 from the API routes, right after each action succeeds, and read from
 the Dashboard/Analytics/Admin routes' services.
+
+**Conversations and turns (`app/models/conversation.py`,
+`app/repositories/conversation_repository.py`, `app/api/conversations.py`)**
+— added with ADR-041. A `Conversation` is a thread with a title
+(a plain truncation of its first question, not an LLM call — see
+ADR-041's reasoning) and an `updated_at` that `add_turn` bumps on every
+new turn, which is what lets the sidebar list conversations
+most-recently-active-first. A `Turn` is one question/answer pair,
+storing its sources and which domains were used as JSONB/array columns
+directly on the row — the same shape `AuditLog.extra_data` already
+established, since this data is written once and read back whole,
+never queried by an individual field. `condensed_question` exists as a
+column already but is stored equal to `raw_question` for now — a
+placeholder for the context-condensing half of this build item, not
+yet built. `get_conversation_for_user` returns `None` identically
+whether a conversation doesn't exist or belongs to someone else, the
+same indistinguishable-404 shape `get_document_for_user` already uses,
+simpler here since a conversation has exactly one owner and no sharing
+model. Talks to: called from `/api/query.py` (resolving/creating a
+conversation and writing each turn) and `/api/conversations.py` (the
+sidebar's list, and one conversation's detail when resuming it). If
+this disappeared, `/query` would still answer questions exactly as
+before this feature — conversation tracking sits one layer above
+`FederatedRetrievalService`, which never changed.
 
 **Circuit breaker (`app/core/circuit_breaker.py`)** — wraps both OpenAI
 call sites (embedding and generation) and stops calling OpenAI for a
@@ -1894,8 +2003,12 @@ here as a plain list rather than a comma-separated string, since MCP
 tool arguments carry real JSON types.
 
 **Asking a question:** a user sends a question to the query address,
-again proven by their session cookie. Before anything else runs, an
-input guardrail checks the *question itself* — a moderation classifier
+again proven by their session cookie, naming an existing conversation
+or none at all. If one was named, it's checked for ownership right
+away — before the guardrail below, before anything — and a 404 stops a
+stranger's or nonexistent id cold, without paying for a single
+embedding or LLM call (see ADR-041). With that settled, an input
+guardrail checks the *question itself* — a moderation classifier
 and an LLM jailbreak judge, concurrently — and a flagged or
 doubly-unreachable check stops everything right there: no embedding,
 no search, no LLM call, replaced with the same fixed, friendly blocked
@@ -1951,7 +2064,11 @@ path, since no single relevance score means anything once several
 domains' reranked results have been merged into prose. If one domain's
 retrieval pass fails outright, it's excluded rather than failing the
 whole question — synthesis proceeds with whichever domains succeeded,
-and the result is marked partial. See ADR-040.
+and the result is marked partial. See ADR-040. Whatever comes back —
+real, blocked, or partial — is saved as one turn in the conversation
+(created just now, if none was named at the start), and its id rides
+back in the response so the next question in the same thread can name
+it too. See ADR-041.
 
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
@@ -3156,3 +3273,14 @@ naming it plainly when two sources actually disagree, rather than
 picking one silently. A distinct concept from generation itself:
 generation turns retrieved *chunks* into an answer; synthesis turns
 multiple already-complete *answers* into one. See ADR-040.
+
+**Conversation / turn** — a conversation is a named, persistent thread;
+a turn is one question-and-answer pair inside it, including which
+sources and domains actually informed that specific answer. Turns are
+never edited or merged once written — asking a follow-up always adds a
+new turn, it never changes an earlier one. Not the same thing as
+context condensing (build-order item 18's other half, not built yet):
+storing turns is what makes a conversation resumable at all; condensing
+is a separate step that would read those stored turns to make a
+follow-up question make sense on its own before it reaches retrieval.
+See ADR-041.

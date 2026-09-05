@@ -323,7 +323,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 16 of 19 build-order items complete · 2 partial</p>
+      <p class="eyebrow">Knowledge Brain · 15 of 19 build-order items complete · 3 partial</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -1285,10 +1285,51 @@
     <p class="caveat"><strong>Verified live end to end:</strong> two real domain-tagged documents (HR, Finance) uploaded; a genuinely cross-domain question correctly merged both domains' findings with <code>confidence</code> explicitly <code>null</code>, at roughly double the latency of an equivalent single-domain question (~11.8s vs ~5.5s). A single-domain question took the unchanged, cheap pass-through route. An off-topic question fell back to unrestricted search and correctly said "I don't know." The upload form gained a matching "Domains" field, driven end to end in a real browser — the first frontend change on this feature, and the reason this project now has Vitest + React Testing Library set up at all. Backend suite: 52 → 70 passing; frontend: 0 → 7 passing. See <a href="adr/ADR-040-multi-agent-federated-retrieval.md">ADR-040</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 22 — Conversation history &amp; sidebar <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
+      <span class="count">build-order item 18, storage half only · condensing not yet built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Conversation / Turn tables</span>
+        <span class="path mono">Postgres, JSONB sources — same shape as AuditLog</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">GET /conversations, /conversations/{id}</span>
+        <span class="path mono">sidebar list + resume, 404 if not this user's</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">/query/[conversationId]</span>
+        <span class="path mono">real route per conversation — survives a reload</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill pending">Not built</span>
+        <span class="label">Context condensing</span>
+        <span class="path mono">a follow-up still enters retrieval unrewritten</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Deliberately scoped this way:</strong> Redis wasn't introduced this session either — its only real job in the spec is caching recent turns for the condensing step above, and building it with nothing yet reading from it would mean standing up infrastructure ahead of any real use.</p>
+    <p class="caveat"><strong>Verified live end to end:</strong> a question with no conversation id got one back, which showed up in the sidebar without a page reload; navigating directly to that conversation's URL (the real test of "resume any time," not just client state) brought back the exact same transcript; a stranger's or nonexistent conversation id returned a clean 404 on both the API and the page. Backend suite: 70 → 77 passing; frontend: 7 → 15 passing. See <a href="adr/ADR-041-conversation-history-and-sidebar.md">ADR-041</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">18</span>Conversation history &amp; context condensing</li>
+      <li><span class="n mono">18</span>Context condensing for follow-up questions <span class="path mono">(storage half already built — see Feature 22)</span></li>
       <li><span class="n mono">19</span>Streamed answer generation</li>
     </ul>
   </footer>

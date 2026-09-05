@@ -1,7 +1,14 @@
 import asyncio
 
 from app.core.database import Base, engine
-from app.models import audit_log, document, document_permission, session, user  # noqa: F401  (import registers the tables with Base)
+from app.models import (  # noqa: F401  (import registers the tables with Base)
+    audit_log,
+    conversation,
+    document,
+    document_permission,
+    session,
+    user,
+)
 
 
 async def main() -> None:
