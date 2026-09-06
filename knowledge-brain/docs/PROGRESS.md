@@ -3817,3 +3817,128 @@ PII review workflow, Postgres' still-open cost fix, and the standing
 test-coverage and reliability gaps named in prior sessions. At 3–4
 hours/day, that's roughly 6–8 working days left, assuming no further
 scope changes.
+
+## Session: 2026-09-06 — Context condensing and Redis (build-order item 18, condensing half)
+
+### What we built
+- Context condensing — the half of build-order item 18 deliberately
+  left out last session. Every follow-up in an existing conversation
+  now gets rewritten into a standalone question before it touches
+  retrieval, using the conversation's last 3 turns as context. Your own
+  explicit choice: condense *every* follow-up, always — not a
+  cheaper "does this actually need it" detection step first, the same
+  "simple and predictable over smart but occasionally wrong" call
+  you've made a few times now (truncated titles, free-text domains).
+- Redis, introduced for real for the first time in this project —
+  exactly when last session said it would be: once condensing existed
+  to actually read from it. A new `redis` docker-compose service, a
+  small cache wrapper with its own circuit breaker, a 24-hour TTL per
+  conversation's cached turns, and a real Postgres fallback right
+  behind it.
+- A real decision on where condensing sits relative to the existing
+  input guardrail: condense first, then let the pipeline's existing
+  guardrail node check the condensed text — your choice, over pulling
+  the guardrail out to check the raw text separately (which would have
+  either duplicated its logic outside the graph or doubled the
+  moderation/jailbreak cost on every follow-up). The honest cost: a
+  jailbreak-style follow-up now pays for one condensing call before
+  being caught, instead of immediately.
+- Caught myself mid-build, before writing a single test: I'd put the
+  condensing orchestration logic directly in `app/api/query.py`, then
+  realized there was nowhere to point a test at it sitting in a route —
+  this project's own established rule, that routes stay thin and
+  testable logic lives in a service, applied here the same way it was
+  the very first time, in ADR-031. Moved it into
+  `app/services/condensing.py` before testing, not after.
+- You reported a real frontend error while testing this yourself
+  ("The string did not match the expected pattern") — traced to the
+  backend simply not running at the time (I'd stopped it after my own
+  last verification and it hadn't been restarted), not a bug in the
+  feature itself. Separately, you described what sounded like a
+  follow-up bug ("not able to see any follow-up question after 3
+  questions") — checking the actual database showed all 4 of your real
+  questions had condensed and answered correctly; it turned out to be a
+  scope mix-up, not a bug — you'd remembered a *different*, never-built
+  feature (suggested follow-up questions shown as clickable chips),
+  which this session never claimed to build.
+- A `/code-review` pass after the initial build found seven real,
+  confirmed issues, all fixed the same session: an uncaught
+  `IndexError` when an OpenAI response had an empty `choices` list, a
+  `json.loads` call sitting outside the exact try/except meant to catch
+  that failure, raw `{"question", "answer"}` dicts crossing module
+  boundaries where this project's own rule says a Pydantic model
+  belongs (fixed with a new `RecentTurn` model), a database query with
+  no ordering tiebreaker, a redundant Postgres query for data the
+  caller had already loaded in memory (fixed by passing the full
+  `Conversation` object through instead of just its id — which also
+  made a repository method genuinely dead, so it was deleted rather
+  than left as an untested stub), and two documentation gaps, one of
+  them a `Turn` docstring that had gone stale the moment this diff
+  started writing real condensed values. None of these were caught by
+  the tests written during the initial build, since none of those tests
+  actually constructed the specific broken edges — writing tests that
+  pass isn't the same claim as writing tests that would have caught
+  what was actually wrong.
+- One new ADR: [`ADR-042`](adr/ADR-042-context-condensing-and-redis.md).
+- Tests: 18 written alongside the initial build, 6 more added after the
+  review found gaps — covering `condense_question`'s empty-choices
+  guard, `get_effective_question`'s full decision table (no
+  conversation, no prior turns, a cache hit, a cache-shape validation
+  failure falling back to the conversation's own turns, both fallback
+  paths), `update_recent_turns_cache`'s seed/append/trim behavior, and
+  — a deliberate departure from this project's usual "don't unit-test
+  thin external-service wrappers" convention — `redis_cache.py`'s
+  fail-open behavior tested directly, since it isn't an LLM wrapper,
+  it's a resilience mechanism whose entire job is failing open
+  correctly. Backend suite: 84 → 94 passing.
+- Verified live, twice over: once through a real 5-question
+  conversation ("how many vacation days," then four genuine follow-ups
+  about Python experience, databases, preferred skills, and — after the
+  review's fixes — one more), each condensed correctly using the real
+  prior turns; and again specifically to confirm the `/code-review`
+  refactor (passing the full `Conversation` object, removing the
+  now-dead repository method) didn't change any observed behavior.
+
+### What I struggled with
+- No corrections needed on the two real decisions (always-condense,
+  Redis timing) — both matched what you'd already indicated you wanted
+  going in. The one thing I did have to correct myself on was the
+  route-vs-service placement of the condensing logic, caught by trying
+  to write a test for it, not by you pointing it out.
+
+### Concepts to revisit
+- Why this feature's rewrite (condensing) is a fundamentally different
+  mechanism from the existing query-rewriting retry, not just a variant
+  of it — one is retry-only and never touches generation, the other's
+  output becomes the real question for everything downstream. Covered
+  in the new Feature 29 section of `INTERVIEW_PREP.md`.
+- Why condensing runs before the input guardrail rather than the
+  guardrail checking the raw text first, and what that trade-off
+  actually costs.
+- The difference between a test that passes and a test that would have
+  caught the actual bug — the `/code-review` findings this session are
+  a concrete, memorable example to reach for.
+
+### What's next
+- This feature has the same structural limit named for the injection
+  judge (ADR-039) and the domain classifier (ADR-040): condensing is
+  itself an LLM, with no formal guarantee it produces a faithful
+  rewrite rather than a subtly wrong one — not solved, not unique to
+  this feature, worth remembering as a standing theme.
+- Everything else from prior sessions' "what's next" still stands:
+  multi-tenancy, APIM's remaining gaps, the missing migration tool,
+  streamed generation (item 19, the last build-order item left),
+  the PII review workflow, Postgres' still-open cost fix, last
+  session's federated-retrieval failure-isolation gap, domain
+  vocabulary drift, and prior test-coverage gaps.
+
+**Estimated completion: ~79% of the total project, by weighted
+effort** — up from 76%. Item 18 is now fully closed — both halves,
+across two sessions — leaving item 19 (streamed answer generation) as
+the only build-order item with no work started at all. Rough remaining
+effort: ~20 hours (down from ~24) — streamed generation, multi-tenancy,
+APIM's remaining gaps, the missing migration tool, the PII review
+workflow, Postgres' still-open cost fix, and the standing reliability
+and test-coverage gaps named across prior sessions. At 3–4 hours/day,
+that's roughly 5–7 working days left, assuming no further scope
+changes.

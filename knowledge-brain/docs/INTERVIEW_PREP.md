@@ -3072,16 +3072,17 @@ un-built lever, not a claim this design already handles that case.
 **What does this feature do, in one sentence?**
 Every question now belongs to a real, persisted conversation — stored
 in Postgres, listed in a sidebar most-recently-active first, and
-resumable by URL at any time — though the raw question is still what
-enters retrieval, unchanged; nothing yet rewrites a follow-up against
-earlier turns.
+resumable by URL at any time. (This session built storage and
+resuming; context condensing — actually resolving a follow-up like
+"what about the other one" — is a separate feature, Feature 29 below.)
 
 ```mermaid
 flowchart TD
     Q[POST /query] --> HASID{"conversation_id given?"}
     HASID -->|"yes, not found or<br/>not this user's"| E404["404 — before any<br/>retrieval runs"]
-    HASID -->|"yes, valid"| RUN
-    HASID -->|no| RUN["FederatedRetrievalService.run_query<br/>(unchanged)"]
+    HASID -->|"yes, valid"| CONDENSE
+    HASID -->|no| RUN
+    CONDENSE["Condense the question<br/>(Feature 29)"] --> RUN["FederatedRetrievalService.run_query"]
     RUN --> RESULT{Answer came back<br/>successfully?}
     RESULT -->|"no — 503"| FAIL["No conversation created,<br/>no turn saved"]
     RESULT -->|yes| CREATE{"Was conversation_id<br/>given?"}
@@ -3093,28 +3094,25 @@ flowchart TD
 
 **"What about the other one" is the classic hard follow-up question for
 a RAG system. Does this feature solve that?**
-No, and that's an honest answer, not a dodge. This session built the
-*storage* half of build-order item 18 — a conversation and its turns
-persist, and can be resumed — but the raw question still goes straight
-into retrieval unchanged, exactly as it did before this feature. "What
-about the other one" would fail today the same way it always has,
-since nothing yet looks at the conversation's prior turns to figure out
-what "the other one" refers to. That's context condensing, the other
-half of item 18, deliberately scoped out of this session so Redis
-wouldn't need to be introduced with nothing yet reading from it.
+This feature alone, no — it only gives condensing somewhere to store
+and read turns from. The actual rewrite is a separate feature (29,
+below), built the following session on top of this one's storage.
+Splitting the two wasn't arbitrary: condensing needs somewhere to read
+"the last few turns" from before it can exist at all, and building both
+in one pass would have meant making storage decisions and rewrite-logic
+decisions in the same breath.
 
-**Why does storing conversations matter at all, then, if follow-ups
-don't work yet?**
-Two independent things had to exist before condensing could be built at
-all: somewhere to store turns, and something to read from when
-condensing needs "the last few turns." Building the sidebar and
-resuming now means next session's condensing work is pure logic —
-reading already-stored turns and rewriting a question — with no new
-schema or storage decisions competing for attention in the same pass.
-It's also a complete, real feature on its own even without condensing:
-a user closing the tab and coming back tomorrow can already pick up
-exactly where they left off, which the old client-state-only page could
-never do.
+**Why did storing conversations have to happen before condensing could
+be built?**
+Two independent things had to exist first: somewhere to store turns,
+and something to read from when condensing needs "the last few turns."
+Building the sidebar and resuming first meant the condensing session
+was pure logic — reading already-stored turns and rewriting a question
+— with no schema or storage decisions competing for attention in the
+same pass. It was also a complete, real feature on its own in the
+meantime: a user closing the tab and coming back tomorrow could already
+pick up exactly where they left off, which the old client-state-only
+page could never do — that value existed before condensing did.
 
 **Could a follow-up question in a resumed conversation leak access to a
 document the user was never permitted to see?**
@@ -3149,6 +3147,109 @@ means every conversation in the sidebar represents an actual
 successful exchange, never a failed attempt.
 
 *Further reading: [Postgres's own JSONB documentation](https://www.postgresql.org/docs/current/datatype-json.html) — the type this feature uses to store each turn's sources and this project already uses for the audit log's own metadata column, including when JSONB is the right call versus a normalized table.*
+
+---
+
+## Feature 29: Context Condensing and Redis
+
+**What does this feature do, in one sentence?**
+Every follow-up question in an existing conversation now gets rewritten
+by an LLM into a standalone question — using the conversation's last 3
+turns as context — before it ever touches retrieval, and Redis caches
+those turns so that rewrite doesn't cost a database round trip on every
+single message.
+
+```mermaid
+flowchart TD
+    Q["Valid conversation,<br/>raw follow-up question"] --> CACHE{"Recent turns<br/>cached in Redis?"}
+    CACHE -->|"yes, valid shape"| CONDENSE
+    CACHE -->|"miss, outage, or<br/>unexpected shape"| FALLBACK["Use conversation.turns<br/>already loaded (no 2nd query)"]
+    FALLBACK --> CONDENSE["condense_question(raw, recent_turns)<br/>LLM call, own circuit breaker"]
+    CONDENSE -->|success| USE["Use the condensed question"]
+    CONDENSE -->|"circuit open or<br/>API error"| RAW["Fall back to the<br/>raw question, unrewritten"]
+    USE --> PIPELINE["FederatedRetrievalService.run_query<br/>(input guardrail now checks THIS text)"]
+    RAW --> PIPELINE
+    PIPELINE --> SAVE["Save turn (raw + condensed),<br/>refresh the Redis cache"]
+```
+
+**Why condense every follow-up, instead of first checking whether a
+question actually needs it?**
+Simplicity and an honest failure mode, the same trade this project has
+made elsewhere (plain-truncated conversation titles over an
+LLM-generated one, free-text domains over a managed taxonomy). A
+detection step is itself a judgment call, and it can fail in two
+directions: condensing something that didn't need it just wastes one
+LLM call, the same cost always-condensing already pays; but skipping
+condensing on something that *did* need it is a silent correctness
+failure — the question goes to retrieval broken, and nothing signals
+that it happened. Always-condense has exactly one cost, always paid,
+and no hidden failure mode.
+
+**Why condense the question *before* the existing input guardrail runs,
+instead of checking the raw text first?**
+The guardrail already lives as a real LangGraph node inside
+`FederatedRetrievalService`'s graph, not something the route calls on
+its own. Checking the raw text first would mean either pulling that
+check out to run twice — raw, then condensed — doubling the
+moderation/jailbreak LLM cost on every single follow-up, or duplicating
+its logic outside the graph entirely. Condensing first and letting the
+existing guardrail check whatever text actually results costs nothing
+extra and needed zero changes to the graph. The trade-off, named
+honestly: a jailbreak-style follow-up now pays for one condensing call
+before it's caught, instead of being caught immediately.
+
+**Why introduce Redis now, and not earlier when conversation storage
+was first built?**
+Redis's only real job in the build spec is caching recent turns so
+condensing doesn't pay a database round trip on every message. Building
+it the session before, with no condensing step yet to read from it,
+would have meant standing up a whole new external dependency —
+connection handling, its own circuit breaker, a new docker-compose
+service — with nothing exercising it. Waiting until it had a real
+consumer meant the entire feature (cache and reader) could be verified
+together, live, in one pass.
+
+**What happens if Redis is completely down when someone asks a
+follow-up?**
+Nothing user-visible — condensing still works. `get_recent_turns`
+catches broadly, not just its own circuit breaker's `CircuitOpenError`,
+specifically so a raw connection error on Redis's very first call
+(before the breaker has even had a chance to open) still returns `None`
+instead of raising. A `None` is treated exactly like a cache miss: the
+conversation's own already-loaded turns (`get_conversation_for_user`
+eager-loads them for the ownership check earlier in the same request)
+are used instead — not a second database query, since that data is
+already sitting in memory. This is a lesson pulled forward on purpose:
+ADR-040 found the exact same class of gap in a different circuit
+breaker, named it honestly, and didn't fix it; this feature was built
+not to repeat it.
+
+**A `/code-review` pass found real bugs after the initial build. What
+were they, and why didn't the first round of tests catch them?**
+Seven confirmed issues: an uncaught `IndexError` when an OpenAI response
+had an empty `choices` list, a `json.loads` call sitting outside the
+try/except meant to catch exactly that kind of failure, raw dicts
+crossing module boundaries where this project's own rule says a
+Pydantic model belongs, a database query with no ordering tiebreaker,
+a redundant Postgres query for data already loaded in memory, and two
+documentation gaps. None were caught initially because the tests
+written alongside the feature only exercised the *happy* paths and the
+*already-anticipated* failure paths (circuit open, generic API error) —
+they never constructed the specific edge cases (an empty choices list,
+a corrupted cache value) that were actually broken. Writing tests that
+pass is not the same claim as writing tests that would have caught what
+was actually wrong; the fix was adding tests that construct those exact
+edges, not just more tests in general.
+
+**Is this feature's failure isolation actually complete now?**
+More complete than before, but not total — a fair follow-up. The
+condensing LLM call itself has the same structural limit as the
+injection judge (ADR-039) and the domain classifier (ADR-040): there's
+no formal guarantee it produces a *faithful* rewrite rather than a
+subtly wrong one. A wrong condensed question would search and answer
+confidently against the wrong thing, with nothing today that would
+notice or flag it — a real, named, unsolved gap, not a claim that this
+feature is bulletproof.
 
 ---
 

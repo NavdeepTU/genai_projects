@@ -323,7 +323,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 15 of 19 build-order items complete · 3 partial</p>
+      <p class="eyebrow">Knowledge Brain · 16 of 19 build-order items complete · 2 partial</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -1287,8 +1287,8 @@
 
   <section class="block">
     <div class="block-title">
-      <h2>Feature 22 — Conversation history &amp; sidebar <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
-      <span class="count">build-order item 18, storage half only · condensing not yet built</span>
+      <h2>Feature 22 — Conversation history &amp; sidebar <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 18, storage half · condensing itself is Feature 23, below</span>
     </div>
     <div class="row">
       <div class="node">
@@ -1316,20 +1316,52 @@
         <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       <div class="node">
-        <span class="status-pill pending">Not built</span>
+        <span class="status-pill done">Built</span>
         <span class="label">Context condensing</span>
-        <span class="path mono">a follow-up still enters retrieval unrewritten</span>
+        <span class="path mono">see Feature 23, below</span>
       </div>
     </div>
 
-    <p class="caveat"><strong>Deliberately scoped this way:</strong> Redis wasn't introduced this session either — its only real job in the spec is caching recent turns for the condensing step above, and building it with nothing yet reading from it would mean standing up infrastructure ahead of any real use.</p>
     <p class="caveat"><strong>Verified live end to end:</strong> a question with no conversation id got one back, which showed up in the sidebar without a page reload; navigating directly to that conversation's URL (the real test of "resume any time," not just client state) brought back the exact same transcript; a stranger's or nonexistent conversation id returned a clean 404 on both the API and the page. Backend suite: 70 → 77 passing; frontend: 7 → 15 passing. See <a href="adr/ADR-041-conversation-history-and-sidebar.md">ADR-041</a>.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 23 — Context condensing &amp; Redis <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 18, condensing half · Redis introduced for the first time</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">condense_question</span>
+        <span class="path mono">LLM rewrites a follow-up using the last 3 turns, always</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/core/redis_cache.py</span>
+        <span class="path mono">first Redis dependency in this project · fails open</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Postgres fallback</span>
+        <span class="path mono">reuses conversation.turns already loaded — no 2nd query</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real decision, not a default:</strong> condensing runs before the pipeline's existing input guardrail, so a jailbreak-style follow-up pays for one condensing call before being caught — the alternative meant duplicating guardrail logic outside the graph or running it twice on every follow-up.</p>
+    <p class="caveat"><strong>A <code>/code-review</code> pass found seven real, confirmed issues after the initial build, all fixed the same session:</strong> an uncaught <code>IndexError</code> on an empty LLM response, a JSON-decode failure that could crash a request the cache was meant to protect, raw dicts crossing module boundaries where a Pydantic model belonged, a missing ordering tiebreaker, a redundant Postgres query, and two documentation gaps. None were caught by the first round of tests, since none of them exercised the actual failure edges being wrong.</p>
+    <p class="caveat"><strong>Verified live end to end:</strong> a real 5-question conversation, each follow-up condensed correctly using real prior turns — both before and after the review's fixes, confirming the refactor changed nothing about observed behavior. Backend suite: 84 → 94 passing. See <a href="adr/ADR-042-context-condensing-and-redis.md">ADR-042</a>.</p>
   </section>
 
   <footer class="roadmap">
     <h2>Not started · rest of the build order</h2>
     <ul class="roadmap-list">
-      <li><span class="n mono">18</span>Context condensing for follow-up questions <span class="path mono">(storage half already built — see Feature 22)</span></li>
       <li><span class="n mono">19</span>Streamed answer generation</li>
     </ul>
   </footer>

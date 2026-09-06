@@ -12,6 +12,7 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
+from app.services.condensing import get_effective_question, update_recent_turns_cache
 from app.services.federated_retrieval_service import FederatedRetrievalService
 from app.services.retrieval_service import RetrievalUnavailableError
 
@@ -44,6 +45,15 @@ async def query(
     retrieval), or a new one created only once the answer actually comes
     back — a failed attempt (a 503 below) never leaves an empty
     conversation sitting in the sidebar.
+
+    A follow-up in an existing conversation is condensed into a
+    standalone question before it ever reaches the pipeline (ADR-042):
+    the condensed text is what's actually retrieved and answered
+    against, not the raw one — the input guardrail inside
+    FederatedRetrievalService runs on this condensed text, since that's
+    what actually enters the pipeline. A brand-new conversation has no
+    prior turns to condense against, so its first question always
+    passes through unchanged.
     """
     user_id = get_current_user_id()
     conversation_repo = ConversationRepository(db)
@@ -56,10 +66,12 @@ async def query(
         if conversation is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
+    condensed_question, recent_turns = await get_effective_question(request.question, conversation)
+
     service = FederatedRetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
     try:
-        result = await service.run_query(request.question, user_id)
+        result = await service.run_query(condensed_question, user_id)
     except CircuitOpenError:
         raise HTTPException(
             status_code=503,
@@ -95,15 +107,15 @@ async def query(
     await conversation_repo.add_turn(
         conversation.id,
         raw_question=request.question,
-        # Condensing (build-order item 18's other half) isn't built yet —
-        # stored equal to the raw question as a placeholder until it is.
-        condensed_question=request.question,
+        condensed_question=condensed_question,
         answer=result.answer,
         sources=[source.model_dump(mode="json") for source in result.sources],
         confidence=result.confidence,
         domains_used=result.domains_used,
         correlation_id=correlation_id,
     )
+
+    await update_recent_turns_cache(conversation.id, recent_turns, condensed_question, result.answer)
 
     return QueryResponse(
         answer=result.answer,

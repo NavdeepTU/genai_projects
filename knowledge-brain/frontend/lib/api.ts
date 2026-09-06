@@ -75,6 +75,7 @@ export type ConversationListResponse = {
 export type Turn = {
   id: string;
   raw_question: string;
+  condensed_question: string;
   answer: string;
   sources: QuerySource[];
   confidence: number | null;

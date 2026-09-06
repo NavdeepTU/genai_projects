@@ -36,21 +36,26 @@ class Conversation(Base):
     )
 
     turns: Mapped[list["Turn"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan", order_by="Turn.created_at"
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        # id as a tiebreaker: two turns created within the same
+        # timestamp tick (unlikely, but not impossible) would otherwise
+        # have no stable, repeatable order.
+        order_by="Turn.created_at, Turn.id",
     )
 
 
 class Turn(Base):
     """One question-and-answer pair inside a conversation.
 
-    condensed_question is stored equal to raw_question for now — this
-    session builds storage and resuming only, not the context-condensing
-    step (build-order item 18's other half); the column exists so next
-    session's work has somewhere to write the real rewritten question
-    without a schema change. sources and domains_used are stored as JSONB
-    rather than normalized tables, matching AuditLog's own extra_data
-    column: this data is written once, read back whole, and never queried
-    by its individual fields.
+    condensed_question holds the actual standalone question condensing
+    produced (ADR-042) — equal to raw_question only when there was
+    nothing to condense against (a conversation's first turn) or when
+    condensing itself was unavailable and the raw question was used as
+    a fallback. sources and domains_used are stored as JSONB rather than
+    normalized tables, matching AuditLog's own extra_data column: this
+    data is written once, read back whole, and never queried by its
+    individual fields.
     """
 
     __tablename__ = "turns"
@@ -71,6 +76,19 @@ class Turn(Base):
     conversation: Mapped["Conversation"] = relationship(back_populates="turns")
 
 
+class RecentTurn(BaseModel):
+    """One prior turn's question and answer, as condensing needs them for context.
+
+    A real model rather than a plain {"question", "answer"} dict, so a
+    typo'd key or an unexpected cache shape fails with a clear
+    validation error at the boundary instead of a bare KeyError deep
+    inside a prompt-building loop.
+    """
+
+    question: str
+    answer: str
+
+
 class TurnResponse(BaseModel):
     """One turn as sent to the frontend — a source is a plain dict here.
 
@@ -84,6 +102,7 @@ class TurnResponse(BaseModel):
 
     id: uuid.UUID
     raw_question: str
+    condensed_question: str
     answer: str
     sources: list[dict]
     confidence: float | None

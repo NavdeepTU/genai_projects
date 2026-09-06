@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # check, both run on every generated answer before it reaches a user.
     moderation_model: str = "omni-moderation-latest"
 
+    # Conversation history — context condensing rewrites a follow-up
+    # question using the last few turns of its conversation, cached in
+    # Redis so that lookup doesn't cost a Postgres round trip every time.
+    redis_url: str
+    condensing_context_turns: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

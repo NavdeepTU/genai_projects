@@ -152,22 +152,27 @@ and why it was made that way.
   circuit-breaker error is, so one domain hitting it today can still
   fail the whole question — documented, not hidden. See
   [`ADR-040`](docs/adr/ADR-040-multi-agent-federated-retrieval.md).
-- **Conversation history and a real sidebar** *(storage half only — see
-  below)* — every question now belongs to a persisted conversation, not
-  just whatever the browser's memory still holds. A sidebar lists a
-  user's conversations, most recently active first; resuming one is a
-  real route (`/query/[conversationId]`), not client-side state, so a
-  reload actually brings back the same thread. A new conversation is
-  only created once its first answer comes back successfully, so a
-  failed attempt never leaves an empty thread behind, and a named
+- **Conversation history, a real sidebar, and context condensing** —
+  every question now belongs to a persisted conversation, not just
+  whatever the browser's memory still holds. A sidebar lists a user's
+  conversations, most recently active first; resuming one is a real
+  route (`/query/[conversationId]`), not client-side state, so a reload
+  actually brings back the same thread. A new conversation is only
+  created once its first answer comes back successfully, and a named
   conversation's ownership is checked *before* the safety/retrieval
   pipeline runs, so a bad or someone else's id fails with a 404 rather
-  than after paying for a full pipeline run. What's still missing:
-  context condensing — a follow-up like "what about the other one"
-  still goes straight into retrieval unrewritten, and Redis (only
-  needed to cache turns for that condensing step) hasn't been
-  introduced yet either. See
-  [`ADR-041`](docs/adr/ADR-041-conversation-history-and-sidebar.md).
+  than after paying for a full pipeline run. A follow-up like "what
+  about the other one" is now rewritten into a standalone question —
+  always, on every follow-up — using the conversation's last 3 turns as
+  context, before it ever touches retrieval; the input guardrail then
+  checks that rewritten text, not the raw one. Those recent turns come
+  from Redis (this project's first use of it, introduced only once
+  condensing gave it a real job) when cached, falling back to the
+  conversation's own already-loaded turns — never a crash — when the
+  cache is cold, holds something unexpected, or Redis itself is
+  unreachable. See
+  [`ADR-041`](docs/adr/ADR-041-conversation-history-and-sidebar.md) and
+  [`ADR-042`](docs/adr/ADR-042-context-condensing-and-redis.md).
 - **Azure deployment** — the real backend (not a placeholder) is live
   in Azure: a Terraform module (`infra/`) provisions a resource group,
   Postgres Flexible Server, Key Vault, a container registry, and a
@@ -255,7 +260,7 @@ release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
 for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 77 tests) covers ingestion
+- The automated test suite (`tests/`, 94 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
@@ -266,13 +271,18 @@ for the full plan.
   federated retrieval's own routing logic (single/multi-domain,
   classification-unavailable fallback, a failing domain marked partial,
   every domain failing, every domain's own guardrail blocking, the
-  synthesized answer itself getting blocked), and conversation storage
+  synthesized answer itself getting blocked), conversation storage
   (creation, turn storage, the sidebar-ordering timestamp bump,
-  user-scoped listing, the stranger-gets-`None` permission check) — it
-  does not yet cover hybrid search, the circuit breaker, the audit
-  log's write path, LangGraph's retry logic, the Neo4j graph feature,
-  MCP, PII detection's own splitting/batching logic, or document-level
-  ACL (`grant_access`/`has_access`). The frontend has its own test
+  user-scoped listing, the stranger-gets-`None` permission check), and
+  context condensing (the full decision table for whether/how to
+  condense, the seed/append/trim behavior of the recent-turns cache,
+  and — a deliberate exception to this project's usual rule against
+  unit-testing thin external-service wrappers — the Redis cache's
+  fail-open behavior tested directly, since that behavior *is* the
+  point of the module) — it does not yet cover hybrid search, the
+  circuit breaker, the audit log's write path, LangGraph's retry logic,
+  the Neo4j graph feature, MCP, PII detection's own splitting/batching
+  logic, or document-level ACL (`grant_access`/`has_access`). The frontend has its own test
   suite too (`frontend/`, 15 tests, Vitest + React Testing Library) —
   covering the domain-tagging upload field and its document-card
   badges, the conversation sidebar, and the chat component's resume
@@ -295,6 +305,14 @@ for the full plan.
   across documents — "HR" and "Human Resources" are two unrelated
   domains to this system, and nothing today detects or merges
   near-duplicate names. See `ADR-040`.
+- Context condensing adds one more LLM call to every follow-up
+  question, unconditionally — no cheaper "does this actually need
+  rewriting" check first, a deliberate choice over a smarter but
+  occasionally-wrong detection step. It also has the same structural
+  limit as the injection judge and the domain classifier: it's an LLM,
+  with no formal guarantee it produces a faithful rewrite rather than a
+  subtly wrong one, and nothing today would notice if it did. See
+  `ADR-042`.
 - There's no rate limiting on `/auth/login` — nothing beyond Argon2id's
   own deliberately-slow hashing cost stands between a script and a
   password-guessing attempt. Sessions also have a fixed 7-day lifetime
@@ -374,13 +392,16 @@ live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
   pipeline is already one (see
   [`ADR-038`](docs/adr/ADR-038-llm-rag-observability.md))
 
-The full planned stack (Kafka, Qdrant, Redis, Azure) is documented in
+The full planned stack (Kafka, Qdrant, Azure) is documented in
 `CLAUDE.md` — most of it isn't built yet, and is being added
-deliberately, one justified decision at a time, not upfront.
+deliberately, one justified decision at a time, not upfront. Redis
+joined the built list this session (see conversation history, above) —
+introduced only once a real feature (context condensing) actually
+needed it, not ahead of time.
 
 ## Run it locally
 
-1. **Start Docker Desktop**, then start Postgres and Neo4j:
+1. **Start Docker Desktop**, then start Postgres, Neo4j, and Redis:
    ```
    docker compose up -d
    ```
@@ -393,8 +414,9 @@ deliberately, one justified decision at a time, not upfront.
    ```
    cp .env.example .env
    ```
-   The `NEO4J_*` values already match `docker-compose.yml`'s defaults,
-   so they work as-is for local development. Set `MCP_API_KEY` to any
+   The `NEO4J_*` and `REDIS_URL` values already match
+   `docker-compose.yml`'s defaults, so they work as-is for local
+   development. Set `MCP_API_KEY` to any
    value of your choice — it's the shared secret MCP clients must send
    back to use the `/mcp` endpoint. Set `APIM_GATEWAY_SECRET` to any
    value too — in Azure this is generated and stamped on automatically

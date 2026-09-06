@@ -220,9 +220,15 @@ request stops right there with a 404, the same shape as a document this
 user was never granted access to. This is the one place in the whole
 flow that runs *before* the safety check below, deliberately, so a bad
 or someone-else's conversation id never gets to cost a full pipeline
-run first. With that settled (or with no conversation named at all, in
-which case one is created only once an answer actually comes back), the
-very first real work is a safety check on the *question itself* — a moderation classifier and an LLM
+run first. With that settled, an existing conversation's question is
+condensed: an LLM rewrites it into a standalone question using the
+conversation's last 3 turns as context — always, on every follow-up,
+not just ones that look like they need it (see ADR-042) — and it's this
+*condensed* text, not the raw one, that the rest of the pipeline ever
+sees. A brand-new conversation (or condensing itself being unavailable)
+skips straight to the raw text unchanged. Only now does the very first
+safety check run, on whichever text actually resulted — a moderation
+classifier and an LLM
 jailbreak judge, run concurrently, look for toxic content or a direct
 attempt to hijack the assistant's instructions. If either flags it, or
 both checks are simultaneously unreachable, the question never reaches
@@ -298,11 +304,38 @@ both search backends down or a circuit already open) skips this
 entirely — nothing about a request that never got a real answer is
 recorded as if it did.
 
-**What's new since the last update:** questions now live somewhere —
-build-order item 18, the storage-and-sidebar half of it (the other
-half, condensing a follow-up into a standalone question before it
-enters retrieval, is a deliberate scope cut for a later session, not
-forgotten). Every question now belongs to a `Conversation`, and every
+**What's new since the last update:** build-order item 18's other half
+— context condensing — plus Redis, the technology whose only real job
+was always to serve this exact step. Every follow-up in an existing
+conversation is now rewritten into a standalone question before it
+touches retrieval: `condense_question` (an LLM call, its own circuit
+breaker) is shown the conversation's last 3 turns and the new raw
+question, and its output is what actually gets searched and answered
+against — always, on every follow-up, not just ones that look
+ambiguous, the user's own explicit choice over a cheaper
+detect-then-condense step. Those 3 turns come from Redis when they're
+cached there, falling back to the conversation's own already-loaded
+turn list (not a second database query — `get_conversation_for_user`
+loaded them already, for the ownership check) when the cache is cold or
+Redis itself is unreachable. A raw connection error on Redis's very
+first call, before its own circuit breaker has even opened, still
+degrades cleanly rather than crashing — a lesson pulled forward from
+this project's own honestly-named gap in ADR-040, applied here so it
+wasn't repeated. If condensing itself fails, the raw question is used
+unrewritten, the same fallback shape `query_rewriting.py` already uses
+for its own, differently-scoped rewrite. A `/code-review` pass after
+the initial build found seven real, confirmed issues that the first
+round of tests hadn't caught — an uncaught `IndexError` on an empty LLM
+response, a JSON-decode failure that could crash a request the cache
+was supposed to protect, raw dicts crossing module boundaries where a
+Pydantic model belonged, a missing ordering tiebreaker, a redundant
+Postgres query, and two documentation gaps — all fixed the same
+session. Verified live across a real 5-question conversation, condensing
+correctly every follow-up, both before and after the review's fixes.
+See ADR-042.
+
+**What's new before that:** questions now live somewhere —
+build-order item 18, the storage-and-sidebar half of it. Every question now belongs to a `Conversation`, and every
 answer to it is saved as a `Turn` — question, answer, sources,
 confidence, which domains were used, all in one row. A new conversation
 is only actually created once its first answer comes back successfully
@@ -962,9 +995,12 @@ handed back, swaps the URL to `/query/{id}` with `router.replace` (no
 full navigation, so the transcript already in state isn't lost), and
 calls `router.refresh()` so the sidebar's server-fetched list picks up
 the new entry. Talks to: `POST /query` on the backend, from the Next.js
-server, never from the browser. If it disappeared, the same question
-could still be asked through `curl` or MCP's `ask_knowledge_base`, just
-not through the UI.
+server, never from the browser. This component has no idea context
+condensing (ADR-042) exists — it sends whatever the user actually
+typed, and the backend decides entirely on its own whether to rewrite
+it before answering. If it disappeared, the same question could still
+be asked through `curl` or MCP's `ask_knowledge_base`, just not through
+the UI.
 
 **Query routes and sidebar (`frontend/app/query/layout.tsx`,
 `frontend/app/query/page.tsx`, `frontend/app/query/[conversationId]/page.tsx`,
@@ -1428,19 +1464,50 @@ most-recently-active-first. A `Turn` is one question/answer pair,
 storing its sources and which domains were used as JSONB/array columns
 directly on the row — the same shape `AuditLog.extra_data` already
 established, since this data is written once and read back whole,
-never queried by an individual field. `condensed_question` exists as a
-column already but is stored equal to `raw_question` for now — a
-placeholder for the context-condensing half of this build item, not
-yet built. `get_conversation_for_user` returns `None` identically
-whether a conversation doesn't exist or belongs to someone else, the
-same indistinguishable-404 shape `get_document_for_user` already uses,
+never queried by an individual field. `condensed_question` holds the
+actual standalone question condensing produced (ADR-042) — equal to
+`raw_question` only for a conversation's first turn, or when condensing
+itself was unavailable and the raw text was used as a fallback.
+`get_conversation_for_user` returns `None` identically whether a
+conversation doesn't exist or belongs to someone else, the same
+indistinguishable-404 shape `get_document_for_user` already uses,
 simpler here since a conversation has exactly one owner and no sharing
-model. Talks to: called from `/api/query.py` (resolving/creating a
+model — and it eager-loads every turn, which condensing's own recent-turns
+lookup (below) reuses directly rather than paying for a second query.
+Talks to: called from `/api/query.py` (resolving/creating a
 conversation and writing each turn) and `/api/conversations.py` (the
 sidebar's list, and one conversation's detail when resuming it). If
 this disappeared, `/query` would still answer questions exactly as
 before this feature — conversation tracking sits one layer above
 `FederatedRetrievalService`, which never changed.
+
+**Context condensing (`app/services/condensing.py`) and Redis
+(`app/core/redis_cache.py`)** — added with ADR-042, the other half of
+build-order item 18. `get_effective_question` is the one place that
+decides whether a question needs condensing at all: a brand-new
+conversation passes through unchanged, an existing one always gets
+rewritten (never conditionally — the user's own choice over a
+cheaper detect-first step) using its last `condensing_context_turns`
+(default 3) turns as context. `condense_question` is the actual LLM
+call, its own circuit breaker, structurally similar to
+`query_rewriting.py` but scoped very differently: that rewrite is a
+retry aid only, generation still answers the true original question;
+condensing's output *becomes* the real question for both retrieval and
+generation, since raw text like "what about the other one" has no
+independent meaning to answer. Recent turns come from
+`redis_cache.get_recent_turns` when cached, falling back to the
+conversation's own already-loaded `turns` (via `RecentTurn`, a real
+Pydantic model, not a raw dict) when the cache is cold, invalid, or
+Redis itself is unreachable — `redis_cache.py` catches broadly, not
+just its own circuit breaker's `CircuitOpenError`, specifically so a
+connection error on Redis's very first call (before the breaker has
+even tripped) still degrades cleanly, the exact gap ADR-040 named
+honestly for a different circuit breaker, not repeated here.
+`update_recent_turns_cache` appends the newest turn and trims back down
+to the configured window after an answer comes back. Talks to: OpenAI
+(condensing's own client) and Redis, both through their own circuit
+breakers. If Redis disappeared, condensing would still work — every
+lookup would just fall back to the conversation's own loaded turns.
 
 **Circuit breaker (`app/core/circuit_breaker.py`)** — wraps both OpenAI
 call sites (embedding and generation) and stops calling OpenAI for a
@@ -2007,8 +2074,13 @@ again proven by their session cookie, naming an existing conversation
 or none at all. If one was named, it's checked for ownership right
 away — before the guardrail below, before anything — and a 404 stops a
 stranger's or nonexistent id cold, without paying for a single
-embedding or LLM call (see ADR-041). With that settled, an input
-guardrail checks the *question itself* — a moderation classifier
+embedding or LLM call (see ADR-041). With that settled, an existing
+conversation's question is condensed — an LLM rewrites it into a
+standalone question using the conversation's last 3 turns, always, on
+every follow-up (see ADR-042) — and it's this rewritten text, not the
+raw one, the rest of the request ever sees; a brand-new conversation
+skips straight past this with nothing to condense against. Only then
+does an input guardrail check the *question itself* — a moderation classifier
 and an LLM jailbreak judge, concurrently — and a flagged or
 doubly-unreachable check stops everything right there: no embedding,
 no search, no LLM call, replaced with the same fixed, friendly blocked
@@ -3279,8 +3351,28 @@ a turn is one question-and-answer pair inside it, including which
 sources and domains actually informed that specific answer. Turns are
 never edited or merged once written — asking a follow-up always adds a
 new turn, it never changes an earlier one. Not the same thing as
-context condensing (build-order item 18's other half, not built yet):
-storing turns is what makes a conversation resumable at all; condensing
-is a separate step that would read those stored turns to make a
-follow-up question make sense on its own before it reaches retrieval.
-See ADR-041.
+context condensing: storing turns is what makes a conversation
+resumable at all; condensing is the separate step (below) that reads
+those stored turns to make a follow-up question make sense on its own
+before it reaches retrieval. See ADR-041.
+
+**Context condensing** — rewriting a follow-up question that only makes
+sense given earlier conversation ("what about the other one?") into a
+complete, standalone question ("what about the finance department's
+policy?") before it ever reaches retrieval, using the conversation's
+recent turns as context. Distinct from this project's other, older
+rewrite (`query_rewriting.py`, used when search results come back weak)
+in scope, not just mechanism: that rewrite only ever aids a second
+search attempt, and generation still answers the true original
+question; condensing's output *becomes* the real question for both
+retrieval and generation, since the raw follow-up text has no
+independent meaning to answer at all. See ADR-042.
+
+**Redis** — a fast, in-memory key-value store, used here for exactly
+one thing: caching each conversation's last few turns so context
+condensing doesn't pay a database round trip on every single follow-up
+question. The first project dependency introduced specifically once it
+had a real job to do — deliberately not brought in earlier, when
+nothing yet needed what it does. Backed by a real Postgres fallback, so
+Redis being slow, cold, or entirely down degrades condensing's lookup,
+never breaks it. See ADR-042.

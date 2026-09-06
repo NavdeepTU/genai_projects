@@ -13,6 +13,7 @@ function makeStoredTurn(overrides: Partial<Turn> = {}): Turn {
   return {
     id: "turn-1",
     raw_question: "How many vacation days do I get?",
+    condensed_question: "How many vacation days do I get?",
     answer: "20 days per year.",
     sources: [],
     confidence: 0.9,
