@@ -221,7 +221,11 @@ and why it was made that way.
   permission-filtered `GET /documents` endpoint — fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
-  too, with a live per-stage progress bar. The Query page is a real
+  too, with a live per-stage progress bar. A document uploaded today can
+  be opened directly in the browser (its original file, saved to Azure
+  Blob Storage at upload time — see `ADR-044`) and deleted completely —
+  its row, chunks, permission grants, file, and graph node all removed,
+  behind a real confirmation dialog (see `ADR-045`). The Query page is a real
   chat interface: `/query`'s response carries `sources` (the
   chunks that actually informed the answer, with filenames) and
   `confidence` alongside the answer text, not just the answer alone. A
@@ -251,18 +255,23 @@ and why it was made that way.
   [`ADR-031`](docs/adr/ADR-031-query-page.md),
   [`ADR-032`](docs/adr/ADR-032-dashboard-page.md),
   [`ADR-033`](docs/adr/ADR-033-analytics-page.md),
-  [`ADR-034`](docs/adr/ADR-034-admin-page.md), and
-  [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md).
+  [`ADR-034`](docs/adr/ADR-034-admin-page.md),
+  [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md),
+  [`ADR-044`](docs/adr/ADR-044-document-viewing-and-blob-storage.md), and
+  [`ADR-045`](docs/adr/ADR-045-document-deletion.md).
 
 **Not built yet:** multi-tenancy — real auth (above) and multi-tenancy
 are separate decisions, and only the former exists so far. Also not
-built: a review workflow for documents flagged for PII (they're
-correctly held back from search today, but nothing yet lets an admin
-release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
-for the full plan.
+built: a review workflow for documents flagged for PII — they're
+correctly held back from *search* today, but nothing yet lets an admin
+release or reject one, and (a real, newly-surfaced gap, not fixed yet)
+the document's original *file* is actually viewable by anyone with
+access even while it's "held for review," since file storage now saves
+it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
+`CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 108 tests) covers ingestion
+- The automated test suite (`tests/`, 133 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
@@ -287,20 +296,45 @@ for the full plan.
   immediately-retracting flagged sentence, moderation unavailable,
   generation failing mid-stream, injection flagging after the answer
   was shown, injection unavailable, a trailing sentence with no closing
-  punctuation) — it does not yet cover hybrid search, the circuit
-  breaker, the audit log's write path, LangGraph's retry logic, the
-  Neo4j graph feature, MCP, PII detection's own splitting/batching
-  logic, or document-level ACL (`grant_access`/`has_access`). No
-  dedicated route-level tests exist for `/query/stream` (or `/query`) —
-  consistent with this project's convention of testing the service
-  layer directly and verifying route wiring live instead. The frontend has its own test
-  suite too (`frontend/`, 26 tests, Vitest + React Testing Library) —
+  punctuation), document viewing (`blob_storage.py`'s dual local/production
+  auth-path selection and its upload/download/delete functions,
+  `create_document`'s blob save and its graceful-degradation path when
+  storage is unreachable, `Document.has_file`), and document deletion
+  (`DocumentRepository.delete_document`'s cascade — checked against a
+  real database, not assumed — `DocumentDeletionService`'s full
+  failure-isolation matrix, `GraphRepository.delete_document_node`) — it
+  does not yet cover hybrid search, the circuit breaker, the audit log's
+  write path, LangGraph's retry logic, most of the Neo4j graph feature,
+  MCP, PII detection's own splitting/batching logic, or the rest of
+  document-level ACL (`grant_access`/`has_access` themselves). No
+  dedicated route-level tests exist for `/query/stream`, `/query`, or
+  the document routes — consistent with this project's convention of
+  testing the service layer directly and verifying route wiring live
+  instead. The frontend has its own test
+  suite too (`frontend/`, 33 tests, Vitest + React Testing Library) —
   covering the domain-tagging upload field and its document-card
   badges, the conversation sidebar, the chat component's resume
-  behavior, live streamed-chunk rendering and retract handling, and a
+  behavior, live streamed-chunk rendering and retract handling, a
   dedicated `streamQuery` SSE-parsing test (a frame split across reads,
   multiple frames in one read, a multi-byte character split
-  mid-character); run with `npm test` inside `frontend/`.
+  mid-character), the document card's "View" link and "Not viewable"
+  state, and the delete confirmation dialog's full behavior (opening,
+  cancelling, a successful delete, an inline error, a 401 redirect);
+  run with `npm test` inside `frontend/`.
+- There's no ownership concept distinguishing a document's original
+  uploader from anyone later granted access — sharing and deletion both
+  use the same `has_access` check, so anyone a document was ever shared
+  with can also permanently delete it for everyone. Acceptable today
+  since sharing has no UI and has never actually been used; a real
+  multi-tenant deployment would need ownership tracking first. See
+  `ADR-019` and `ADR-045`.
+- Deleting a document's file from Blob Storage and its node from Neo4j
+  are both best-effort — an outage in either is logged and skipped,
+  never blocks the deletion itself. This means a rare Blob Storage or
+  Neo4j hiccup during a delete can leave an orphaned file or graph node
+  behind with nothing pointing at it any more. There's also no
+  soft-delete or undo of any kind — the confirmation dialog is the only
+  safety net. See `ADR-045`.
 - The answer guardrails add two real LLM calls to every query, safe
   ones included, and the input guardrail adds two more on top before
   retrieval even starts — a genuine, felt cost, not a false-positive

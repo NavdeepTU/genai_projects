@@ -1,8 +1,9 @@
-import { FileText, ShieldAlert } from "lucide-react";
+import { ExternalLink, FileText, ShieldAlert } from "lucide-react";
 
 import type { DocumentListItem, DocumentStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DeleteDocumentButton } from "@/components/delete-document-button";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABEL: Record<DocumentStatus, string> = {
@@ -45,12 +46,15 @@ export function DocumentCard({ document }: { document: DocumentListItem }) {
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-start justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <FileText className="size-4 shrink-0 text-muted-foreground" />
             <CardTitle className="truncate text-sm">{document.filename}</CardTitle>
           </div>
-          <StatusBadge status={document.status} />
+          <div className="flex shrink-0 items-center gap-1">
+            <StatusBadge status={document.status} />
+            <DeleteDocumentButton documentId={document.id} filename={document.filename} />
+          </div>
         </div>
         {document.domains.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -64,16 +68,31 @@ export function DocumentCard({ document }: { document: DocumentListItem }) {
       </CardHeader>
       <CardContent className="flex items-center justify-between text-xs text-muted-foreground">
         <span>Uploaded {formatUploadedAt(document.uploaded_at)}</span>
-        {document.pii_detected && (
-          <span
-            className={cn(
-              "flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400",
-            )}
-          >
-            <ShieldAlert className="size-3.5" />
-            PII detected
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {document.pii_detected && (
+            <span
+              className={cn(
+                "flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400",
+              )}
+            >
+              <ShieldAlert className="size-3.5" />
+              PII detected
+            </span>
+          )}
+          {document.has_file ? (
+            <a
+              href={`/api/documents/${document.id}/content`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 font-medium text-primary hover:underline"
+            >
+              <ExternalLink className="size-3.5" />
+              View
+            </a>
+          ) : (
+            <span className="text-muted-foreground/60">Not viewable</span>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

@@ -4077,3 +4077,151 @@ Postgres' still-open cost fix, and the standing reliability and
 test-coverage gaps named across prior sessions. At 3–4 hours/day,
 that's roughly 4–5 working days left, assuming no further scope
 changes.
+
+## Session: 2026-09-07 — Viewing a document, and deleting one completely
+
+### What we built
+- Two features, both entirely new requests, not items already sitting
+  on the "what's next" list — real document viewing and real document
+  deletion.
+- **Document viewing.** Investigating "let a user view an uploaded
+  document" surfaced something bigger than a missing button: this
+  system never actually kept a copy of an uploaded file at all — it
+  reads the bytes, extracts and chunks the text, and discards the
+  original. You chose Azure Blob Storage (this project's own stated
+  plan since the very first tech-stack section) over a local folder or
+  a Postgres column, after asking for and getting a real cost estimate
+  first — a few cents a month at this project's scale, priced out, not
+  assumed. Local development uses Azurite, the same
+  container-standing-in-for-a-managed-service pattern Postgres, Neo4j,
+  and Redis already use; the real deployment authenticates with the
+  backend's own Managed Identity directly against the storage account —
+  no key, no Key Vault secret anywhere, actually a stronger version of
+  the Managed Identity requirement than Postgres or Neo4j get in this
+  same project, since neither of those speaks Azure AD auth the way
+  Blob Storage does.
+- While reviewing the generated Terraform plan together, you asked
+  about disabling shared-key access entirely on the storage account —
+  a real, further hardening idea. I checked whether it would actually
+  work before suggesting it: the Terraform provider itself authenticates
+  container-management operations with the account's key by default, so
+  disabling it would have broken `terraform apply` without also
+  switching the provider to Azure AD auth. Added the one hardening that
+  *was* safe (`allow_nested_items_to_be_public = false`) and named the
+  bigger one as a deliberate, not-taken trade-off instead of just
+  quietly skipping it.
+- **Document deletion.** You specified all three real decisions
+  up front: anyone with access can delete (matching the existing
+  `grant_access` rule, since there's no separate "owner" concept in
+  this project's permission model at all — a real, pre-existing gap
+  this session's investigation surfaced, not something deletion itself
+  introduced), deletion has to be complete (documents, chunks, and any
+  other table that references it — which turned out to mean visiting
+  three separate systems: Postgres, Blob Storage, and Neo4j), and it
+  needs a real confirmation step first. Blob and graph cleanup are
+  best-effort, matching this project's existing failure-isolation
+  pattern for external dependencies; the database delete is the one
+  part that has to succeed.
+- A real, newly-introduced security gap was found by rereading the
+  architecture notes, not by being told: a document flagged for PII
+  review used to have its file discarded along with everything else.
+  It's now saved *before* the PII check even runs, so a flagged
+  document's original file — PII and all — is viewable by anyone with
+  access, even while the document sits "held for review." Named
+  honestly in the architecture doc as a new, unfixed gap — not silently
+  patched, since gating the content route on document status wasn't
+  part of what was asked this session.
+- Two real bugs, both caught before they could cause real harm. First,
+  mine: `AsyncSession.delete()` is itself a coroutine in SQLAlchemy's
+  async ORM, unlike the plain session's version — the first cut of
+  `delete_document` called it without `await`, which raised no error at
+  all, just silently never deleted anything and left a `RuntimeWarning`
+  buried in test output. Caught by the cascade-delete test actually
+  checking the row was gone afterward, not just assuming the call
+  succeeded. Second, yours: you reported some documents had no delete
+  button visible at all, with a screenshot. Root cause: `CardHeader` is
+  a CSS Grid container, and a grid item defaults to `min-width: auto`,
+  the same footgun a flex item has — the header row was never actually
+  constrained to the card's width, so a long filename could push the
+  badge and delete button off the visible card. It had been latent
+  since the viewing feature shipped a "View" link into that same row,
+  just not yet visible with only one small badge to push around. Fixed
+  with one `min-w-0`, and reproduced a document with a matching long
+  filename before trusting the fix, not just reasoning about the CSS.
+- Two new ADRs:
+  [`ADR-044`](adr/ADR-044-document-viewing-and-blob-storage.md),
+  [`ADR-045`](adr/ADR-045-document-deletion.md).
+- Tests: 14 new backend across both features (`blob_storage.py`'s dual
+  auth-path selection and its upload/download/delete functions;
+  `create_document`'s blob save and its graceful-degradation path;
+  `DocumentRepository.delete_document`'s real cascade, checked against
+  a real test database; `DocumentDeletionService`'s full
+  failure-isolation matrix; `GraphRepository.delete_document_node`;
+  `Document.has_file` and `DocumentListItem`'s exposure of it, checked
+  directly rather than only by hand as it was right after the viewing
+  feature's own build). Backend suite: 108 → 133 passing. 10 new
+  frontend (the "View" link and "Not viewable" state; the full
+  `DeleteDocumentButton` behavior — the confirmation dialog, cancelling,
+  a successful delete refreshing the list, an inline error that keeps
+  the dialog open, a 401 redirecting to login). Frontend suite: 26 → 33
+  passing.
+- Verified live, for real, not just by reading the code: existing
+  documents correctly show "Not viewable"; a freshly uploaded document's
+  "View" link actually served the real file through Azurite and the new
+  route; a real delete removed the row through the actual confirmation
+  dialog, and I checked directly afterward — zero orphaned rows in
+  `chunks` or `document_permissions` anywhere in the database, the blob
+  actually gone from Azurite (listed the container's contents before and
+  after), and the audit log entry carrying the correct deleting
+  `user_id`.
+
+### What I struggled with
+- No corrections on either feature's real decisions — both matched
+  what you'd already specified before I started building. The
+  `AsyncSession.delete()` bug was mine, caught by a test I wrote for a
+  different reason (verifying the cascade), not by you.
+- The CSS grid `min-width: auto` bug took a moment to actually locate —
+  my first fix (adding `flex-1`/`min-w-0` to the *inner* title
+  container) was necessary but not sufficient, since the real
+  constraint was missing one level up, on the row that's actually a
+  grid item. Found it by inspecting computed styles directly in the
+  browser rather than continuing to reason about the CSS from reading
+  it.
+
+### Concepts to revisit
+- Why a grid item and a flex item share the exact same `min-width:
+  auto` default behavior, and why that means "make it a flex/grid
+  container" is never by itself enough to guarantee a child will
+  actually shrink to fit.
+- Why Blob Storage could get a stronger form of this project's own
+  Managed Identity requirement than Postgres or Neo4j — the difference
+  between a service that speaks Azure AD auth natively and one that
+  doesn't.
+- The newly-named PII-review-viewing gap is worth remembering
+  specifically: it's a case where fixing one thing (nothing was ever
+  saved) genuinely regressed another (a flagged document's file is now
+  exposed) — worth having a clear answer ready for "did you consider
+  what viewing does to a document that's supposed to be held back."
+
+### What's next
+- The PII-review-viewing gap this session surfaced: should
+  `GET /documents/{id}/content` also check `status`, not just access?
+  A real, open question, not yet decided.
+- Everything else from prior sessions still stands: multi-tenancy,
+  APIM's remaining gaps, the missing migration tool, the PII review
+  workflow itself (still no reviewer UI), Postgres' still-open cost
+  fix, the federated-retrieval failure-isolation gap, domain vocabulary
+  drift, and prior test-coverage gaps.
+
+**Estimated completion: this session's two features were both entirely
+new requests, not items that were already sitting on the tracked
+remaining-scope list** — so the total project's real size grew a little
+this session, the same way it has each time a genuinely new feature got
+requested beyond the original 19-item build order. Rough remaining
+effort on the previously-tracked list is unchanged, ~15 hours:
+multi-tenancy, APIM's remaining gaps, the missing migration tool, the
+PII review workflow (now with one more open question attached), and
+the standing reliability and test-coverage gaps. At 3–4 hours/day,
+still roughly 4–5 working days left on that list, with the honest
+caveat that new, unplanned feature requests have consistently kept the
+total finish line moving rather than shrinking to zero.

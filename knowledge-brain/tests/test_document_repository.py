@@ -121,3 +121,37 @@ async def test_list_domains_for_user_ignores_untagged_documents(db_session):
     domains = await repository.list_domains_for_user("user-1")
 
     assert domains == []
+
+
+async def test_delete_document_cascades_chunks_and_permission_grants(db_session):
+    """Deleting a document must remove its chunks and access grants too, not just the row —
+    a leftover chunk or grant pointing at a deleted document would be a real data-integrity gap.
+    """
+    repository = DocumentRepository(db_session)
+    permissions = PermissionRepository(db_session)
+
+    document = await repository.create_document("handbook.pdf")
+    await permissions.grant_access(document.id, "user-1")
+
+    from sqlalchemy import select
+
+    from app.models.document import Chunk
+    from app.models.document_permission import DocumentPermission
+
+    await repository.save_chunks(
+        [Chunk(document_id=document.id, chunk_index=0, text="a chunk", embedding=[0.1] * 1536)]
+    )
+
+    await repository.delete_document(document)
+
+    assert await repository.get_by_id(document.id) is None
+
+    remaining_chunks = await db_session.execute(
+        select(Chunk).where(Chunk.document_id == document.id)
+    )
+    assert remaining_chunks.scalars().all() == []
+
+    remaining_permissions = await db_session.execute(
+        select(DocumentPermission).where(DocumentPermission.document_id == document.id)
+    )
+    assert remaining_permissions.scalars().all() == []

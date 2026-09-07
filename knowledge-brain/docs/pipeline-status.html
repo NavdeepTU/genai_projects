@@ -1393,9 +1393,77 @@
     <p class="caveat"><strong>Verified live, twice:</strong> a real streamed answer through the browser (network inspection confirmed the request stayed genuinely pending, not resolved instantly), and — unplanned but useful — a real block via the injection guardrail against a test document already in the corpus, confirming both the successful and the blocked answer saved correctly through the streaming path. Verified again after the <code>/code-review</code> fixes. Backend suite: 94 → 108 passing · frontend suite: 17 → 26 passing. See <a href="adr/ADR-043-streamed-answer-generation.md">ADR-043</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 25 — Viewing a document, and Blob Storage <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">first time this project persists an uploaded file's original bytes, not just its extracted text</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/core/blob_storage.py</span>
+        <span class="path mono">Azurite locally · Managed Identity (no key at all) in production</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Saved at upload, synchronously</span>
+        <span class="path mono">best-effort — a failed save never fails the upload itself</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">GET /documents/{id}/content</span>
+        <span class="path mono">same permission check as everything else · renders inline</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real, newly-introduced gap found by rereading the architecture notes, not by being told:</strong> a document flagged for PII review used to have its file discarded along with everything else. It's now saved <em>before</em> the PII check even runs — so a flagged document's original file, PII and all, is viewable by anyone with access, even while the document sits "held for review." Not fixed this session — the content route checks access, not status.</p>
+    <p class="caveat"><strong>Priced out before committing, not assumed:</strong> at this project's actual document volume, Blob Storage costs a few cents a month at most. Local development uses Azurite (Docker, free) rather than the real account, matching how Postgres, Neo4j, and Redis already work locally in this project.</p>
+    <p class="caveat"><strong>Verified live:</strong> existing documents (uploaded before this feature) correctly show "Not viewable"; a freshly uploaded document's "View" link was confirmed to serve the real file — fetched from Azurite through the new route and proxy, rendered inline with the correct content type — and the database's <code>storage_path</code> column was checked directly against the actual blob name written. Backend suite: 108 → 119 passing · frontend suite: 26 → 28 passing. See <a href="adr/ADR-044-document-viewing-and-blob-storage.md">ADR-044</a>.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 26 — Deleting a document, completely <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">removes a document from all three places this project now stores something about it</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Confirmation dialog</span>
+        <span class="path mono">Shadcn AlertDialog — first real confirm-before-destroy UI in this project</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">DocumentDeletionService</span>
+        <span class="path mono">blob + graph delete best-effort · database delete must succeed</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Cascade delete</span>
+        <span class="path mono">chunks + permission grants — zero orphans, checked directly</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>Two real bugs caught before/after shipping:</strong> <code>AsyncSession.delete()</code> is itself a coroutine in SQLAlchemy's async ORM — the first version called it without <code>await</code>, silently doing nothing beyond a buried <code>RuntimeWarning</code>, caught by the cascade-delete test actually checking the row was gone. Separately, a user-reported bug: <code>CardHeader</code> is a CSS Grid container, and a grid item defaults to <code>min-width: auto</code> just like a flex item — the header row was never actually constrained to the card's width, so a long filename could push the delete button off the visible card. Fixed with one <code>min-w-0</code>, reproduced with a matching long filename before trusting the fix.</p>
+    <p class="caveat"><strong>No new ownership concept, on purpose:</strong> anyone with access can delete a document today, the same <code>has_access</code> rule sharing already uses — building a real "owner" concept to protect a multi-user scenario with no UI and no real usage would have been speculative scope.</p>
+    <p class="caveat"><strong>Verified live:</strong> a real document deleted through the actual confirmation dialog, then checked directly — zero orphaned rows in <code>chunks</code> or <code>document_permissions</code> across the whole database, the blob actually gone from Azurite (container contents listed before and after), and the audit log entry carrying the correct deleting <code>user_id</code>. Backend suite: 119 → 133 passing · frontend suite: 28 → 33 passing. See <a href="adr/ADR-045-document-deletion.md">ADR-045</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
-    <p class="caveat">Every item in the original build order (1 through 19) is now built. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>
+    <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, and document deletion. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>
   </footer>
 
 </div>

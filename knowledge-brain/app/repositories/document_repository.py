@@ -42,6 +42,19 @@ class DocumentRepository:
         await self.session.refresh(document)
         return document
 
+    async def set_storage_path(self, document_id: uuid.UUID, storage_path: str) -> None:
+        """Record where a document's original file landed in Blob Storage (ADR-044)."""
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.storage_path = storage_path
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to set storage path for document %s", document_id)
+            raise
+
     async def save_chunks(self, chunks: list[Chunk]) -> None:
         """Insert many chunk rows, each with its own embedding, at once."""
         self.session.add_all(chunks)
@@ -113,6 +126,21 @@ class DocumentRepository:
             await self.session.commit()
         except SQLAlchemyError:
             logger.exception("Failed to mark document %s failed", document_id)
+            raise
+
+    async def delete_document(self, document: Document) -> None:
+        """Delete a document row — its chunks and permission grants cascade with it (ADR-045).
+
+        Takes the already-loaded Document, not an id, since the caller
+        (DocumentDeletionService) already fetched it once via
+        get_document_for_user for the permission check, and needs its
+        storage_path *before* this call removes the row.
+        """
+        await self.session.delete(document)
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to delete document %s", document.id)
             raise
 
     async def find_similar_chunks(

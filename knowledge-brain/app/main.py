@@ -17,6 +17,8 @@ from app.api.dashboard import router as dashboard_router
 from app.api.documents import router as documents_router
 from app.api.query import router as query_router
 from app.api.query_stream import router as query_stream_router
+from app.core.blob_storage import ensure_container_exists
+from app.core.config import get_settings
 from app.core.middleware import (
     correlation_id_middleware,
     gateway_secret_middleware,
@@ -26,6 +28,7 @@ from app.mcp.auth import ApiKeyMiddleware
 from app.mcp.server import mcp
 
 mcp_app = mcp.streamable_http_app(streamable_http_path="/")
+settings = get_settings()
 
 
 @asynccontextmanager
@@ -36,7 +39,14 @@ async def lifespan(app: FastAPI):
     event into it — only this outer lifespan runs automatically. Without
     entering mcp.session_manager.run() here, the MCP server would silently
     never initialize, and every request to /mcp would fail.
+
+    Also creates the document blob container if it's missing — but only
+    against Azurite (local development). In the real deployment, Terraform
+    already provisioned it, and the backend's Managed Identity isn't
+    necessarily allowed to create one (see app/core/blob_storage.py).
     """
+    if settings.azure_storage_connection_string:
+        await ensure_container_exists()
     async with mcp.session_manager.run():
         yield
 

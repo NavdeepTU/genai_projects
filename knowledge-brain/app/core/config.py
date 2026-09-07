@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     redis_url: str
     condensing_context_turns: int = 3
 
+    # Document file storage (ADR-044) — the uploaded file itself, not the
+    # extracted/chunked text. Exactly one of these two is set per
+    # environment: locally, azure_storage_connection_string points at
+    # Azurite (the Blob Storage emulator) using its fixed, publicly-known
+    # development account key — not a real secret. In the real deployment,
+    # azure_storage_account_url is set instead and the backend authenticates
+    # with its own Managed Identity, no key needed at all — see
+    # app/core/blob_storage.py for which path gets taken.
+    azure_storage_connection_string: str | None = None
+    azure_storage_account_url: str | None = None
+    azure_storage_container_name: str = "documents"
+
 
 @lru_cache
 def get_settings() -> Settings:

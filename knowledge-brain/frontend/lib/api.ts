@@ -23,6 +23,7 @@ export type DocumentListItem = {
   uploaded_at: string;
   pii_detected: boolean;
   domains: string[];
+  has_file: boolean;
 };
 
 export type DocumentUploadResponse = {
@@ -223,5 +224,28 @@ export async function* streamQuery(
       if (event) yield event;
       boundary = buffer.indexOf("\n\n");
     }
+  }
+}
+
+// Called from the browser (the delete confirmation dialog), so this hits
+// the same-origin proxy at /api/documents/{id}, never the backend
+// directly — same reasoning as every other client-triggered call in this
+// file (ADR-045).
+export async function deleteDocument(documentId: string): Promise<void> {
+  const response = await fetch(`/api/documents/${documentId}`, { method: "DELETE" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Delete failed (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
   }
 }

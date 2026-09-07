@@ -1,5 +1,11 @@
+import logging
 import uuid
+from pathlib import Path
 
+from azure.core.exceptions import AzureError
+
+from app.core.blob_storage import upload_document
+from app.core.circuit_breaker import CircuitOpenError
 from app.core.config import get_settings
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
 from app.repositories.document_repository import DocumentRepository
@@ -9,7 +15,14 @@ from app.services.embedding import embed_chunks
 from app.services.extraction import extract_text
 from app.services.pii_detection import detect_pii
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Shared with app/api/documents.py's content-serving route — the same
+# mapping tags a blob's Content-Type at upload time and sets the response
+# header when it's viewed later, so a document is always served back as
+# the same type it was tagged with, not re-derived and risking drift.
+CONTENT_TYPES = {".pdf": "application/pdf", ".txt": "text/plain"}
 
 
 class IngestionService:
@@ -25,17 +38,39 @@ class IngestionService:
         self.permission_repository = permission_repository
 
     async def create_document(
-        self, filename: str, user_id: str, domains: list[str] | None = None
+        self, filename: str, content: bytes, user_id: str, domains: list[str] | None = None
     ) -> Document:
-        """Record a new upload and give the uploader access to it.
+        """Record a new upload, save its original file, and give the uploader access to it.
 
-        Deliberately just this much and nothing more: fast enough to finish
-        before the HTTP response goes out, so the caller has a real
-        document.id to hand back to the browser right away. domains are
-        set manually at upload, for now — see ADR-040.
+        Deliberately still fast enough to finish before the HTTP response
+        goes out — the caller has a real document.id to hand back to the
+        browser right away, and a single blob upload is far cheaper than
+        the extraction/chunking/embedding pipeline that runs afterward in
+        the background. domains are set manually at upload, for now — see
+        ADR-040. Saving the file to Blob Storage (ADR-044) is best-effort:
+        an outage there degrades to "this document has nothing to view,"
+        the same way a down reranker or an unreachable Neo4j degrades
+        elsewhere in this project, rather than failing the whole upload —
+        the file being viewable later is additive, not what this system
+        exists to do.
         """
         document = await self.repository.create_document(filename, domains)
         await self.permission_repository.grant_access(document.id, user_id)
+
+        blob_name = f"{document.id}{Path(filename).suffix.lower()}"
+        content_type = CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")
+        try:
+            await upload_document(blob_name, content, content_type)
+        except (CircuitOpenError, AzureError):
+            logger.error(
+                "Blob upload failed for document %s, it will have no viewable file", document.id
+            )
+            return document
+
+        # set_storage_path fetches the same row through this repository's
+        # own session, so SQLAlchemy's identity map means this mutates the
+        # exact `document` object above too — no separate assignment needed.
+        await self.repository.set_storage_path(document.id, blob_name)
         return document
 
     async def process_document(self, document_id: uuid.UUID, filename: str, content: bytes) -> None:

@@ -3364,6 +3364,163 @@ tests that would have caught what was actually broken.
 
 ---
 
+## Feature 31: Viewing a Document, and Blob Storage
+
+**What does this feature do, in one sentence?**
+A user can now open the original file behind any document uploaded
+since this feature shipped — a real "View" link that opens the actual
+PDF or text file in a new browser tab, backed by Azure Blob Storage.
+
+```mermaid
+flowchart TD
+    UP["Document uploaded"] --> SAVE["Save file bytes<br/>to Blob Storage<br/>(synchronous, best-effort)"]
+    SAVE -->|success| PATH["storage_path recorded"]
+    SAVE -->|failure| NULL["storage_path stays null —<br/>upload still succeeds"]
+    PATH --> VIEW["User clicks View"]
+    VIEW --> CHECK{"has_access(document, user)?"}
+    CHECK -->|no| DENY["404 — same as a<br/>nonexistent document"]
+    CHECK -->|yes| FETCH["Fetch bytes from<br/>Blob Storage"]
+    FETCH --> SERVE["Content-Disposition: inline<br/>→ browser renders it directly"]
+```
+
+**Why did this feature turn out to be bigger than "add a view button"?**
+Investigating the request surfaced that this system never actually kept
+a copy of an uploaded file at all — it reads the bytes, extracts and
+chunks the text, and discards the original the moment that's done. So
+"let someone view a document" split into two real problems: start
+persisting the file somewhere retrievable, and only then serve it back.
+The button itself was the easy 10%.
+
+**Why Azure Blob Storage instead of a local folder or a database
+column?**
+It's what this project's own tech stack always said it would use for
+document storage, and it's the only option of the three that survives
+what the real backend actually does — Container Apps scaling to zero
+and back up. A local folder disappears the moment that happens; storing
+files as bytes in Postgres works but contradicts the stated plan and
+mixes binary data into a relational database for no real reason.
+
+**How does local development talk to Blob Storage without needing a
+real Azure account?**
+Azurite — Microsoft's own local emulator, running in Docker exactly
+like Postgres, Neo4j, and Redis already do in this project. Same code
+either way; only the connection details differ between environments.
+
+**How does the backend authenticate to the real Blob Storage account in
+production?**
+With its own Managed Identity, granted a role directly on the storage
+account — no connection string, no key, no secret in Key Vault at all.
+This is actually a *stronger* version of the Managed Identity
+requirement than Postgres or Neo4j get in this same project: those two
+still need a real secret, because neither of them speaks Azure AD
+authentication. Blob Storage does, so there was no reason to settle for
+a weaker, key-based option just because that's the existing pattern for
+other services.
+
+**What happens to a document that was uploaded before this feature
+existed?**
+Its `storage_path` is null, because nothing was ever saved for it —
+there's nothing to migrate, since the bytes were already gone. The UI
+shows an honest "Not viewable" instead of a broken link.
+
+**Did this feature quietly change any earlier security behavior?**
+Yes, in a way I found by rereading the architecture notes, not by being
+told: a document flagged for PII review used to have its file discarded
+along with everything else. Now the file is saved *before* the PII
+check even runs, so a flagged document's original file — PII and all —
+is viewable by anyone with access, even while the document sits
+supposedly "held for review." That's a real, newly-introduced gap, not
+something this session fixed — it needs its own decision about whether
+viewing should also check a document's status, not just who has access
+to it.
+
+*Further reading: [Microsoft Learn — Authorize access to blobs using Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-access-azure-active-directory) — the official source for the RBAC-based, keyless authentication model this feature actually uses in production.*
+
+---
+
+## Feature 32: Deleting a Document, Completely
+
+**What does this feature do, in one sentence?**
+A user can permanently delete a document — its database row, its
+chunks, its access grants, its file in Blob Storage, and its node in
+the relationship graph — behind a confirmation dialog.
+
+```mermaid
+flowchart TD
+    CLICK["User clicks delete"] --> CONFIRM{"Confirmation<br/>dialog"}
+    CONFIRM -->|cancel| STOP["Nothing happens"]
+    CONFIRM -->|confirm| CHECK{"has_access(document, user)?"}
+    CHECK -->|no| DENY["404"]
+    CHECK -->|yes| BLOB["Delete file from<br/>Blob Storage (best-effort)"]
+    BLOB --> GRAPH["Delete node + edges<br/>from Neo4j (best-effort)"]
+    GRAPH --> DB["Delete the document row<br/>(chunks + grants cascade)"]
+    DB --> AUDIT["Audit log: document_deleted,<br/>who did it"]
+    AUDIT --> GONE["Document disappears<br/>from the list"]
+```
+
+**Why does deleting a document have to touch three different systems?**
+Because this project stores something about a document in three places
+by now: the database (the row, its chunks, its access grants), Blob
+Storage (the file itself, since the previous feature), and Neo4j (a
+graph node and any reference edges to or from other documents). Deleting
+only the database row would leave a real file and a real graph node
+behind with nothing pointing at them any more.
+
+**Why is deleting the file and the graph node "best-effort," but
+deleting the database row isn't?**
+Because that's exactly how this project already treats every external
+dependency elsewhere — reranking, graph context lookups, domain
+classification all degrade gracefully rather than fail the whole
+request when an external service hiccups. Making deletion the one
+place that suddenly requires three separate services to all succeed at
+once would mean a document could become undeletable for reasons that
+have nothing to do with the document — a worse outcome than a rare
+leftover file or graph node sitting unused.
+
+**Who's allowed to delete a document, and why not just the person who
+uploaded it?**
+Anyone with access — the same rule already used for sharing a
+document. There's no separate "owner" concept anywhere in this
+project's permission model; once someone has access, they're treated
+identically to the original uploader. Building a real ownership model
+just to protect a scenario (multiple people actually sharing a
+document) that has no UI and has never happened in practice would have
+been speculative scope, not a real requirement.
+
+**What real bug did writing the tests for this catch?**
+`AsyncSession.delete()` — SQLAlchemy's async session delete method — is
+itself a coroutine, unlike the plain synchronous session's version. The
+first version of this code called it without `await`. Nothing raised an
+error; Python just quietly never ran the delete, leaving a
+`RuntimeWarning` easy to miss in test output. The cascade-delete test,
+which checks the row is actually gone afterward rather than just
+assuming the call succeeded, is what caught it.
+
+**A user reported that some documents had no delete button visible at
+all. What was actually happening?**
+A CSS layout bug, not a logic bug — `CardHeader` (from the component
+library) is a CSS Grid container, and a grid item defaults to
+`min-width: auto`, the same footgun flex items have — it doesn't shrink
+to fit its track unless told to. The row holding the filename, status
+badge, and delete button was never actually constrained to the card's
+own width, so a long filename could silently push the badge and delete
+button past the visible edge of the card. It had been latent since the
+"View" feature shipped, but only became obvious once the delete button
+gave that row a second element worth losing. Fixed with one `min-w-0`
+on the row itself, confirmed by reproducing a document with a similarly
+long name before trusting the fix.
+
+**Is there any way to undo a deletion?**
+No — no soft-delete, no trash, no recovery. That's the direct
+consequence of what was actually asked for ("deleted completely"), not
+an oversight, but it means the confirmation dialog is the only safety
+net this feature has. A production system handling real user data would
+likely want a soft-delete window before this kind of permanent removal.
+
+*Further reading: [PostgreSQL — Foreign Keys and cascading actions](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK) — the official documentation covering how cascading deletes work at the database level, the same concept this feature applies through SQLAlchemy's ORM-level `cascade="all, delete-orphan"` instead of a database-level `ON DELETE CASCADE`.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

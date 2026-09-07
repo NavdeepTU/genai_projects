@@ -311,6 +311,19 @@ resource "azurerm_container_app" "backend" {
         name        = "APIM_GATEWAY_SECRET"
         secret_name = "apim-gateway-secret"
       }
+
+      # Not a secret — the backend authenticates against this URL with its
+      # own Managed Identity (see storage.tf), not a key, so there's
+      # nothing here that needs Key Vault.
+      env {
+        name  = "AZURE_STORAGE_ACCOUNT_URL"
+        value = azurerm_storage_account.documents.primary_blob_endpoint
+      }
+
+      env {
+        name  = "AZURE_STORAGE_CONTAINER_NAME"
+        value = azurerm_storage_container.documents.name
+      }
     }
   }
 

@@ -944,15 +944,43 @@ through `curl` or MCP, just not through the UI.
 **Document card (`frontend/components/document-card.tsx`)** — the
 per-document card the Document Library page renders one of for each
 upload: filename, status badge, upload date, a PII warning if flagged,
-and now a small outline badge per domain tag. Extracted out of
-`app/documents/page.tsx` into its own file this session, for a reason
+a small outline badge per domain tag, and — since ADR-044 and ADR-045 —
+a "View" link (or an honest "Not viewable" state for anything with no
+`storage_path`) and a delete icon-button. Extracted out of
+`app/documents/page.tsx` into its own file early on, for a reason
 that's really about testing, not styling: the page file transitively
 imports `next/headers` (through `lib/server-api`), so it throws outside
 a real Next.js request — a plain component-render test couldn't import
-`DocumentCard` from there at all. Same client-safe/server-only split
-`lib/api.ts`/`lib/server-api.ts` already established, applied to a
-component instead of data-fetching functions. Talks to: nothing
-directly — a pure function of the `DocumentListItem` it's given.
+`DocumentCard` from there at all. The card itself stays a plain,
+server-renderable component — only `DeleteDocumentButton`, embedded
+inside it, needs `"use client"`, pushed as far down the tree as the
+interactivity actually requires. Talks to: the backend's content route
+(via a plain link, no JavaScript involved) and, through
+`DeleteDocumentButton`, `DELETE /api/documents/{id}`.
+
+A real, user-reported layout bug lived in this file's header row: a
+long filename could push the status badge and delete button past the
+card's visible edge, because `CardHeader` (Shadcn's own component) is a
+CSS Grid container, and a grid item — the same footgun as a flex item —
+defaults to `min-width: auto`, never shrinking to fit its track unless
+told to. Invisible until the delete button gave that row a second
+fixed-width element worth protecting. Fixed with one `min-w-0` on the
+row itself; confirmed by reproducing a document named to match the
+reported screenshot, not just inferred from reading the CSS. See
+ADR-045.
+
+**Delete document button (`frontend/components/delete-document-button.tsx`)**
+— added with ADR-045, this project's first use of a real confirmation
+dialog (Shadcn's `AlertDialog`, on the Base UI foundation ADR-028
+established — added via the CLI, the same `--legacy-peer-deps` snag as
+every other `shadcn add` this project has run into). Opens on click,
+shows the filename and an explicit "can't be undone" warning, and only
+calls `deleteDocument` (`frontend/lib/api.ts`) once the user confirms
+inside the dialog — never on the click that opens it. A failed delete
+shows a human-readable error inline and leaves the dialog open, rather
+than closing and losing the user's place; a successful one closes the
+dialog and calls `router.refresh()` so the document disappears from the
+list without a full page reload. Talks to: `DELETE /api/documents/{id}`.
 
 **Frontend tests (`frontend/vitest.config.mts`, `*.test.tsx` files
 next to the components they cover)** — this project's first frontend
@@ -1233,9 +1261,16 @@ flowchart LR
 
 **Ingestion service (`app/services/ingestion_service.py`)** — the
 conductor, split into two methods since ADR-030. `create_document` is
-just the fast part: insert the row, grant the uploader access — small
-on purpose, since it has to finish before an HTTP response goes out.
-`process_document` is everything else: knows the *order* the pipeline
+the fast part: insert the row, grant the uploader access, and — since
+ADR-044 — upload the file's original bytes to Blob Storage, recording
+the result as `storage_path`. Still small on purpose, since it all has
+to finish before an HTTP response goes out; a single blob upload is
+close enough in cost to the rest of this method's work to belong here,
+not in the background pipeline below. The blob upload is best-effort:
+a failure there is logged and swallowed, not raised, so a Blob Storage
+outage never fails the upload itself — it just means that document has
+nothing to view later. `process_document` is everything else: knows
+the *order* the pipeline
 steps must run in (extract, check for PII, then chunk, then embed,
 then save), updates `processing_stage` before each one, sets `status`
 to `processing` at the start and `ready`/`pending_review`/`failed` at
@@ -1275,6 +1310,40 @@ flowchart LR
     FOUND -->|yes| REVIEW["pending_review<br/>pii_detected = true, stop"]
     FOUND -->|no| CONTINUE[Continue to chunking]
 ```
+
+**Blob storage (`app/core/blob_storage.py`)** — added with ADR-044, the
+first place this project persists a document's original file rather
+than only what was extracted from it. `upload_document`,
+`download_document`, and `delete_document`, each wrapped in the same
+circuit breaker (`blob_storage`). `_build_client` picks one of two
+authentication paths depending on which setting is populated: a
+connection string against Azurite (local development, the same
+container-standing-in-for-a-managed-service pattern Postgres, Neo4j,
+and Redis already use) or the backend's own Managed Identity directly
+against the real Azure Storage Account — no key, no Key Vault secret,
+the first external Azure dependency in this project able to
+authenticate with nothing stored in configuration at all, since Blob
+Storage (unlike Postgres or Neo4j here) speaks Azure AD auth natively.
+`ensure_container_exists` runs once at startup, but only against
+Azurite — the real deployment's container is provisioned by Terraform
+ahead of time, and the backend's Managed Identity is deliberately only
+granted permission to read and write blobs, not to create a container.
+Talks to: Azure Blob Storage (or its local emulator).
+
+**Document deletion service (`app/services/document_deletion_service.py`)**
+— added with ADR-045, the mirror image of `DocumentGraphService`'s role:
+a small, single-purpose orchestrator, this time for tearing a document
+down instead of building its graph links up. Deletes the file from Blob
+Storage and the node (plus every edge touching it) from Neo4j, both
+best-effort — the same failure-isolation shape this project already
+applies to every external dependency elsewhere — then deletes the
+document row, whose chunks and permission grants cascade with it
+automatically via a `Document.permissions` relationship added
+alongside this feature. The database delete is the one step that must
+actually succeed; a Blob Storage or Neo4j hiccup degrades to "a
+leftover file or graph node sits there," never blocks a user from
+deleting a document. Talks to: the document repository, the graph
+repository, and blob storage.
 
 **Document graph service (`app/services/document_graph_service.py`)**
 — runs once per document, right after ingestion succeeds. Reads what
@@ -2128,9 +2197,12 @@ checked against the `sessions` table before any of this runs; missing
 or expired, the request is rejected right there. The system checks
 the file type is supported, creates a database record for the document
 immediately (marked "pending"), immediately grants the uploader access
-to it, writes an audit log entry, schedules the rest of the work as a
-background task, and returns right there — the caller gets the
-document's id back well before any real processing has happened. From
+to it, saves the file's original bytes to Blob Storage (best-effort —
+a failure here is logged, not raised, and just means this document has
+nothing to view later; see ADR-044), writes an audit log entry,
+schedules the rest of the work as a background task, and returns right
+there — the caller gets the document's id back well before any real
+processing has happened. From
 this point on, everything runs in the background, in its own fresh
 database and Neo4j connections: status moves to "processing," and a
 separate progress field is updated before each real step, purely so a
@@ -2167,6 +2239,28 @@ to back, in the same call, and the tool's return value describes the
 document's actual final state, not an in-progress one. Domains arrive
 here as a plain list rather than a comma-separated string, since MCP
 tool arguments carry real JSON types.
+
+**Viewing a document:** a user clicks "View" on a document that has
+one — a plain link, no JavaScript involved, opening
+`/api/documents/{id}/content` in a new tab. The backend checks the same
+access-grant permission every other document route checks, then fetches
+the file's bytes from Blob Storage and returns them with the content
+type it was tagged with at upload time and `Content-Disposition:
+inline`, so the browser renders a PDF or text file directly instead of
+downloading it. A document with no `storage_path` — uploaded before
+this feature existed, or whose blob save itself failed — returns the
+same 404 a nonexistent or inaccessible document would. See ADR-044.
+
+**Deleting a document:** a user confirms deletion in a dialog, which
+only then sends `DELETE /api/documents/{id}`. The backend checks the
+same access-grant permission as viewing — anyone with access can delete
+a document today, the same rule that already governs sharing one, since
+this project has no separate "owner" concept. The file is deleted from
+Blob Storage and the document's node (and every edge touching it) is
+deleted from Neo4j, both best-effort — an outage in either is logged
+and skipped, never blocks the deletion. The document row is deleted
+last, and its chunks and permission grants disappear with it
+automatically. An audit log entry records who deleted it. See ADR-045.
 
 **Asking a question:** a user sends a question to the query address,
 again proven by their session cookie, naming an existing conversation
@@ -2482,19 +2576,29 @@ request, but there's no dedicated "admin viewed the audit log" or
 trusted operators; a real gap before this system could honestly
 support more than a small, known set of administrators. See ADR-034.
 
-**A document flagged for PII has no reviewer, and nothing left to
-review even if one existed** — `pending_review` and `pii_detected`
-have been correctly set since ADR-018, but nothing has ever moved a
-document back out of that status: no approve, no reject, no delete.
-Worse, `IngestionService.process_document` discards both the extracted
-text and the original file bytes the moment `flag_for_review` runs —
-neither is persisted anywhere, so even a reviewer with access has
-nothing to actually look at today. A real fix needs its own decision
-about where flagged content lives long enough to review, and needs to
-be gated behind `require_admin` specifically — the uploader who
-created the risk shouldn't be the one clearing it, the same
-separation-of-duties reasoning the Admin page itself exists for.
-Tracked as a distinct future item, not folded into ADR-034.
+**A document flagged for PII has no reviewer, and its file is now
+viewable anyway** — `pending_review` and `pii_detected` have been
+correctly set since ADR-018, but nothing has ever moved a document back
+out of that status: no approve, no reject, no delete. This section used
+to also say the original file bytes were discarded — true before
+ADR-044, no longer true now: `create_document` saves a document's file
+to Blob Storage synchronously, before `process_document` ever runs the
+PII check that might flag it, so a flagged document's `storage_path` is
+already set by the time it's held for review. That's a real, new gap
+this document-viewing feature introduced without meaning to: the
+content route checks document-level *access*, not `status`, so a
+document sitting in `pending_review` — supposedly held back — can still
+be opened and viewed by anyone with access, PII and all, through the
+same "View" link a normal document uses. The extracted *text* is still
+genuinely discarded (`flag_for_review` returns before chunking ever
+runs), so it isn't searchable — only the raw file itself is exposed. A
+real fix needs its own decision about whether the content route should
+also gate on `status`, and, separately, where flagged content lives
+long enough for an actual reviewer to act on it, gated behind
+`require_admin` — the uploader who created the risk shouldn't be the
+one clearing it, the same separation-of-duties reasoning the Admin page
+exists for. Tracked as a distinct future item, not folded into ADR-034,
+ADR-044, or ADR-045.
 
 **The deployed backend now pays a real cold-start delay after any idle
 period** — `min_replicas = 0` (ADR-035) means the first request after
@@ -2582,15 +2686,21 @@ analytics query) that reads chunks through yet another new path would
 need this applied again, deliberately, not inherited automatically.
 See ADR-019.
 
-**A shared document can be re-shared indefinitely, with no way for the
-original uploader to see or stop it** — the sharing rule is
-deliberately simple: anyone with access can grant access to someone
-else. There's no ownership concept distinguishing the original uploader
-from someone granted access later, so a document could, in principle,
-spread to people the uploader never intended and has no visibility
-into. Acceptable for a single-tenant learning project; a real
-multi-tenant deployment would need ownership tracking before this
-rule could be trusted. See ADR-019.
+**A shared document can be re-shared — or deleted — by anyone with
+access, with no way for the original uploader to see or stop it** — the
+sharing rule is deliberately simple: anyone with access can grant
+access to someone else. There's no ownership concept distinguishing the
+original uploader from someone granted access later, so a document
+could, in principle, spread to people the uploader never intended and
+has no visibility into. Deletion (ADR-045) deliberately inherited this
+exact same symmetry rather than introducing an ownership concept just
+for itself — anyone with access can delete a document today, the same
+`has_access` rule sharing already uses, which means anyone it was ever
+shared with can also permanently remove it for everyone. Acceptable for
+a single-tenant learning project, where sharing has no UI and has never
+actually been exercised; a real multi-tenant deployment would need
+ownership tracking before either rule could be trusted. See ADR-019 and
+ADR-045.
 
 **Identity is self-asserted over MCP, proven over REST** — ADR-036
 closed this for REST: a caller now needs a real password-verified
@@ -3532,3 +3642,30 @@ mode from every other guardrail in this system, which all run *before*
 anything is ever shown — retracting is the one place unchecked model
 output can be visible to a user, even briefly, before being withdrawn.
 See ADR-043.
+
+**Blob Storage** — Azure's service for storing whole files (as opposed
+to structured rows, which is Postgres's job here). Used in this project
+for exactly one thing: the original bytes of an uploaded document, kept
+separately from the extracted, chunked text that actually gets
+searched. See ADR-044.
+
+**Azurite** — Microsoft's official local emulator for Blob Storage,
+behaving like the real service without needing an actual Azure account
+— the same role Docker containers already play for Postgres, Neo4j,
+and Redis in this project's local development setup. See ADR-044.
+
+**Managed Identity (passwordless auth)** — a way for one Azure service
+to prove who it is to another without a password, key, or connection
+string existing anywhere in its configuration at all. Most services
+this project uses still need a real secret in Key Vault (Postgres,
+Neo4j) because they don't speak this kind of authentication; Blob
+Storage does, making it the first external dependency here with truly
+no credential material sitting in config anywhere. See ADR-044.
+
+**Cascade delete** — telling the database that deleting one row should
+automatically delete everything that depends on it, rather than
+leaving orphaned rows behind or refusing the delete outright. Applied
+here so removing a document also removes its chunks and its access
+grants, both configured once on the `Document` model rather than
+handled by hand at every call site that might ever delete one. See
+ADR-045.

@@ -1,12 +1,19 @@
 import logging
 import uuid
+from pathlib import Path
 
+from azure.core.exceptions import AzureError
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
+from fastapi.responses import Response
+from neo4j import AsyncSession as Neo4jAsyncSession
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.blob_storage import download_document
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.graph_database import driver as graph_driver
+from app.core.graph_database import get_graph_session
 from app.core.middleware import get_correlation_id, get_current_user_id
 from app.models.document import (
     DocumentListItem,
@@ -20,9 +27,10 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
 from app.repositories.permission_repository import PermissionRepository
+from app.services.document_deletion_service import DocumentDeletionService
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
-from app.services.ingestion_service import IngestionService
+from app.services.ingestion_service import CONTENT_TYPES, IngestionService
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +95,7 @@ async def upload_document(
     correlation_id = get_correlation_id()
 
     service = IngestionService(DocumentRepository(db), PermissionRepository(db))
-    document = await service.create_document(file.filename, user_id, domain_list)
+    document = await service.create_document(file.filename, content, user_id, domain_list)
 
     await AuditRepository(db).log_action(
         correlation_id=correlation_id,
@@ -143,6 +151,83 @@ async def get_document_status(
         failure_reason=document.failure_reason,
         correlation_id=get_correlation_id(),
     )
+
+
+@router.get("/{document_id}/content")
+async def get_document_content(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Serve a document's original file, so it can be opened in the browser (ADR-044).
+
+    Permission-checked exactly like every other document access in this
+    system — get_document_for_user returns None for a document this user
+    was never granted access to, the same as a nonexistent id. A document
+    with no storage_path (uploaded before this feature existed, or whose
+    blob save itself failed) has nothing to serve, a 404 same as a
+    missing document rather than a different error shape to handle.
+    Content-Disposition: inline is what makes the browser render a PDF or
+    text file directly instead of downloading it.
+    """
+    user_id = get_current_user_id()
+    document = await DocumentRepository(db).get_document_for_user(document_id, user_id)
+    if document is None or document.storage_path is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        content = await download_document(document.storage_path)
+    except (CircuitOpenError, AzureError):
+        raise HTTPException(
+            status_code=503,
+            detail="Document storage is temporarily unavailable. Please try again in a moment.",
+        ) from None
+
+    content_type = CONTENT_TYPES.get(Path(document.filename).suffix.lower(), "application/octet-stream")
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{document.filename}"'},
+    )
+
+
+@router.delete("/{document_id}", status_code=204)
+async def delete_document(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    graph_session: Neo4jAsyncSession = Depends(get_graph_session),
+) -> Response:
+    """Delete a document completely — its file, its graph node, and its database rows (ADR-045).
+
+    Permission-checked exactly like viewing or listing: anyone with
+    access to a document can delete it today, the same has_access rule
+    grant_document_access already uses — there's no separate "owner"
+    concept in this project's permission model yet.
+    """
+    user_id = get_current_user_id()
+    document = await DocumentRepository(db).get_document_for_user(document_id, user_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    filename = document.filename
+    service = DocumentDeletionService(DocumentRepository(db), GraphRepository(graph_session))
+    try:
+        await service.delete_document(document)
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail="Couldn't delete the document. Please try again in a moment.",
+        ) from None
+
+    await AuditRepository(db).log_action(
+        correlation_id=get_correlation_id(),
+        action="document_deleted",
+        resource_type="document",
+        resource_id=str(document_id),
+        extra_data={"filename": filename},
+        user_id=user_id,
+    )
+
+    return Response(status_code=204)
 
 
 @router.post("/{document_id}/access", response_model=GrantAccessResponse, status_code=201)

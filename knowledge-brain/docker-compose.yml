@@ -30,7 +30,22 @@ services:
     volumes:
       - redis_data:/data
 
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: knowledge-brain-azurite
+    # Only the blob service is used (document file storage) — queue and
+    # table emulation aren't started, since nothing in this project needs
+    # them. --loose relaxes some strict real-Azure validation Azurite does
+    # by default, which otherwise rejects a few things real Blob Storage
+    # actually accepts.
+    command: azurite-blob --blobHost 0.0.0.0 --loose
+    ports:
+      - "10000:10000"
+    volumes:
+      - azurite_data:/data
+
 volumes:
   postgres_data:
   neo4j_data:
   redis_data:
+  azurite_data:

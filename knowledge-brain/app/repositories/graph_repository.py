@@ -53,3 +53,20 @@ class GraphRepository:
             return [record["id"] for record in records]
 
         return await circuit_breaker.call(run_query)
+
+    async def delete_document_node(self, document_id: str) -> None:
+        """Remove a document's node from the graph, along with every edge touching it (ADR-045).
+
+        DETACH DELETE removes both directions at once — REFERENCES edges
+        this document pointed out, and ones other documents pointed at
+        it — so no dangling edge is left referencing a node that no
+        longer exists. A no-op, not an error, if the node was never
+        created in the first place (a document with no references either
+        way never gets a graph node at all).
+        """
+        query = "MATCH (d:Document {id: $document_id}) DETACH DELETE d"
+
+        async def run_query() -> None:
+            await self.session.run(query, document_id=document_id)
+
+        await circuit_breaker.call(run_query)

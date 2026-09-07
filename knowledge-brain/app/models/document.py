@@ -69,10 +69,28 @@ class Document(Base):
     # classification (see app/services/domain_classification.py) and stays
     # reachable only through the original, domain-agnostic search path.
     domains: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    # Where this document's original file lives in Blob Storage — just the
+    # blob name (document id + extension), not a full URL, since the
+    # container and account differ by environment (ADR-044). Null for any
+    # document uploaded before this feature existed, or if the upload's
+    # blob save itself failed — either way, nothing to view.
+    storage_path: Mapped[str | None] = mapped_column(String(255), default=None)
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    # Deliberately one-directional (no back_populates) — nothing needs a
+    # DocumentPermission.document attribute today. cascade="all,
+    # delete-orphan" is what makes deleting a Document also delete every
+    # access grant for it, the same way chunks already cascade (ADR-045).
+    permissions: Mapped[list["DocumentPermission"]] = relationship(
+        cascade="all, delete-orphan"
+    )
+
+    @property
+    def has_file(self) -> bool:
+        """Whether this document's original file can actually be viewed."""
+        return self.storage_path is not None
 
 
 class Chunk(Base):
@@ -112,6 +130,7 @@ class DocumentListItem(BaseModel):
     uploaded_at: datetime
     pii_detected: bool
     domains: list[str]
+    has_file: bool
 
 
 class DocumentListResponse(BaseModel):
