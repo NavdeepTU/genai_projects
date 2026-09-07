@@ -3942,3 +3942,138 @@ workflow, Postgres' still-open cost fix, and the standing reliability
 and test-coverage gaps named across prior sessions. At 3–4 hours/day,
 that's roughly 5–7 working days left, assuming no further scope
 changes.
+
+## Session: 2026-09-07 — Streamed answer generation (build-order item 19, the last one)
+
+### What we built
+- Real, token-by-token streaming for a single-domain answer over
+  Server-Sent Events — the last build-order item with no work started
+  at all is now fully closed. You confirmed three real architectural
+  decisions this session, each with a genuine trade-off named rather
+  than picked quietly: moderation checks each sentence as it streams,
+  but the injection check (which needs the *complete* answer to judge
+  whether retrieved content hijacked it) can only run afterward and can
+  only retract, not prevent, something already shown; a brand-new
+  `POST /query/stream` route, not a flag on `/query` — confirmed after
+  you asked whether an MCP tool call could stream, which I checked
+  against the real installed `mcp` package rather than answering from
+  memory (it supports progress notifications, not content streaming, so
+  nothing there would have benefited); and the LangGraph pipeline itself
+  was shortened to stop one step before generation, rather than building
+  a second, parallel pipeline or threading a streaming flag through
+  every node's shared state.
+- A cross-domain question (build item 17's federated retrieval) gets
+  none of the real streaming — each domain still generates its own full
+  draft answer, and the merged result arrives as one piece, the same
+  total latency as before. A deliberate scope decision: real streaming
+  is worth the complexity for the common, single-domain case, not for
+  every case.
+- Caught and fixed a real bug of my own mid-build, before any review:
+  `MultiPrepared` (the new type carrying a multi-domain question's
+  per-domain drafts through to the streaming route) only carried the
+  *answerable* domains at first, but the method that merges them
+  (`synthesize_and_finalize`) also needs the full *succeeded* list, to
+  report a block reason when nothing came back answerable. Fixed before
+  it shipped, with a regression test added specifically for the case
+  that would have broken.
+- A `/code-review` pass after the initial build found six real,
+  confirmed issues, all fixed the same session: the audit-log writes
+  inside the streaming response had no error handling at all (unlike
+  the turn-save call right next to them) — a transient DB failure there
+  would have silently truncated the stream mid-response with no error
+  or `done` event ever reaching the client; the streaming endpoint's
+  `duration_ms` measured a different span of work than `/query`'s own
+  definition of the same field (it included conversation resolution and
+  condensing time, `/query`'s doesn't), which would have skewed the
+  Analytics page's average-response-time metric for every streamed
+  query specifically — fixed with two separate timers; the SSE event
+  payloads were raw dicts instead of Pydantic models, this project's
+  own standing rule; the core streaming generator function had no
+  docstring or return type; a `FederatedResult.duration_ms` field was
+  silently left unset on the streaming multi-domain path, breaking
+  another method's own documented contract; and `postQuery` plus its
+  Next.js proxy route had gone fully dead once `query-chat.tsx` switched
+  to the new streaming call — both deleted rather than left unused.
+- The `/code-review` run itself had to be resumed three separate times
+  this session — twice from the machine going to sleep mid-response,
+  once from a stalled/no-progress watchdog timeout — none of which were
+  problems with the review itself; each resume picked back up cleanly
+  with no lost findings, since nothing had actually been produced yet
+  at the point each interruption happened.
+- One new ADR: [`ADR-043`](adr/ADR-043-streamed-answer-generation.md).
+- Tests: 14 new backend (`stream_answer`'s empty-choices guard and
+  open-circuit failure; `stream_checked_answer`'s full event matrix —
+  success, an immediately-retracting flagged sentence, moderation
+  unavailable, generation failing mid-stream, injection flagging after
+  the answer was already shown, injection unavailable, a trailing
+  sentence with no closing punctuation; `prepare_for_generation`'s
+  single- and multi-domain branches; the `MultiPrepared` regression
+  test). Backend suite: 94 → 108 passing. 9 new frontend (live-chunk
+  rendering and retract behavior in `query-chat.tsx`; a new
+  `lib/api.test.ts` testing `streamQuery`'s SSE parsing directly — a
+  frame split across two network reads, multiple frames in one read, a
+  multi-byte UTF-8 character split mid-character across a read
+  boundary, and the 401/error-body handling). Frontend suite: 17 → 26
+  passing. No dedicated route-level tests for `/query/stream` itself —
+  consistent with this project never having them for `/query` either;
+  routing/wiring is verified live instead.
+- Verified live, twice: once after the initial build (a real streamed
+  question through the browser, confirmed via network inspection that
+  the request to `/api/query/stream` stayed genuinely pending rather
+  than resolving instantly; and, unplanned but useful, a real block via
+  the injection guardrail — a test document already in the corpus
+  tripped by an unrelated follow-up question, confirming both the
+  successful and the blocked answer saved correctly through the new
+  path), and again after the `/code-review` fixes, confirming the
+  corrected `duration_ms` and the new Pydantic SSE events still produced
+  a correct, working stream end to end.
+
+### What I struggled with
+- No corrections needed on any of the three architectural decisions —
+  all three matched what you'd already confirmed by the time I started
+  building. The one thing I caught and fixed myself, before you or a
+  review ever saw it, was the `MultiPrepared`/`synthesize_and_finalize`
+  shape mismatch above.
+- The `/code-review` agent itself was genuinely fragile this session —
+  three separate interruptions from the environment (sleep, a stalled
+  stream), none from the review's own logic. Resuming it by name each
+  time, rather than restarting from scratch, kept it from losing
+  progress or re-running work already done.
+
+### Concepts to revisit
+- Why moderation and injection detection need different timings once an
+  answer streams — one can judge a sentence in isolation, the other
+  needs the complete text — and why that means injection can only
+  retract, never prevent. Covered in the new Feature 30 section of
+  `INTERVIEW_PREP.md`.
+- Time-to-first-token versus total latency: streaming doesn't make the
+  model faster, it changes how long the user waits to see anything.
+- How shortening a compiled LangGraph graph (rather than building a
+  parallel pipeline, or threading a flag through shared state) created
+  a seam two different callers could share with zero duplicated control
+  flow — and why "the full test suite passed unchanged" was the actual
+  verification for that, not just code review by eye.
+
+### What's next
+- With item 19 closed, every item in the original 19-item build order
+  is now built. Everything remaining is outside that original numbering:
+  multi-tenancy (the unfinished half of item 14), APIM's remaining
+  gaps, the missing migration tool, the PII review workflow, Postgres'
+  still-open cost fix, last session's federated-retrieval
+  failure-isolation gap, domain vocabulary drift, and prior
+  test-coverage gaps named across sessions.
+- The multi-domain streaming fallback (one merged answer, no real
+  per-domain interleaving) is a named, deliberate scope cut, not a
+  limitation discovered later — worth remembering as exactly that if it
+  ever comes up as a "why doesn't this stream too" question.
+
+**Estimated completion: ~84% of the total project, by weighted
+effort** — up from 79%. Every item in the original 19-item build order
+is now built; everything left is hardening, refinement, and scope that
+was always understood to sit outside that original numbering. Rough
+remaining effort: ~15 hours (down from ~20) — multi-tenancy, APIM's
+remaining gaps, the missing migration tool, the PII review workflow,
+Postgres' still-open cost fix, and the standing reliability and
+test-coverage gaps named across prior sessions. At 3–4 hours/day,
+that's roughly 4–5 working days left, assuming no further scope
+changes.

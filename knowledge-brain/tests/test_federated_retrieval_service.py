@@ -3,7 +3,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.core.circuit_breaker import CircuitOpenError
-from app.services.federated_retrieval_service import FederatedRetrievalService
+from app.services.federated_retrieval_service import (
+    FederatedRetrievalService,
+    MultiPrepared,
+    SinglePrepared,
+)
 from app.services.retrieval_service import BLOCKED_MESSAGE, RetrievalUnavailableError
 
 
@@ -226,3 +230,89 @@ async def test_blocks_the_synthesized_answer_when_both_safety_checks_are_down():
 
     assert result.blocked is True
     assert result.block_reason == "guardrails_unavailable"
+
+
+async def test_prepare_for_generation_single_domain_delegates_to_retrieval_services_own_seam():
+    """The streaming endpoint's single-domain path reuses RetrievalService's own
+    _prepare_for_generation seam directly — no generation should have happened yet.
+    """
+    service = _service(["HR"])
+    fake_state = _state("unused — SinglePrepared just carries the state through unchanged")
+    service._single._prepare_for_generation = AsyncMock(return_value=fake_state)
+
+    with patch(
+        "app.services.federated_retrieval_service.classify_domains",
+        new=AsyncMock(return_value=["HR"]),
+    ):
+        prepared = await service.prepare_for_generation("What's the leave policy?", "user-1")
+
+    assert isinstance(prepared, SinglePrepared)
+    assert prepared.state is fake_state
+    service._single._prepare_for_generation.assert_awaited_once_with(
+        "What's the leave policy?", "user-1", "HR"
+    )
+
+
+async def test_prepare_for_generation_multi_domain_runs_every_domains_full_pass():
+    """Unlike the single-domain seam, a multi-domain question has no shorter seam to stop
+    at — each domain's own draft answer must already exist for synthesis to merge later.
+    """
+    service = _service(["HR", "Finance"])
+
+    async def fake_run_query(question, user_id, domain=None):
+        return _state(f"{domain}'s draft answer")
+
+    service._single.run_query = AsyncMock(side_effect=fake_run_query)
+
+    with patch(
+        "app.services.federated_retrieval_service.classify_domains",
+        new=AsyncMock(return_value=["HR", "Finance"]),
+    ):
+        prepared = await service.prepare_for_generation("a cross-domain question", "user-1")
+
+    assert isinstance(prepared, MultiPrepared)
+    assert len(prepared.succeeded) == 2
+    assert len(prepared.answerable) == 2
+    assert prepared.partial is False
+    assert sorted(prepared.domains) == ["Finance", "HR"]
+
+
+async def test_prepare_for_generation_raises_when_every_domain_fails():
+    service = _service(["HR", "Finance"])
+    service._single.run_query = AsyncMock(side_effect=RetrievalUnavailableError("down"))
+
+    with (
+        patch(
+            "app.services.federated_retrieval_service.classify_domains",
+            new=AsyncMock(return_value=["HR", "Finance"]),
+        ),
+        pytest.raises(RetrievalUnavailableError),
+    ):
+        await service.prepare_for_generation("a cross-domain question", "user-1")
+
+
+async def test_synthesize_and_finalize_reports_the_block_reason_from_a_multi_prepared_result():
+    """Regression test: MultiPrepared must carry `succeeded`, not just `answerable` —
+    synthesize_and_finalize reads succeeded[0]'s block reason when nothing is answerable,
+    which the streaming endpoint's multi-domain fallback calls directly (ADR-043).
+    """
+    service = _service(["HR", "Finance"])
+
+    async def fake_run_query(question, user_id, domain=None):
+        return _state(BLOCKED_MESSAGE, blocked=True, block_reason="jailbreak")
+
+    service._single.run_query = AsyncMock(side_effect=fake_run_query)
+
+    with patch(
+        "app.services.federated_retrieval_service.classify_domains",
+        new=AsyncMock(return_value=["HR", "Finance"]),
+    ):
+        prepared = await service.prepare_for_generation("a bad question", "user-1")
+
+    assert isinstance(prepared, MultiPrepared)
+    result = await service.synthesize_and_finalize(
+        "a bad question", prepared.succeeded, prepared.answerable, prepared.partial, prepared.domains
+    )
+
+    assert result.blocked is True
+    assert result.block_reason == "jailbreak"

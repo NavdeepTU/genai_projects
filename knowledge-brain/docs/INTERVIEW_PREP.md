@@ -3253,6 +3253,117 @@ feature is bulletproof.
 
 ---
 
+## Feature 30: Streamed Answer Generation
+
+**What does this feature do, in one sentence?**
+A single-domain question's answer now streams to the browser sentence
+by sentence over Server-Sent Events as it's generated, instead of the
+browser waiting for the complete answer before seeing anything at all.
+
+```mermaid
+flowchart TD
+    REQ["POST /query/stream"] --> PREP["Same as /query: resolve conversation,<br/>condense, input guardrail, retrieve,<br/>rerank, domain classification"]
+    PREP --> DOMAINS{"How many domains<br/>does this need?"}
+    DOMAINS -->|"0 or 1"| GEN["stream_answer: OpenAI stream,<br/>buffered into sentences"]
+    GEN --> MOD{"Moderation check<br/>this sentence?"}
+    MOD -->|flagged or unavailable| RETRACT["retract event —<br/>erase what was shown"]
+    MOD -->|clean| CHUNK["chunk event —<br/>sentence shown live"]
+    CHUNK --> MORE{"More sentences?"}
+    MORE -->|yes| GEN
+    MORE -->|no| INJECT{"Injection check<br/>on complete answer"}
+    INJECT -->|flagged or unavailable| RETRACT
+    INJECT -->|clean| DONE
+    DOMAINS -->|"2+"| MULTI["Each domain generates fully,<br/>synthesis merges the drafts"]
+    MULTI --> DONE["done event —<br/>final answer, sources, conversation id"]
+    RETRACT --> DONE
+```
+
+**Why SSE instead of WebSocket, given the multi-agent retrieval path
+(build item 17) already exists?**
+An answer only ever flows one direction — server to browser. Nothing
+about this feature needed the browser to send anything back mid-stream,
+which is the one thing WebSocket buys over SSE that this design would
+never use. SSE also passes through Azure API Management with less
+friction than a WebSocket upgrade, matching the build spec's own
+reasoning. The multi-agent path doesn't change this calculus at all —
+it decides *what* the answer is before generation ever starts; how that
+finished answer gets delivered afterward is a separate concern.
+
+**The guardrail check normally runs on the complete generated answer.
+How does that still work once the answer is streaming out token by
+token?**
+It splits into two checks with two different timings. Moderation — is
+this text unsafe — can judge one sentence in isolation, so it runs
+per-sentence as each one is produced, and a flagged sentence is never
+shown at all. The injection judge can't do that: it needs to see the
+*complete* answer to judge whether something smuggled into a retrieved
+document hijacked the response, which by definition doesn't exist until
+generation finishes. So it runs once, after every sentence has already
+been sent, and if it flags the answer, the client is told to erase what
+it already showed (a `retract` event) rather than the check preventing
+the exposure in the first place. That's a real, named trade-off, not
+something silently swept under "the guardrail still runs."
+
+**What does streaming actually improve, given the model takes the same
+total time to finish generating either way?**
+Time-to-first-token, not total latency. The user isn't waiting for the
+model to finish faster — it doesn't — they're waiting less time to see
+that *anything* is happening at all. A five-second answer that used to
+show a blank loading skeleton for all five seconds now shows its first
+sentence in a fraction of that time, even though the last sentence still
+arrives at the same five-second mark either way.
+
+**Why build a whole new `/query/stream` endpoint instead of adding a
+`stream: bool` flag to the existing `/query` route?**
+Because nothing that calls `/query` today would benefit from streaming.
+Before deciding this, I checked what the actual installed `mcp` package
+supports rather than assuming — it has progress notifications, not
+content streaming, so an MCP tool call gets nothing from a streaming
+response shape. The evaluation harness needs one complete answer to
+score, not a sequence of partial ones. A flag on the existing route
+would have forced every caller to reason about a response shape only
+the browser UI actually needs.
+
+**The retrieval pipeline used to be one blocking LangGraph call,
+generation included. How did you add a streaming "seam" without
+duplicating that pipeline's own control flow — the retry loop, the
+domain-routing logic?**
+By shortening the compiled graph itself, not by building a second
+pipeline next to it. The graph used to run all the way through
+generation and the output guardrail as its own nodes; now it stops one
+step earlier, at `graph_context`, and generation happens afterward as a
+plain method call. Both the ordinary blocking route and the new
+streaming route call that exact same shortened graph — there's no
+second copy of the retry loop or the domain-dispatch logic anywhere to
+drift out of sync. I verified this was truly behavior-preserving, not
+just assumed it: the full 94-test suite that existed before this change
+passed unchanged immediately after the graph was shortened, and again
+after a later refactor built on top of it.
+
+**A `/code-review` pass found real issues after the initial build. What
+were they?**
+Six confirmed issues, all fixed the same session: the audit-log writes
+inside the streaming response had no error handling, unlike the
+adjacent turn-save call right next to them, so a transient database
+failure there would have silently truncated the stream with no error
+ever reaching the client; the streaming endpoint's `duration_ms` metric
+measured a different span of work than the non-streaming endpoint's own
+definition of the same field, which would have quietly skewed any
+dashboard averaging response time across both; the SSE payloads were
+raw dicts instead of Pydantic models; a core function was missing a
+docstring and a return type; a `FederatedResult`'s `duration_ms` field
+was silently left unset on one code path, breaking a contract another
+method had explicitly documented; and a whole function plus its Next.js
+proxy route had gone dead once nothing called them any more, and needed
+deleting rather than shipping unused. None of these were things the
+initial round of tests happened to exercise — the same lesson this
+project keeps relearning: tests that pass are not the same claim as
+tests that would have caught what was actually broken.
+
+*Further reading: [MDN's guide to Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) — the same resource Feature 19's write-up pointed to as "worth reading before this feature's own session," back when streaming was still just a named future gap. This is that session.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

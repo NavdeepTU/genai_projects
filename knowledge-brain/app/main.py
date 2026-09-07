@@ -16,6 +16,7 @@ from app.api.conversations import router as conversations_router
 from app.api.dashboard import router as dashboard_router
 from app.api.documents import router as documents_router
 from app.api.query import router as query_router
+from app.api.query_stream import router as query_stream_router
 from app.core.middleware import (
     correlation_id_middleware,
     gateway_secret_middleware,
@@ -53,5 +54,6 @@ app.include_router(conversations_router)
 app.include_router(dashboard_router)
 app.include_router(documents_router)
 app.include_router(query_router)
+app.include_router(query_stream_router)
 
 app.mount("/mcp", ApiKeyMiddleware(mcp_app))

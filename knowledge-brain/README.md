@@ -222,11 +222,13 @@ and why it was made that way.
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
   too, with a live per-stage progress bar. The Query page is a real
-  chat interface: `/query`'s response now carries `sources` (the
+  chat interface: `/query`'s response carries `sources` (the
   chunks that actually informed the answer, with filenames) and
-  `confidence` alongside the answer text, not just the answer alone —
-  the answer renders all at once, not token-by-token, since real
-  streaming (build-order item 19) doesn't exist yet. The Analytics page
+  `confidence` alongside the answer text, not just the answer alone. A
+  single-domain question now streams for real, sentence by sentence
+  over Server-Sent Events (`POST /query/stream`), with a resumable
+  sidebar of past conversations and context-condensed follow-ups — see
+  `ADR-041`, `ADR-042`, and `ADR-043`. The Analytics page
   adds a real, genuinely new metric — average response time, timed
   once inside `RetrievalService.run_query` so both REST and MCP queries
   count toward it — plus a hand-rolled (no new dependency) 30-day query
@@ -260,7 +262,7 @@ release or reject one — see `ADR-034`). See `CLAUDE.md`'s build order
 for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 94 tests) covers ingestion
+- The automated test suite (`tests/`, 108 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
@@ -271,22 +273,34 @@ for the full plan.
   federated retrieval's own routing logic (single/multi-domain,
   classification-unavailable fallback, a failing domain marked partial,
   every domain failing, every domain's own guardrail blocking, the
-  synthesized answer itself getting blocked), conversation storage
-  (creation, turn storage, the sidebar-ordering timestamp bump,
-  user-scoped listing, the stranger-gets-`None` permission check), and
-  context condensing (the full decision table for whether/how to
-  condense, the seed/append/trim behavior of the recent-turns cache,
-  and — a deliberate exception to this project's usual rule against
-  unit-testing thin external-service wrappers — the Redis cache's
-  fail-open behavior tested directly, since that behavior *is* the
-  point of the module) — it does not yet cover hybrid search, the
-  circuit breaker, the audit log's write path, LangGraph's retry logic,
-  the Neo4j graph feature, MCP, PII detection's own splitting/batching
-  logic, or document-level ACL (`grant_access`/`has_access`). The frontend has its own test
-  suite too (`frontend/`, 15 tests, Vitest + React Testing Library) —
+  synthesized answer itself getting blocked, `prepare_for_generation`'s
+  single/multi-domain split), conversation storage (creation, turn
+  storage, the sidebar-ordering timestamp bump, user-scoped listing,
+  the stranger-gets-`None` permission check), context condensing (the
+  full decision table for whether/how to condense, the seed/append/trim
+  behavior of the recent-turns cache, and — a deliberate exception to
+  this project's usual rule against unit-testing thin external-service
+  wrappers — the Redis cache's fail-open behavior tested directly,
+  since that behavior *is* the point of the module), and streamed
+  answer generation (`stream_answer`'s empty-choices guard,
+  `stream_checked_answer`'s full event matrix: success, an
+  immediately-retracting flagged sentence, moderation unavailable,
+  generation failing mid-stream, injection flagging after the answer
+  was shown, injection unavailable, a trailing sentence with no closing
+  punctuation) — it does not yet cover hybrid search, the circuit
+  breaker, the audit log's write path, LangGraph's retry logic, the
+  Neo4j graph feature, MCP, PII detection's own splitting/batching
+  logic, or document-level ACL (`grant_access`/`has_access`). No
+  dedicated route-level tests exist for `/query/stream` (or `/query`) —
+  consistent with this project's convention of testing the service
+  layer directly and verifying route wiring live instead. The frontend has its own test
+  suite too (`frontend/`, 26 tests, Vitest + React Testing Library) —
   covering the domain-tagging upload field and its document-card
-  badges, the conversation sidebar, and the chat component's resume
-  behavior; run with `npm test` inside `frontend/`.
+  badges, the conversation sidebar, the chat component's resume
+  behavior, live streamed-chunk rendering and retract handling, and a
+  dedicated `streamQuery` SSE-parsing test (a frame split across reads,
+  multiple frames in one read, a multi-byte character split
+  mid-character); run with `npm test` inside `frontend/`.
 - The answer guardrails add two real LLM calls to every query, safe
   ones included, and the input guardrail adds two more on top before
   retrieval even starts — a genuine, felt cost, not a false-positive
@@ -313,6 +327,15 @@ for the full plan.
   with no formal guarantee it produces a faithful rewrite rather than a
   subtly wrong one, and nothing today would notice if it did. See
   `ADR-042`.
+- Streaming's injection check can only retract an already-streamed
+  answer, not prevent it from being shown at all — it needs the
+  *complete* answer to judge whether retrieved content hijacked it,
+  which by definition doesn't exist until every sentence has already
+  been sent. This is the one place in the system where unchecked model
+  output can be visible to a user, even briefly. A cross-domain question
+  gets no real token streaming either — each domain still generates a
+  full draft answer first, and the synthesized result arrives as one
+  piece. See `ADR-043`.
 - There's no rate limiting on `/auth/login` — nothing beyond Argon2id's
   own deliberately-slow hashing cost stands between a script and a
   password-guessing attempt. Sessions also have a fixed 7-day lifetime

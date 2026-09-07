@@ -32,3 +32,41 @@ class QueryResponse(BaseModel):
     confidence: float | None
     conversation_id: uuid.UUID
     correlation_id: str
+
+
+class StreamChunkEvent(BaseModel):
+    """One sentence-sized piece of a streamed answer, already checked and safe to show."""
+
+    text: str
+
+
+class StreamTtftEvent(BaseModel):
+    """Time from request start to the first visible content — sent once per stream."""
+
+    ms: float
+
+
+class StreamRetractEvent(BaseModel):
+    """Tells the client to erase whatever it has shown so far — the answer was withdrawn."""
+
+    reason: str
+
+
+class StreamDoneEvent(BaseModel):
+    """The final, authoritative state of a streamed answer — always the last event sent."""
+
+    answer: str
+    blocked: bool
+    block_reason: str | None
+    sources: list[QuerySource]
+    confidence: float | None
+    domains_used: list[str]
+    partial: bool
+    conversation_id: uuid.UUID
+    correlation_id: str
+
+
+class StreamErrorEvent(BaseModel):
+    """An unexpected failure after the stream had already started — e.g. the turn couldn't be saved."""
+
+    detail: str

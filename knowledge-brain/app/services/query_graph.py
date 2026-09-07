@@ -42,6 +42,15 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     nodes can reach its already-hardened search/rerank helpers and its
     request-scoped database session — the graph itself holds no state
     of its own beyond how the steps connect.
+
+    The graph deliberately stops at graph_context, one step short of
+    generating an answer (see ADR-043) — that's the seam streamed
+    answer generation needs: run_query calls this same graph via
+    _prepare_for_generation, then calls _generate_node and
+    _output_guardrail_node itself afterward, exactly reproducing what
+    used to be the graph's own tail, so its own behavior is completely
+    unchanged. The streaming endpoint calls the identical graph, then
+    swaps in a real streaming call instead of that same blocking pair.
     """
     graph = StateGraph(QueryState)
 
@@ -50,8 +59,6 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     graph.add_node("rerank", service._rerank_node)
     graph.add_node("rewrite_query", service._rewrite_node)
     graph.add_node("graph_context", service._graph_context_node)
-    graph.add_node("generate", service._generate_node)
-    graph.add_node("output_guardrail_check", service._output_guardrail_node)
 
     graph.set_entry_point("input_guardrail_check")
     graph.add_conditional_edges(
@@ -63,11 +70,9 @@ def build_query_graph(service: "RetrievalService") -> CompiledStateGraph:
     graph.add_conditional_edges(
         "rerank",
         service._should_retry,
-        {"rewrite": "rewrite_query", "generate": "graph_context"},
+        {"rewrite": "rewrite_query", "proceed": "graph_context"},
     )
     graph.add_edge("rewrite_query", "retrieve")
-    graph.add_edge("graph_context", "generate")
-    graph.add_edge("generate", "output_guardrail_check")
-    graph.add_edge("output_guardrail_check", END)
+    graph.add_edge("graph_context", END)
 
     return graph.compile()

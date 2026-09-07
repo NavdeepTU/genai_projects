@@ -54,14 +54,20 @@ class RetrievalService:
         self.graph_repository = graph_repository
         self._graph = build_query_graph(self)
 
-    async def run_query(self, question: str, user_id: str, domain: str | None = None) -> QueryState:
-        """Run one question through the query graph and return the full final state.
+    async def _prepare_for_generation(
+        self, question: str, user_id: str, domain: str | None = None
+    ) -> QueryState:
+        """Run the graph up through graph context — everything generation needs,
+        stopping one step short of actually generating an answer (see ADR-043).
 
-        domain optionally restricts retrieval to documents tagged with that
-        one domain — used by FederatedRetrievalService to run one domain-
-        scoped pass per relevant domain. Left as None, this is the exact
-        same unrestricted single-domain pipeline that existed before that
-        feature — the common case pays nothing extra.
+        This is the seam streamed answer generation needs: the graph itself
+        has no idea whether its caller wants a blocking answer or a streamed
+        one, it just gathers what generation will need. If the input
+        guardrail blocked the question, the graph's own conditional routing
+        sends it straight to its end, so the state comes back already
+        blocked, with generation never having been reached — exactly as
+        before this method existed, just without generation being part of
+        the same graph invocation.
         """
         initial_state: QueryState = {
             "original_question": question,
@@ -79,21 +85,39 @@ class RetrievalService:
             "blocked": False,
             "block_reason": None,
         }
-        start = time.monotonic()
         # metadata here tags the *entire* trace for this query — every
         # node inside it, and every OpenAI/Voyage call any node makes —
         # with who asked and which request this was, so a LangSmith trace
         # can be filtered by user or cross-referenced back to our own
         # logs and audit entries via correlation_id.
-        final_state = await self._graph.ainvoke(
+        return await self._graph.ainvoke(
             initial_state,
             config={
                 "metadata": {"user_id": user_id, "correlation_id": get_correlation_id()},
                 "run_name": "query",
             },
         )
-        final_state["duration_ms"] = (time.monotonic() - start) * 1000
-        return final_state
+
+    async def run_query(self, question: str, user_id: str, domain: str | None = None) -> QueryState:
+        """Run one question through the full pipeline and return the final state.
+
+        domain optionally restricts retrieval to documents tagged with that
+        one domain — used by FederatedRetrievalService to run one domain-
+        scoped pass per relevant domain. Left as None, this is the exact
+        same unrestricted single-domain pipeline that existed before that
+        feature — the common case pays nothing extra. Generation and the
+        output guardrail run as plain method calls after the graph
+        returns, not as graph nodes themselves (see ADR-043) — behaviorally
+        identical to when they were, since a blocked question already
+        skipped them via the graph's own routing either way.
+        """
+        start = time.monotonic()
+        state = await self._prepare_for_generation(question, user_id, domain)
+        if not state["blocked"]:
+            state.update(await self._generate_node(state))
+            state.update(await self._output_guardrail_node(state))
+        state["duration_ms"] = (time.monotonic() - start) * 1000
+        return state
 
     async def build_sources_and_confidence(
         self, state: QueryState
@@ -217,7 +241,7 @@ class RetrievalService:
         can_retry = state["retry_count"] < MAX_RETRIES
         if weak_results and can_retry and not state["reranker_unavailable"]:
             return "rewrite"
-        return "generate"
+        return "proceed"
 
     async def _rewrite_node(self, state: QueryState) -> dict:
         """Graph node: rephrase the question and count this attempt."""
@@ -270,13 +294,26 @@ class RetrievalService:
             return [], True
 
     async def _generate_node(self, state: QueryState) -> dict:
-        """Graph node: generate the final answer from the original question."""
+        """Generate the final answer from the original question.
+
+        No longer a graph node itself (see ADR-043) — called directly by
+        run_query, and bypassed entirely by the streaming endpoint, which
+        calls a streaming generation function instead once the graph
+        returns.
+        """
         context_chunks = [chunk.text for chunk in state["reranked_chunks"]] + state["graph_context"]
         answer = await generate_answer(state["original_question"], context_chunks)
         return {"answer": answer}
 
     async def _output_guardrail_node(self, state: QueryState) -> dict:
-        """Graph node: block the answer if a safety check flags it.
+        """Block the answer if a safety check flags it.
+
+        No longer a graph node itself (see ADR-043), called directly by
+        run_query right after generation. The streaming endpoint runs its
+        own equivalent instead — per-sentence moderation as chunks are
+        produced, plus this exact injection check once the full answer is
+        known — since neither check can run against text that doesn't
+        exist yet.
 
         Two independent checks run concurrently — a moderation classifier
         (unsafe content) and an LLM judge (prompt injection smuggled in

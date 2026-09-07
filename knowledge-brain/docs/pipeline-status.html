@@ -323,7 +323,7 @@
 
   <header class="top">
     <div>
-      <p class="eyebrow">Knowledge Brain · 16 of 19 build-order items complete · 2 partial</p>
+      <p class="eyebrow">Knowledge Brain · 19 of 19 build-order items complete</p>
       <h1>Build status</h1>
     </div>
     <div class="legend">
@@ -1046,7 +1046,7 @@
     <p class="caveat"><strong>All five originally planned frontend pages are now built.</strong> No pages remain unbuilt for build-order item 13 — remaining frontend work going forward is deepening existing pages (e.g. a PII review queue, revoking document access), not new top-level pages.</p>
     <p class="caveat"><strong>Two real bugs found and fixed live, not by review:</strong> Base UI (Shadcn's newer foundation) uses a <code>render</code> prop for composition, not Radix's <code>asChild</code> — the latter was silently ignored, producing real nested <code>&lt;button&gt;</code> elements and a hydration error. Separately, this page was silently eligible for build-time static prerendering (no <code>cookies()</code>/<code>headers()</code>/<code>searchParams</code> used), which would have frozen it as a stale snapshot in production — invisible in dev, where pages always render fresh. Fixed with <code>dynamic = "force-dynamic"</code>. See <a href="adr/ADR-028-frontend-stack-and-base-ui.md">ADR-028</a> and <a href="adr/ADR-029-document-library-page.md">ADR-029</a>.</p>
     <p class="caveat"><strong>Uploads no longer block the caller:</strong> extending ADR-001's own stated next step, the REST upload endpoint now returns immediately and the pipeline runs as a FastAPI <code>BackgroundTasks</code> job, with a new <code>processing_stage</code> field (kept fully separate from the load-bearing <code>status</code> field) polled by the frontend every 2 seconds. Splitting the ingestion service into two methods to make this possible broke MCP's <code>upload_document</code> tool, which still called the deleted method — caught and fixed the same session, before it shipped. See <a href="adr/ADR-030-background-upload-processing.md">ADR-030</a>.</p>
-    <p class="caveat"><strong>The Query page's answer renders all at once, not token-by-token, and has no persisted history:</strong> both are named, deliberate scope cuts, not gaps found later — real streaming needs item 19's SSE endpoint, and a real sidebar needs item 18's conversation storage and context-condensing, neither built yet. What did ship: <code>/query</code>'s response now carries <code>sources</code> (the actual chunks used, with filenames) and <code>confidence</code> (<code>null</code>, not <code>0.0</code>, when the reranker was unavailable) — both pulled from data the pipeline already computed, nothing newly calculated. See <a href="adr/ADR-031-query-page.md">ADR-031</a>.</p>
+    <p class="caveat"><strong>At this point, the Query page's answer rendered all at once, not token-by-token, and had no persisted history:</strong> both were named, deliberate scope cuts, not gaps found later — real streaming needed item 19's SSE endpoint, and a real sidebar needed item 18's conversation storage and context-condensing, neither built yet. Both are closed now: the sidebar and conversation storage by Feature 22 below, real streaming by Feature 24. What did ship here: <code>/query</code>'s response now carries <code>sources</code> (the actual chunks used, with filenames) and <code>confidence</code> (<code>null</code>, not <code>0.0</code>, when the reranker was unavailable) — both pulled from data the pipeline already computed, nothing newly calculated. See <a href="adr/ADR-031-query-page.md">ADR-031</a>.</p>
     <p class="caveat"><strong>Two of the Dashboard's four widgets are honest "not tracked yet" placeholders, not fabricated numbers:</strong> retrieval accuracy trend and cost per query have no real data behind them today — accuracy has no ground-truth signal for a live question, cost needs token-level instrumentation that's build-order item 15's job. A live-confidence-as-proxy option was considered and rejected for accuracy specifically, since confidence and correctness are different claims. Also this session: a scaffolding violation from the Query page session (business logic sitting in the route handler, not a service) was found while writing tests and fixed — moved into <code>RetrievalService.build_sources_and_confidence</code>, verified unchanged live behavior before/after. Test suite grew 12 → 19 passing. See <a href="adr/ADR-032-dashboard-page.md">ADR-032</a>.</p>
     <p class="caveat"><strong>Average response time is a genuinely new metric — nothing timed a query before this session:</strong> <code>RetrievalService.run_query</code> now wraps the whole graph invocation with <code>time.monotonic()</code>, captured once so both REST and MCP get an honest average, not duplicated per caller — which meant deleting the now-dead <code>answer_question</code> method MCP used to call instead. A <code>/code-review</code> pass after the initial build caught a real correctness bug: the volume chart spaced points by array index while the backend only emitted a point for days with an actual query, silently compressing real gaps in usage into apparent consecutive activity — fixed by zero-filling every day in the 30-day window. The same pass also found the <code>query_made</code> audit write hand-duplicated between REST and MCP (already causing one real drift this session), consolidated into <code>AuditRepository.log_query_made</code>. Test suite grew 19 → 25 passing. See <a href="adr/ADR-033-analytics-page.md">ADR-033</a>.</p>
     <p class="caveat"><strong>The Admin page is the first page in this project that needed its own access check:</strong> every earlier page only ever exposed the caller's own data; this one reads across every user by design. A new <code>require_admin</code> dependency, attached once at the router level, originally checked the caller against a small allowlist (<code>ADMIN_USER_IDS</code>) — not real RBAC, the same proportionate trade-off already made for MCP's shared secret. Upgraded to check a real <code>User.is_admin</code> column once real accounts existed — see Feature 17. Two new repository reads (<code>get_all_recent_entries</code>, <code>list_all_permissions</code>) are the first in this codebase to deliberately span every user; neither does its own authorization — that's <code>require_admin</code>'s job. Tenant management stayed an honest placeholder — no tenant concept exists anywhere in this system yet. A related gap surfaced in conversation, deliberately not built: PII-flagged documents have no reviewer workflow, and no content persisted to review even if one existed — tracked as its own future item. Test suite grew 25 → 30 passing. See <a href="adr/ADR-034-admin-page.md">ADR-034</a>.</p>
@@ -1359,11 +1359,43 @@
     <p class="caveat"><strong>Verified live end to end:</strong> a real 5-question conversation, each follow-up condensed correctly using real prior turns — both before and after the review's fixes, confirming the refactor changed nothing about observed behavior. Backend suite: 84 → 94 passing. See <a href="adr/ADR-042-context-condensing-and-redis.md">ADR-042</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 24 — Streamed answer generation <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">build-order item 19, the last of the original build order · Enterprise Requirement 11</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Graph shortened to graph_context</span>
+        <span class="path mono">generation is now a plain method, not a graph node — same seam both callers share</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">app/services/streaming.py</span>
+        <span class="path mono">per-sentence moderation · injection check only after full answer, can only retract</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">POST /query/stream</span>
+        <span class="path mono">SSE, Pydantic events · /query untouched, still used by MCP &amp; eval harness</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real security trade-off, named not hidden:</strong> the injection judge needs the complete answer to judge whether retrieved document text hijacked it, so it can only run once every sentence has already streamed — a flagged answer is retracted (the client erases what it showed), not prevented from ever appearing. Multi-domain questions get none of the streaming benefit at all: each domain still fully generates its own draft, and the merged answer arrives as one piece.</p>
+    <p class="caveat"><strong>A <code>/code-review</code> pass found six real, confirmed issues after the initial build, all fixed the same session:</strong> unguarded audit-log calls inside the SSE generator that could silently truncate the stream on a DB failure; <code>duration_ms</code> measuring a different span of work than <code>/query</code>'s own definition, which would have skewed the Analytics page's average-response-time metric; raw dicts instead of Pydantic models for the SSE payloads; a missing docstring and return type on the core generator function; a <code>FederatedResult.duration_ms</code> silently left unset, breaking another method's own stated contract; and a fully dead non-streaming code path (<code>postQuery</code>, its proxy route) left behind once nothing called it.</p>
+    <p class="caveat"><strong>Verified live, twice:</strong> a real streamed answer through the browser (network inspection confirmed the request stayed genuinely pending, not resolved instantly), and — unplanned but useful — a real block via the injection guardrail against a test document already in the corpus, confirming both the successful and the blocked answer saved correctly through the streaming path. Verified again after the <code>/code-review</code> fixes. Backend suite: 94 → 108 passing · frontend suite: 17 → 26 passing. See <a href="adr/ADR-043-streamed-answer-generation.md">ADR-043</a>.</p>
+  </section>
+
   <footer class="roadmap">
-    <h2>Not started · rest of the build order</h2>
-    <ul class="roadmap-list">
-      <li><span class="n mono">19</span>Streamed answer generation</li>
-    </ul>
+    <h2>Build order status</h2>
+    <p class="caveat">Every item in the original build order (1 through 19) is now built. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>
   </footer>
 
 </div>

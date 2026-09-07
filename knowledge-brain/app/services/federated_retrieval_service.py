@@ -43,6 +43,33 @@ class _DomainRun:
     sources: list[QuerySource]
 
 
+@dataclass
+class SinglePrepared:
+    """Everything a single-domain (or domain-less) question needs, minus the answer itself."""
+
+    state: QueryState
+
+
+@dataclass
+class MultiPrepared:
+    """Every domain's own completed draft pass, ready to be merged — minus that merge itself.
+
+    Keeps both `succeeded` (every domain that came back, blocked or not)
+    and `answerable` (the subset actually safe to synthesize from) because
+    synthesize_and_finalize needs both: `succeeded` to report a block
+    reason when nothing is answerable, `answerable` to build the merged
+    answer when something is.
+    """
+
+    succeeded: list[_DomainRun]
+    answerable: list[_DomainRun]
+    partial: bool
+    domains: list[str]
+
+
+Prepared = SinglePrepared | MultiPrepared
+
+
 class FederatedRetrievalService:
     """The one entry point every caller uses to answer a question.
 
@@ -74,6 +101,54 @@ class FederatedRetrievalService:
         if len(domains) <= 1:
             return await self._run_single_domain(question, user_id, domains, start)
         return await self._run_federated(question, user_id, domains, start)
+
+    async def prepare_for_generation(self, question: str, user_id: str) -> Prepared:
+        """Run everything up to, but not including, producing the final answer text (ADR-043).
+
+        For a single (or no) domain, that's retrieval through graph
+        context — RetrievalService's own seam, reused directly. For
+        multiple domains, each one still runs its *entire* pass,
+        including that domain's own full generation — a cross-domain
+        answer's real final text comes from synthesizing those domain
+        drafts, not from one more generation call of the same shape a
+        single-domain question uses, so this is genuinely as far as
+        preparation can go before that merge itself. The streaming
+        endpoint uses this to decide whether a real, token-by-token
+        stream is possible (single domain) or whether it has to fall
+        back to synthesizing normally and sending the merged answer as
+        one piece (multiple domains) — a deliberate, named scope
+        decision, not a limitation this method itself has.
+        """
+        available_domains = await self.repository.list_domains_for_user(user_id)
+        domains = await self._classify_domains_safely(question, available_domains)
+
+        if len(domains) <= 1:
+            domain = domains[0] if domains else None
+            state = await self._single._prepare_for_generation(question, user_id, domain)
+            return SinglePrepared(state=state)
+
+        runs = await asyncio.gather(
+            *(self._run_one_domain_safely(question, user_id, domain) for domain in domains)
+        )
+        succeeded = [run for run in runs if run is not None]
+        if not succeeded:
+            raise RetrievalUnavailableError("Every domain's retrieval pass failed")
+
+        answerable = [run for run in succeeded if not run.state["blocked"]]
+        partial = len(succeeded) < len(domains)
+        return MultiPrepared(succeeded=succeeded, answerable=answerable, partial=partial, domains=domains)
+
+    async def build_sources_and_confidence(
+        self, state: QueryState
+    ) -> tuple[list[QuerySource], float | None]:
+        """Expose RetrievalService's own source-building for a SinglePrepared state.
+
+        The streaming endpoint only has a QueryState, not a full
+        FederatedResult, to turn into a QueryResponse-shaped payload —
+        this is the public seam it uses instead of reaching into
+        FederatedRetrievalService's private `_single` attribute (ADR-043).
+        """
+        return await self._single.build_sources_and_confidence(state)
 
     async def _classify_domains_safely(self, question: str, available_domains: list[str]) -> list[str]:
         """Classify domains; on failure or an empty domain set, fall back to unrestricted search.
@@ -122,6 +197,24 @@ class FederatedRetrievalService:
         answerable = [run for run in succeeded if not run.state["blocked"]]
         partial = len(succeeded) < len(domains)
 
+        result = await self.synthesize_and_finalize(question, succeeded, answerable, partial, domains)
+        result.duration_ms = (time.monotonic() - start) * 1000
+        return result
+
+    async def synthesize_and_finalize(
+        self,
+        question: str,
+        succeeded: list[_DomainRun],
+        answerable: list[_DomainRun],
+        partial: bool,
+        domains: list[str],
+    ) -> FederatedResult:
+        """Merge already-generated per-domain drafts into one answer and run one more
+        guardrail pass on the merged text. duration_ms is left at 0 — set by the caller,
+        which knows when its own clock actually started (ADR-043: the non-streaming path
+        and the streaming endpoint's multi-domain fallback both call this, from different
+        starting points).
+        """
         if not answerable:
             # Every domain that came back got blocked by its own guardrail —
             # nothing safe exists to synthesize, so the merged answer is
@@ -130,7 +223,7 @@ class FederatedRetrievalService:
                 answer=BLOCKED_MESSAGE,
                 sources=[],
                 confidence=None,
-                duration_ms=(time.monotonic() - start) * 1000,
+                duration_ms=0.0,
                 blocked=True,
                 block_reason=succeeded[0].state["block_reason"],
                 domains_used=domains,
@@ -159,7 +252,6 @@ class FederatedRetrievalService:
             )
         )
 
-        duration_ms = (time.monotonic() - start) * 1000
         sources = [source for run in answerable for source in run.sources]
 
         if not moderation_available and not injection_available:
@@ -167,7 +259,7 @@ class FederatedRetrievalService:
                 answer=BLOCKED_MESSAGE,
                 sources=[],
                 confidence=None,
-                duration_ms=duration_ms,
+                duration_ms=0.0,
                 blocked=True,
                 block_reason="guardrails_unavailable",
                 domains_used=domains,
@@ -180,7 +272,7 @@ class FederatedRetrievalService:
                 answer=BLOCKED_MESSAGE,
                 sources=[],
                 confidence=None,
-                duration_ms=duration_ms,
+                duration_ms=0.0,
                 blocked=True,
                 block_reason=reason,
                 domains_used=domains,
@@ -195,7 +287,7 @@ class FederatedRetrievalService:
             # LLM — reporting one of the per-domain scores would imply a
             # precision that isn't real.
             confidence=None,
-            duration_ms=duration_ms,
+            duration_ms=0.0,
             blocked=False,
             block_reason=None,
             domains_used=[run.domain for run in answerable],

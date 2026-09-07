@@ -4,7 +4,7 @@
 // lib/auth.ts, which imports next/headers, and next/headers can't be
 // reached from a Client Component's bundle even indirectly. Keeping
 // server-only code out of this file is what keeps query/page.tsx (a
-// Client Component that imports postQuery from here) buildable at all.
+// Client Component that imports streamQuery from here) buildable at all.
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed" | "pending_review";
 
@@ -51,14 +51,6 @@ export type QuerySource = {
   document_id: string;
   filename: string;
   chunk_text: string;
-};
-
-export type QueryResponse = {
-  answer: string;
-  sources: QuerySource[];
-  confidence: number | null;
-  conversation_id: string;
-  correlation_id: string;
 };
 
 export type ConversationListItem = {
@@ -139,11 +131,10 @@ export type AdminResponse = {
   correlation_id: string;
 };
 
-// Thrown by postQuery on a 401 instead of the generic Error below, so the
-// calling Client Component can tell "you got logged out" apart from a
-// real query failure and route you to /login with next/navigation's
-// useRouter — this function itself isn't a component, so it can't call
-// that hook directly.
+// Thrown by streamQuery on a 401, so the calling Client Component can
+// tell "you got logged out" apart from a real query failure and route
+// you to /login with next/navigation's useRouter — this function isn't
+// a component, so it can't call that hook directly.
 export class UnauthorizedError extends Error {
   constructor() {
     super("Not logged in");
@@ -151,14 +142,51 @@ export class UnauthorizedError extends Error {
   }
 }
 
-// Called from the browser (a Client Component's submit handler), so this
-// hits the same-origin Next.js proxy at /api/query, never the backend
-// directly — the proxy is what attaches the session cookie and the
-// gateway secret server-side. conversationId is omitted to start a new
-// conversation; the response's own conversation_id is what the caller
-// should send on every question after that.
-export async function postQuery(question: string, conversationId: string | null): Promise<QueryResponse> {
-  const response = await fetch("/api/query", {
+// One event from the backend's Server-Sent Events stream (ADR-043),
+// already parsed out of its `event: ...\ndata: ...\n\n` wire format.
+// `chunk`/`ttft`/`retract` only ever appear for a real, single-domain
+// stream; a multi-domain question still sends its merged answer as one
+// `chunk`, so the caller never needs to know which path produced it.
+export type StreamEvent =
+  | { type: "chunk"; text: string }
+  | { type: "ttft"; ms: number }
+  | { type: "retract"; reason: string }
+  | {
+      type: "done";
+      answer: string;
+      blocked: boolean;
+      block_reason: string | null;
+      sources: QuerySource[];
+      confidence: number | null;
+      domains_used: string[];
+      partial: boolean;
+      conversation_id: string;
+      correlation_id: string;
+    }
+  | { type: "error"; detail: string };
+
+function parseSseFrame(frame: string): StreamEvent | null {
+  let eventType = "message";
+  const dataLines: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) eventType = line.slice("event:".length).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+  }
+  if (dataLines.length === 0) return null;
+  return { type: eventType, ...JSON.parse(dataLines.join("\n")) } as StreamEvent;
+}
+
+// Hits the same-origin Next.js proxy at /api/query/stream, never the
+// backend directly — the proxy is what attaches the session cookie and
+// the gateway secret server-side. Native EventSource can't send a POST
+// body, so this reads the response as raw bytes and splits it into SSE
+// frames by hand — the one piece of this feature genuinely new to the
+// frontend (ADR-043).
+export async function* streamQuery(
+  question: string,
+  conversationId: string | null,
+): AsyncGenerator<StreamEvent> {
+  const response = await fetch("/api/query/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, conversation_id: conversationId }),
@@ -168,10 +196,32 @@ export async function postQuery(question: string, conversationId: string | null)
     throw new UnauthorizedError();
   }
 
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data?.detail ?? `Query failed (status ${response.status})`);
+  if (!response.ok || !response.body) {
+    let detail = `Query failed (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
   }
 
-  return data;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const event = parseSseFrame(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      if (event) yield event;
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
 }

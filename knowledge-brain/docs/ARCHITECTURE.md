@@ -676,13 +676,13 @@ when the reranker was unavailable and the pipeline fell back to hybrid
 search's own ordering — reusing the exact distinction
 `_rerank_safely` already drew internally (a real low score must never
 look identical to "no score exists"), just finally surfaced past the
-service boundary. Two things CLAUDE.md's own page spec calls for were
-deliberately not built yet, both named rather than silently skipped:
-the answer renders all at once, not token-by-token, since real
-streaming is build-order item 19 with its own Enterprise Requirement
-that doesn't exist yet; and there's no sidebar of past conversations,
-since that needs real storage and context-condensing, build-order item
-18, also not built. See ADR-031.
+service boundary. Two things CLAUDE.md's own page spec called for were
+deliberately not built yet at this point, both named rather than
+silently skipped: the answer rendered all at once, not token-by-token,
+and there was no sidebar of past conversations. Both gaps have since
+been closed — the sidebar and conversation storage by ADR-041, and real
+token-by-token streaming by ADR-043 — see those ADRs for how each one
+actually works today. See ADR-031 for the page itself.
 
 **What's new before that:** document uploads through the REST
 endpoint no longer block the caller for the pipeline's full duration.
@@ -973,34 +973,45 @@ test`. If it disappeared, nothing about the running app would change —
 only the ability to catch a regression in this behavior without
 manually re-testing it in a browser.
 
-**Query chat (`frontend/components/query-chat.tsx`) and its proxy route
-(`frontend/app/api/query/route.ts`)** — the chat interface itself,
-originally added with ADR-031, extracted into its own component with
-ADR-041 so it could be shared between two routes instead of living
-directly in one page file. A `"use client"` component holding one
-array of turns in React state, seeded from whatever initial turns its
-caller passes in — empty for a new conversation, a real transcript for
-a resumed one (see the Query page/conversation page entries below).
-Submitting a question posts to `POST /api/query`, the same
-same-origin-proxy pattern as the upload routes and for the same
-reason — keeping `BACKEND_GATEWAY_SECRET` out of client-side
-JavaScript for this client-triggered action, now also carrying whichever
-conversation id this component currently holds (or `null`, to start a
-new one). Each turn shows a loading skeleton while waiting, then the
-complete answer at once (not token-by-token — real streaming is item
-19, still not built), a confidence badge, and a card per source chunk
-with its document's filename. The moment a brand-new conversation's
-first answer comes back, this component adopts the id the backend
-handed back, swaps the URL to `/query/{id}` with `router.replace` (no
-full navigation, so the transcript already in state isn't lost), and
-calls `router.refresh()` so the sidebar's server-fetched list picks up
-the new entry. Talks to: `POST /query` on the backend, from the Next.js
-server, never from the browser. This component has no idea context
-condensing (ADR-042) exists — it sends whatever the user actually
-typed, and the backend decides entirely on its own whether to rewrite
-it before answering. If it disappeared, the same question could still
-be asked through `curl` or MCP's `ask_knowledge_base`, just not through
-the UI.
+**Query chat (`frontend/components/query-chat.tsx`) and its streaming
+proxy route (`frontend/app/api/query/stream/route.ts`)** — the chat
+interface itself, originally added with ADR-031, extracted into its own
+component with ADR-041 so it could be shared between two routes instead
+of living directly in one page file. A `"use client"` component holding
+one array of turns in React state, seeded from whatever initial turns
+its caller passes in — empty for a new conversation, a real transcript
+for a resumed one (see the Query page/conversation page entries below).
+Submitting a question calls `streamQuery` (`frontend/lib/api.ts`), which
+posts to the same-origin `POST /api/query/stream` route — the same
+proxy-keeps-the-gateway-secret-server-side reasoning as the upload
+routes, but this proxy pipes the backend's response body through
+untouched (`response.body` forwarded directly, not parsed and
+re-serialized) rather than buffering it into one JSON object, since
+buffering here would silently turn a streamed answer back into a
+blocking one one hop before the browser. `streamQuery` itself reads
+that body as raw bytes via `ReadableStreamDefaultReader` and splits it
+into SSE frames by hand — the native `EventSource` API can't send a
+POST body, so this is the one piece of the streaming feature (ADR-043)
+genuinely new to the frontend. Each turn shows a loading skeleton until
+the first `chunk` event arrives, then renders streamed text live as
+each sentence comes in (with a blinking cursor), replaces it entirely
+with a `retract` event's erasure if a safety check flags something
+already shown, and finalizes on the terminal `done` event with the
+confidence badge and a card per source chunk. The moment a brand-new
+conversation's first answer comes back, this component adopts the id
+the `done` event carries, swaps the URL to `/query/{id}` with
+`router.replace` (no full navigation, so the transcript already in
+state isn't lost), and calls `router.refresh()` so the sidebar's
+server-fetched list picks up the new entry. Talks to: `POST
+/query/stream` on the backend, from the Next.js server, never from the
+browser. This component has no idea context condensing (ADR-042)
+exists — it sends whatever the user actually typed, and the backend
+decides entirely on its own whether to rewrite it before answering. If
+it disappeared, the same question could still be asked through `curl`
+or MCP's `ask_knowledge_base`, just not through the UI. The older,
+non-streaming `postQuery`/`/api/query` pair this component originally
+used is gone — deleted once nothing called it any more, rather than
+kept around as an unused alternate path.
 
 **Query routes and sidebar (`frontend/app/query/layout.tsx`,
 `frontend/app/query/page.tsx`, `frontend/app/query/[conversationId]/page.tsx`,
@@ -1342,21 +1353,32 @@ single-domain conductor for answering one question. `__init__` builds a
 small LangGraph graph once (`self._graph = build_query_graph(self)`);
 the actual step logic lives in methods on this class
 (`_input_guardrail_node`, `_retrieve_node`, `_rerank_node`,
-`_rewrite_node`, `_should_retry`, `_graph_context_node`,
-`_generate_node`, `_output_guardrail_node`), each a graph node, all
-reusing the exact same search/rerank/graph-lookup helpers hardened in
-ADR-012, ADR-013, and ADR-015 — nothing about the existing
+`_rewrite_node`, `_should_retry`, `_graph_context_node`), each a graph
+node, all reusing the exact same search/rerank/graph-lookup helpers
+hardened in ADR-012, ADR-013, and ADR-015 — nothing about the existing
 partial-failure or reranker-fallback behavior changed to add graph
-context, guardrails, or domain filtering on top. `run_query` now takes
-an optional `domain` parameter, threaded into both search helpers, so
-one call can be scoped to a single document domain or left unrestricted
-(ADR-040). Since that ADR, this class is no longer the one entry point
-callers reach directly — `FederatedRetrievalService` is, with this
-class as the building block it calls once (unrestricted) or several
-times concurrently (one call per relevant domain). The one remaining
-direct caller is the evaluation harness (`eval/`), which needs this
-class's raw `QueryState` — the actual reranked chunks and graph context
-— for scoring, detail `FederatedRetrievalService`'s own return shape
+context, guardrails, or domain filtering on top. Since ADR-043, the
+graph itself stops one step short of generating an answer — the
+compiled graph ends at `graph_context`, and `_generate_node` /
+`_output_guardrail_node` are plain methods, no longer graph nodes.
+`_prepare_for_generation` runs the graph alone and returns whatever
+state it reached (blocked or not); `run_query` calls that, then calls
+`_generate_node`/`_output_guardrail_node` directly afterward if the
+question wasn't blocked — behaviorally identical to when generation was
+part of the same graph invocation, verified by the full pre-existing
+test suite passing unchanged both times this was refactored. This is
+the seam the streaming endpoint needs: it calls `_prepare_for_generation`
+the exact same way, then swaps in real token-by-token generation
+instead of that same blocking pair. `run_query` also takes an optional
+`domain` parameter, threaded into both search helpers, so one call can
+be scoped to a single document domain or left unrestricted (ADR-040).
+Since that ADR, this class is no longer the one entry point callers
+reach directly — `FederatedRetrievalService` is, with this class as the
+building block it calls once (unrestricted) or several times
+concurrently (one call per relevant domain). The one remaining direct
+caller is the evaluation harness (`eval/`), which needs this class's
+raw `QueryState` — the actual reranked chunks and graph context — for
+scoring, detail `FederatedRetrievalService`'s own return shape
 deliberately doesn't expose. `answer_question`, the old thin wrapper
 MCP used to call before ADR-033, was deleted once that switch left it
 with no remaining callers — a real, verified deletion, not a stub kept
@@ -1380,7 +1402,12 @@ both guardrails write to) and wires those nodes into a compiled
 LangGraph graph. `input_guardrail_check` is the graph's actual entry
 point, not `retrieve` — a conditional edge routes straight to the
 graph's end on a block, so a bad question never reaches retrieval at
-all. Talks to: nothing directly — it only describes connections between
+all. Since ADR-043, the graph's other end was shortened too:
+`graph_context` now routes straight to the graph's end instead of on to
+a `generate` node — generation happens after the graph returns, as a
+plain method call, so both the blocking (`run_query`) and streaming
+callers can share this exact graph and diverge only for that last step.
+Talks to: nothing directly — it only describes connections between
 methods the retrieval service already owns.
 
 **Query rewriting (`app/services/query_rewriting.py`)** — a single,
@@ -1409,7 +1436,16 @@ OpenAI ones. Talks to: Voyage AI's hosted API.
 **Generation (`app/services/generation.py`)** — sends the question and the
 retrieved chunks to an LLM, with instructions to answer only from that
 text and admit uncertainty rather than guess. This is the piece that
-actually turns "relevant text" into a readable answer.
+actually turns "relevant text" into a readable answer. Since ADR-043, a
+second function, `stream_answer`, does the exact same call with
+`stream=True` and yields text as OpenAI produces it, reusing
+`generate_answer`'s own circuit breaker rather than a separate one —
+it's the same underlying dependency, so a failure should count against
+the same breaker. Only the call that opens the stream is
+breaker-wrapped; once the stream itself is open, a failure mid-iteration
+propagates directly to whichever caller is reading it, which is what
+lets that caller stop cleanly instead of retrying a connection that was
+already flowing.
 
 **Database (Postgres + pgvector, running in Docker)** — stores documents
 and their chunks, including each chunk's meaning-vector, in one place,
@@ -1635,9 +1671,69 @@ helpers directly rather than duplicating that logic. Returns
 block_reason, domains_used, partial) — a deliberately different shape
 from the raw `QueryState` a direct `RetrievalService` caller sees, since
 `confidence` has no honest single value once several domains have been
-merged into prose. Talks to: the repository (for
-`list_domains_for_user`), domain classification, synthesis, and
+merged into prose. Since ADR-043, a second public method,
+`prepare_for_generation`, runs everything up to but not including the
+final answer text: for a single (or no) domain, that's
+`RetrievalService._prepare_for_generation`'s own shortened graph, wrapped
+in a `SinglePrepared`; for multiple domains, each one still runs its
+*entire* pass, including that domain's own full generation, since a
+cross-domain answer's real text comes from synthesizing already-complete
+domain drafts, not one more generation call of the shape a single-domain
+question uses — wrapped in a `MultiPrepared`, which carries both
+`succeeded` (every domain that came back, blocked or not) and
+`answerable` (the subset actually safe to merge), a real bug caught and
+fixed mid-build when `synthesize_and_finalize` turned out to need both.
+The multi-domain merge itself was extracted into a new public method,
+`synthesize_and_finalize`, reused by both the ordinary blocking path
+(`run_query` calls it, then stamps its own `duration_ms` on the result)
+and the streaming endpoint's multi-domain fallback (same call, timed
+from the streaming route's own clock instead). Talks to: the repository
+(for `list_domains_for_user`), domain classification, synthesis, and
 `RetrievalService` itself.
+
+**Streaming (`app/services/streaming.py`)** — added with ADR-043,
+`stream_checked_answer` is the safety layer real token-by-token
+streaming needed that the non-streaming path never had to build: text
+comes back from `stream_answer` as raw deltas, buffered until a
+sentence boundary appears, then moderation-checked one sentence at a
+time before being released as a `StreamChunk`. Unlike the non-streaming
+output guardrail's two checks covering for each other, a sentence's
+moderation check here has no second signal to fall back on, so its own
+unavailability is treated as an immediate block (`StreamRetract`), the
+same "no signal is not the same as clean" rule this project applies
+everywhere else, just with nothing to average it against. The injection
+judge — which needs the *complete* answer to judge whether retrieved
+document text hijacked it — can only run once every sentence has
+already been shown, so a flagged answer can only be retracted, not
+prevented; this is a real, named security trade-off (see ADR-043),
+verified live in this session when a test document already in the
+corpus tripped it for real. Talks to: generation (`stream_answer`),
+moderation, and injection detection.
+
+**Streaming query route (`app/api/query_stream.py`)** — added with
+ADR-043, `POST /query/stream`. Conversation resolution, condensing,
+retrieval, reranking, and federated retrieval all run exactly as they
+do for `/query` and complete before this response is even created;
+`resolve_conversation` and `save_turn_and_refresh_cache`
+(`app/api/query.py`) are shared helpers extracted so both routes save a
+turn identically rather than keeping two copies of that logic in sync
+by hand. Emits Server-Sent Events, each one a Pydantic model
+(`StreamChunkEvent`, `StreamTtftEvent`, `StreamRetractEvent`,
+`StreamDoneEvent`, `StreamErrorEvent` in `app/models/query.py`) rather
+than a raw dict, serialized with `model_dump_json()`. Tracks two
+separate timers: one for time-to-first-token, covering the whole
+request from the moment it arrived; one matching `/query`'s own
+definition of `duration_ms` (the retrieval-through-generation span
+alone), so the two endpoints' audit-log entries mean the same thing and
+an analytics dashboard averaging across both isn't quietly skewed — a
+real bug a `/code-review` pass caught and this session fixed. `/query`
+itself is untouched and remains the one entry point MCP and the
+evaluation harness use; nothing about their use of an answer benefits
+from streaming, confirmed by checking the actual installed `mcp`
+package's real streaming support (progress notifications, not content
+streaming) rather than assuming. Talks to: `FederatedRetrievalService`,
+the streaming service, the audit repository, and the conversation
+repository.
 
 **Evaluation harness (`eval/`)** — a separate, on-demand tool, not part
 of the running app: a fixed set of known-answer test questions
@@ -1912,19 +2008,21 @@ business rule already depends on, while the new field is meaningful
 only for the lifetime of one background run and read by nothing outside
 the progress bar. See ADR-030.
 
-The Query page's answer renders all at once, not token-by-token, and
-carries no conversation history — both a deliberate scope cut, not an
-oversight. CLAUDE.md's own page spec describes both a streaming answer
-and a sidebar of past conversations, but each depends on a real backend
-feature that doesn't exist yet: SSE streaming is item 19, conversation
-storage and context-condensing is item 18, each later in the build
-order than this page and each with its own detailed Enterprise
-Requirement still unbuilt. A client-side typewriter effect (revealing
-an already-complete answer a few characters at a time) was considered
-and rejected specifically because it would look identical to real
-streaming on screen while being architecturally nothing like it — no
-SSE, no real time-to-first-token improvement — and would need tearing
-out rather than extending once item 19 is real. `QueryResponse` was
+At the time this page was first built, its answer rendered all at once,
+not token-by-token, and it carried no conversation history — both a
+deliberate scope cut, not an oversight. CLAUDE.md's own page spec
+described both a streaming answer and a sidebar of past conversations,
+but each depended on a real backend feature that didn't exist yet: SSE
+streaming was item 19, conversation storage and context-condensing was
+item 18, each later in the build order than this page. A client-side
+typewriter effect (revealing an already-complete answer a few
+characters at a time) was considered and rejected specifically because
+it would look identical to real streaming on screen while being
+architecturally nothing like it — no SSE, no real time-to-first-token
+improvement — and would need tearing out rather than extending once
+item 19 became real, which it now has: see ADR-043 for real SSE
+streaming, and ADR-041 for the conversation history this paragraph
+originally said didn't exist yet. `QueryResponse` was
 extended in place with `sources` and `confidence`, rather than adding a
 second endpoint, since both values already exist inside the same
 `QueryState` the answer itself comes from — a second endpoint would
@@ -1937,8 +2035,9 @@ computed at all" must never look the same to whoever reads the number.
 See ADR-031.
 
 The Dashboard's two data-less widgets — retrieval accuracy trend and
-cost per query — got the same honest-placeholder treatment as the
-Query page's streaming and history gaps, for the same reason: neither
+cost per query — got the same honest-placeholder treatment the Query
+page's streaming and history gaps got before ADR-041 and ADR-043 closed
+them, for the same reason: neither
 has real data behind it yet, and a fabricated or approximate number
 would look authoritative while being wrong. A live-confidence-as-proxy
 option for the accuracy widget was considered and rejected specifically
@@ -2142,6 +2241,33 @@ real, blocked, or partial — is saved as one turn in the conversation
 back in the response so the next question in the same thread can name
 it too. See ADR-041.
 
+**Asking a question through the browser, streamed:** this is what
+actually happens today when a person types a question into the Query
+page — everything the paragraphs above describe runs exactly the same
+way first: conversation ownership, condensing, the input guardrail,
+domain classification, retrieval, reranking, graph context, and — for a
+single domain — generation itself. The one difference is what happens
+to the generated text and the output guardrail (see ADR-043). For a
+single (or no) domain, the answer streams out sentence by sentence:
+each one is moderation-checked as it's produced and sent to the browser
+immediately as a `chunk` event, with the very first one also carrying a
+time-to-first-token measurement. Only once every sentence has been sent
+does the injection judge look at the complete answer — if it flags
+anything, a `retract` event tells the browser to erase what it already
+showed, replaced moments later by the same fixed blocked message every
+other guardrail failure in this system uses. For two or more domains,
+there's no single stream of tokens to release incrementally — each
+domain still generates its own complete draft answer, synthesis still
+merges them, and the merged result (or its block) arrives as one
+`chunk` the instant it's ready, same total latency as the non-streaming
+path, just delivered as a Server-Sent Event instead of a plain JSON
+body. Either way, the turn is saved and the audit log written exactly
+as the non-streaming path does — through the same shared
+`resolve_conversation`/`save_turn_and_refresh_cache` logic — and the
+stream ends with one `done` event carrying the final answer, sources,
+and the conversation id, whether or not any of it ever streamed for
+real.
+
 **Asking a question or uploading a document via MCP:** an AI client
 sends a request to `/mcp` with a shared secret in a header instead of
 a human hitting `/query` or `/documents/upload` directly. The gate
@@ -2285,27 +2411,32 @@ queue would eventually be needed, alongside the connection-pool
 exhaustion trigger ADR-001 already named. Not built here — acceptable
 at today's traffic, a real gap once this runs unattended. See ADR-030.
 
-**Every question pays the full pipeline's cost, even an obvious
-follow-up** — without conversation history and context-condensing
-(item 18), "what about the other one" gets embedded and searched
-exactly like a completely unrelated question, since the system has no
-memory of what was asked before it. There's no cheaper path for a
-short, dependent follow-up — every question, regardless of how it
-relates to the last one, pays for a fresh embedding call, a full hybrid
-search, and a full reranking pass. Not a bug, a named scope limit — the
-condensing step that would fix this is a real feature with its own
-schema and caching design, not a small addition to the query endpoint.
-See ADR-031.
+**A follow-up used to get embedded and searched with no memory of what
+was asked before it** — this was a named scope limit at ADR-031's time,
+before conversation history and context-condensing existed. It's
+resolved now: ADR-041 gives every question a home in a stored
+conversation, and ADR-042's condensing step rewrites a raw follow-up
+like "what about the other one" into a standalone question before it
+ever reaches retrieval. This didn't make follow-ups any *cheaper* —
+condensing itself is one more LLM call on top of the full pipeline, not
+a shortcut around it — it made them *correct*, which is what the gap
+actually was.
 
-**A slow answer shows nothing until the whole thing resolves** —
-without real token streaming (item 19), the Query page's only feedback
-during a slow generation call (a large retrieved context, a circuit
-breaker's cooldown-then-retry cycle) is a loading skeleton with no
-further detail — no partial text, no indication of which pipeline step
-is currently running, unlike the upload flow's own `processing_stage`
-polling. Acceptable at today's response times; a real, felt limitation
-once documents and questions get large enough that a full generation
-call takes several seconds. See ADR-031.
+**A slow answer used to show nothing until the whole thing resolved** —
+before ADR-043, the Query page's only feedback during a slow generation
+call was a loading skeleton with no further detail. Real per-sentence
+streaming now closes that gap for the common, single-domain case (see
+ADR-043) — but it opens a different, genuinely new one: the injection
+guardrail can no longer run before anything is shown, only after the
+full answer streamed, since it needs the complete text to judge whether
+retrieved document content hijacked the answer. A flagged answer is
+retracted (the client erases what it already showed), not prevented
+from ever appearing — the one place in this system where unchecked
+model output can be visible to a user, even briefly, before a check has
+a chance to withdraw it. A cross-domain question still gets none of the
+streaming benefit at all: its synthesized answer arrives as one piece,
+the same as before ADR-043, since the multi-agent path (ADR-040) has no
+single stream of tokens to release incrementally in the first place.
 
 **Neither retrieval quality nor spend has any visibility beyond a
 human manually checking** — the Dashboard's two honest placeholders
@@ -3376,3 +3507,28 @@ had a real job to do — deliberately not brought in earlier, when
 nothing yet needed what it does. Backed by a real Postgres fallback, so
 Redis being slow, cold, or entirely down degrades condensing's lookup,
 never breaks it. See ADR-042.
+
+**Server-Sent Events (SSE)** — a one-way channel for a server to push a
+stream of small text messages to a browser over a single, long-lived
+HTTP response, without the browser ever needing to ask again. Chosen
+over WebSocket (a genuinely two-way channel) specifically because an
+answer only ever flows server-to-client — nothing about this feature
+needed the browser to send anything back mid-stream — and SSE passes
+through Azure API Management with less friction than a WebSocket
+upgrade. See ADR-043.
+
+**Time-to-first-token (TTFT)** — how long a user waits before seeing
+*any* of an answer, as distinct from total latency (how long the model
+takes to finish generating all of it). Streaming doesn't make a model
+faster — total latency is unchanged — it's TTFT that streaming actually
+improves, since the first sentence can reach the browser long before
+the last one has even been generated. See ADR-043.
+
+**Retract** (in this project's streamed-answer use) — telling the
+browser to erase text it already displayed, because a safety check that
+could only run *after* that text was shown (the injection judge, which
+needs the complete answer) flagged it. A genuinely different failure
+mode from every other guardrail in this system, which all run *before*
+anything is ever shown — retracting is the one place unchecked model
+output can be visible to a user, even briefly, before being withdrawn.
+See ADR-043.

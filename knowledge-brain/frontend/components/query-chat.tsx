@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileText, MessageCircle, Send } from "lucide-react";
 
-import { postQuery, UnauthorizedError, type QuerySource, type Turn as StoredTurn } from "@/lib/api";
+import { streamQuery, UnauthorizedError, type QuerySource, type Turn as StoredTurn } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -13,7 +13,11 @@ import { cn } from "@/lib/utils";
 type Turn = {
   key: string;
   question: string;
-  state: "loading" | { answer: string; sources: QuerySource[]; confidence: number | null } | { error: string };
+  state:
+    | "loading"
+    | { streamingText: string }
+    | { answer: string; sources: QuerySource[]; confidence: number | null }
+    | { error: string };
 };
 
 function confidenceLabel(confidence: number | null): { text: string; className: string } | null {
@@ -57,6 +61,15 @@ function AnswerBubble({ turn }: { turn: Turn }) {
 
   if ("error" in turn.state) {
     return <p className="text-sm text-destructive">{turn.state.error}</p>;
+  }
+
+  if ("streamingText" in turn.state) {
+    return (
+      <p className="text-sm whitespace-pre-wrap">
+        {turn.state.streamingText}
+        <span className="animate-pulse">▍</span>
+      </p>
+    );
   }
 
   const { answer, sources, confidence } = turn.state;
@@ -133,15 +146,32 @@ export function QueryChat({
     setQuestion("");
     setIsSubmitting(true);
 
+    function updateTurn(state: Turn["state"]) {
+      setTurns((current) => current.map((t) => (t.key === key ? { ...t, state } : t)));
+    }
+
     try {
-      const result = await postQuery(trimmed, conversationId);
-      setTurns((current) =>
-        current.map((t) =>
-          t.key === key
-            ? { ...t, state: { answer: result.answer, sources: result.sources, confidence: result.confidence } }
-            : t,
-        ),
-      );
+      let streamedText = "";
+      let newConversationId: string | null = null;
+
+      for await (const event of streamQuery(trimmed, conversationId)) {
+        if (event.type === "chunk") {
+          streamedText += event.text;
+          updateTurn({ streamingText: streamedText });
+        } else if (event.type === "retract") {
+          // The answer failed a safety check after some of it was
+          // already shown — erase it; the "done" event right behind
+          // this one carries the real, final (blocked) answer.
+          streamedText = "";
+          updateTurn("loading");
+        } else if (event.type === "done") {
+          updateTurn({ answer: event.answer, sources: event.sources, confidence: event.confidence });
+          newConversationId = event.conversation_id;
+        } else if (event.type === "error") {
+          updateTurn({ error: event.detail });
+        }
+        // "ttft" carries no visible change today — just first-token timing.
+      }
 
       // A brand-new conversation only gets its id once the first answer
       // comes back — swap the URL to it (without a full navigation, so
@@ -149,9 +179,9 @@ export function QueryChat({
       // resumes the same thread, and refresh so the sidebar picks up
       // the new entry. An existing conversation still refreshes, since
       // this turn just bumped its place in the sidebar's own ordering.
-      if (conversationId === null) {
-        setConversationId(result.conversation_id);
-        router.replace(`/query/${result.conversation_id}`);
+      if (conversationId === null && newConversationId) {
+        setConversationId(newConversationId);
+        router.replace(`/query/${newConversationId}`);
       }
       router.refresh();
     } catch (err) {
@@ -159,13 +189,7 @@ export function QueryChat({
         router.push("/login");
         return;
       }
-      setTurns((current) =>
-        current.map((t) =>
-          t.key === key
-            ? { ...t, state: { error: err instanceof Error ? err.message : "Something went wrong" } }
-            : t,
-        ),
-      );
+      updateTurn({ error: err instanceof Error ? err.message : "Something went wrong" });
     } finally {
       setIsSubmitting(false);
     }

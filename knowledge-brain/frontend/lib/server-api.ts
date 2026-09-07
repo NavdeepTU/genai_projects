@@ -3,7 +3,7 @@
 // from a Server Component or a Route Handler, never from a Client
 // Component. Kept in a separate file from lib/api.ts specifically so a
 // Client Component can import the client-safe parts of that file (like
-// postQuery) without accidentally pulling next/headers into its bundle.
+// streamQuery) without accidentally pulling next/headers into its bundle.
 import { redirect } from "next/navigation";
 
 import { BACKEND_URL } from "@/lib/config";
