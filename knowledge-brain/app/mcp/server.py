@@ -1,17 +1,17 @@
 import base64
 import logging
+import uuid
 
 from mcp.server.mcpserver import MCPServer
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import AsyncSessionLocal
 from app.core.graph_database import driver as graph_driver
-from app.core.middleware import get_correlation_id, get_current_user_id
+from app.core.middleware import get_correlation_id, get_current_tenant_id, get_current_user_id
 from app.models.document import DocumentStatus
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
-from app.repositories.permission_repository import PermissionRepository
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
 from app.services.ingestion_service import IngestionService
@@ -38,14 +38,17 @@ async def ask_knowledge_base(question: str) -> str:
 
     Same entry point the REST route uses (see ADR-040) — a question
     spanning more than one document domain is handled transparently here
-    too, with no separate MCP-specific logic for it.
+    too, with no separate MCP-specific logic for it. tenant_id (ADR-046)
+    now comes from the middleware, which resolves the caller's
+    self-asserted X-User-Id against a real account before this ever runs.
     """
     user_id = get_current_user_id()
+    tenant_id = get_current_tenant_id()
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         service = FederatedRetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
         try:
-            result = await service.run_query(question, user_id)
+            result = await service.run_query(question, user_id, tenant_id)
         except (CircuitOpenError, RetrievalUnavailableError):
             return "The knowledge base is temporarily unavailable. Please try again in a moment."
 
@@ -53,6 +56,7 @@ async def ask_knowledge_base(question: str) -> str:
         audit = AuditRepository(db)
         await audit.log_query_made(
             correlation_id=correlation_id,
+            tenant_id=tenant_id,
             user_id=user_id,
             question=question,
             duration_ms=result.duration_ms,
@@ -60,6 +64,7 @@ async def ask_knowledge_base(question: str) -> str:
         if result.blocked:
             await audit.log_answer_blocked(
                 correlation_id=correlation_id,
+                tenant_id=tenant_id,
                 user_id=user_id,
                 question=question,
                 block_reason=result.block_reason or "unknown",
@@ -87,11 +92,12 @@ async def upload_document(
 
     content = base64.b64decode(content_base64)
     user_id = get_current_user_id()
+    tenant_id = uuid.UUID(get_current_tenant_id())
 
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         repository = DocumentRepository(db)
-        service = IngestionService(repository, PermissionRepository(db))
-        document = await service.create_document(filename, content, user_id, domains)
+        service = IngestionService(repository)
+        document = await service.create_document(filename, content, tenant_id, domains)
         await service.process_document(document.id, filename, content)
 
         correlation_id = get_correlation_id()
@@ -105,6 +111,7 @@ async def upload_document(
                 "status": document.status.value,
                 "domains": document.domains,
             },
+            tenant_id=str(tenant_id),
             user_id=user_id,
         )
 

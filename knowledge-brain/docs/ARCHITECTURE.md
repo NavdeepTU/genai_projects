@@ -64,7 +64,7 @@ flowchart TD
     SESSION -->|yes| Q[POST /query]
 
     subgraph ingest["Getting a document in"]
-        UP --> CREATE["Create document row + grant access<br/>(synchronous — fast enough to finish<br/>before the response goes out) —<br/>domains: free-text tags, set manually,<br/>optional, deduped on save"]
+        UP --> CREATE["Create document row, owned by<br/>the uploader's own tenant<br/>(synchronous — fast enough to finish<br/>before the response goes out) —<br/>domains: free-text tags, set manually,<br/>optional, deduped on save"]
         CREATE --> RESP0["Response returns immediately:<br/>document id, status = pending"]
         CREATE -.->|"scheduled as a<br/>FastAPI BackgroundTask"| BG["Background: process_document<br/>(own fresh DB + Neo4j sessions)"]
         BG --> STATUS0["status → processing"]
@@ -77,10 +77,10 @@ flowchart TD
         EMBED --> SAVESTAGE["stage: saving"]
         SAVESTAGE --> SAVE[Save to Postgres<br/>documents + chunks]
         SAVE --> READY["status → ready"]
-        READY --> BUILDREFS["Extract references & write to Neo4j<br/>(system-wide lookup, not permission-scoped —<br/>a fact about documents, not this user's view)"]
+        READY --> BUILDREFS["Extract references & write to Neo4j<br/>(scoped to this document's own tenant —<br/>ADR-046 closed a cross-tenant leak here)"]
     end
 
-    POLL["Frontend: GET /documents/id/status<br/>every 2s while processing"] -.->|"permission-checked read"| STATUSREAD[("documents.status +<br/>documents.processing_stage")]
+    POLL["Frontend: GET /documents/id/status<br/>every 2s while processing"] -.->|"tenant-checked read"| STATUSREAD[("documents.status +<br/>documents.processing_stage")]
     STATUS0 -.writes.-> STATUSREAD
     EXTRACT -.writes.-> STATUSREAD
     PIICHECK -.writes.-> STATUSREAD
@@ -97,13 +97,13 @@ flowchart TD
     subgraph retrieve["Asking a question — FederatedRetrievalService"]
         INPUTGUARD{"Input guardrail: moderation +<br/>jailbreak check, concurrent<br/>(via circuit breakers)"}
         INPUTGUARD -->|"flagged, or both<br/>checks unavailable"| BLOCKED1["Blocked before any retrieval —<br/>fixed friendly message,<br/>no sources/confidence"]
-        INPUTGUARD -->|clean| CLASSIFY{"Classify domains needed<br/>(LLM, scoped to this user's<br/>own accessible domains)"}
+        INPUTGUARD -->|clean| CLASSIFY{"Classify domains needed<br/>(LLM, scoped to this tenant's<br/>own accessible domains)"}
         CLASSIFY -->|"0 or 1 domain —<br/>the common case"| SINGLE
 
         subgraph SINGLE["One RetrievalService.run_query pass<br/>(domain filter optional)"]
             QEMBED[Embed the question]
-            QEMBED --> VEC["Vector search: 20 candidates<br/>joined against document_permissions,<br/>narrowed to one domain if given<br/>(fails? use keyword results alone)"]
-            QEMBED --> KW["Keyword search: 20 candidates<br/>same permission + domain join<br/>(fails? use vector results alone)"]
+            QEMBED --> VEC["Vector search: 20 candidates<br/>joined against tenant_id,<br/>narrowed to one domain if given<br/>(fails? use keyword results alone)"]
+            QEMBED --> KW["Keyword search: 20 candidates<br/>same tenant + domain join<br/>(fails? use vector results alone)"]
             VEC --> BOTH{Both failed?}
             KW --> BOTH
             BOTH -->|yes| ERR[503: search temporarily<br/>unavailable]
@@ -112,7 +112,7 @@ flowchart TD
             RERANK --> CHECK{Best chunk scores below 0.4,<br/>and haven't retried yet?}
             CHECK -->|yes, rewrite & retry| REWRITE["Rewrite the question<br/>(OpenAI, via circuit breaker)"]
             REWRITE --> QEMBED
-            CHECK -->|no| GRAPHCTX["Fetch graph context, same permission join<br/>(one hop, via circuit breaker)"]
+            CHECK -->|no| GRAPHCTX["Fetch graph context, same tenant join<br/>(one hop, via circuit breaker)"]
             GRAPHCTX --> GEN["Generate answer: top 5 chunks<br/>+ graph context (OpenAI LLM)"]
             GEN --> OUTGUARD1{"Output guardrail: moderation +<br/>injection check, concurrent"}
         end
@@ -131,7 +131,7 @@ flowchart TD
     BUILDREFS -.writes.-> NEO4J[(Neo4j)]
     GRAPHCTX -.reads.-> NEO4J
 
-    GRANT -.writes.-> ACL[(document_permissions)]
+    CREATE -.writes.-> ACL[(documents.tenant_id)]
     VEC -.reads.-> ACL
     KW -.reads.-> ACL
     GRAPHCTX -.reads.-> ACL
@@ -235,7 +235,7 @@ both checks are simultaneously unreachable, the question never reaches
 retrieval at all — no embedding, no search, no LLM generation call, all
 of it skipped, replaced with the same fixed, friendly blocked message
 every other guardrail in this system uses. A clean question then goes
-to a supervisor: which of this user's own accessible domains, if any,
+to a supervisor: which of this tenant's own accessible domains, if any,
 does this question actually need? Zero or one domain needed — every
 question today, since domains are opt-in and most documents remain
 untagged — takes the pipeline described below exactly once, at exactly
@@ -249,8 +249,8 @@ meaning-vector, and two independent searches run: a vector search
 (closest meaning) and a keyword search (Postgres full-text search, for
 exact terms vector search can miss — error codes, product IDs, rare
 proper nouns), each optionally narrowed to one domain. Both searches
-are joined against the permissions table, so a chunk from a document
-this user was never granted access to is never a candidate in the
+are joined against the document's own `tenant_id`, so a chunk from a
+document belonging to a different tenant is never a candidate in the
 first place — filtered before ranking, not after, the same way
 ADR-012's hybrid-search fix avoided truncating results by filtering too
 late. Each fetches a wider pool of 20 candidates, not just the final 5.
@@ -274,11 +274,13 @@ generation: for the documents behind those final chunks, the system
 asks Neo4j what each one explicitly references — not what's similar to
 it, what it actually *names* — and pulls in one snippet from each
 referenced document, one hop only. That snippet lookup carries the same
-permission join as the primary search — a document being referenced by
-one this user can see does not mean this user can see the referenced
-document too, and without that check the graph-context feature could
-leak content from documents this user was never granted access to,
-which live testing actually caught happening before it shipped. Those
+tenant check as the primary search — a document being referenced by
+one document a tenant can see does not mean that tenant can see the
+referenced document too, and without that check the graph-context
+feature could leak content across a tenant boundary, which is exactly
+the class of bug live testing once caught happening before the
+original, per-user version of this check shipped, and multi-tenancy
+(ADR-046) later had to re-close the same way. Those
 final chunks, the graph snippets, plus the *original* question (never
 the rewritten one — the rewrite is only a search tool, not a
 replacement for what the user actually asked), are handed to an LLM,
@@ -304,7 +306,68 @@ both search backends down or a circuit already open) skips this
 entirely — nothing about a request that never got a real answer is
 recorded as if it did.
 
-**What's new since the last update:** build-order item 18's other half
+**What's new since the last update:** multi-tenancy. A `Tenant` (a
+company or workspace) is now the group every user and document
+belongs to — a user picks theirs once, at signup, from a list an admin
+has already registered (`GET /tenants`, public, since no session
+exists yet at that point); only an admin can register a new one
+(`POST /admin/tenants`). Document sharing is now entirely tenant
+membership: any user in a tenant sees every document that tenant
+owns, no per-document grant needed, replacing the per-user
+`DocumentPermission` grant table this project had used since
+build-order item 8 — that table, its repository, and the
+`grant_document_access` route are all deleted outright, not kept
+alongside the new mechanism, since nothing in this product has ever
+had a UI to create a grant more specific than "the uploader has
+access" anyway (the same reasoning ADR-045 already applied to
+document ownership). Conversations were deliberately left untouched —
+they stay scoped to the individual user, invisible to anyone else in
+the same tenant, exactly as before. `tenant_id` now threads through
+the entire retrieval pipeline (`QueryState`, `RetrievalService`,
+`FederatedRetrievalService`) as the real access-control parameter,
+taking over the job `user_id` used to do there; `user_id` itself
+didn't go away, it just went back to being purely an identity field —
+conversation ownership, audit attribution, tracing — the same job it
+already did everywhere else. Two real security fixes fell directly out
+of this change, not sought as new scope: `DocumentGraphService`'s
+reference-building used to search every document system-wide when
+linking documents at ingestion time, which under tenant sharing could
+have created a reference edge crossing a tenant boundary — closed by
+scoping that search to the ingesting document's own tenant, with the
+query pipeline's own graph-context snippet read independently
+tenant-scoped too, as defense in depth; and MCP's `X-User-Id` header,
+previously trusted as pure self-assertion, now has to resolve to a
+real account via a database lookup, since a fabricated id has no real
+`tenant_id` to scope document access to. The three users and
+thirty-two documents that existed before any tenant did were migrated
+into one backfill tenant, named "Microsoft," via a hand-run SQL
+migration — this project's established, Alembic-free convention for
+every schema change. A `/code-review` pass afterward found two real
+correctness bugs, both fixed the same session: registering two
+tenants with the same name concurrently could surface an unhandled 500
+instead of the intended 409 (the pre-check alone can't close that
+race — only the database's own unique constraint can, so the route now
+catches the resulting `IntegrityError` too), and an admin could
+register a tenant with a leading/trailing-whitespace name that bypassed
+the duplicate-name check entirely (fixed at the actual boundary — a
+Pydantic validator on the request model — rather than only patching the
+one frontend form that happened to trigger it). Verified live end to
+end, not just by test: two independent users signed up into the same
+tenant, and one instantly saw a document the other had just uploaded,
+with zero grant; a second tenant was registered and a third user
+signed into it landed at zero documents, and a question answerable
+only from the first tenant's data came back "I don't know," citing
+only that user's own tenant's content — confirming isolation holds at
+the retrieval layer itself, not just in what the document list shows.
+This does put the system in real, current tension with this project's
+own Enterprise Requirement 5 ("multi-tenancy is not enough — users
+should only retrieve chunks from documents they have explicit access
+to"): as built, every user in a tenant can read every document that
+tenant owns, with no remaining way to narrow that further. Named here
+plainly, not smoothed over — see ADR-046's Reasoning section for the
+full trade-off. See ADR-046.
+
+**What's new before that:** build-order item 18's other half
 — context condensing — plus Redis, the technology whose only real job
 was always to serve this exact step. Every follow-up in an existing
 conversation is now rewritten into a standalone question before it
@@ -1113,14 +1176,16 @@ now removed entirely now that real accounts exist. Still not full
 RBAC — no per-action permissions, just one boolean — the same
 proportionate "pull forward a small slice of real auth" move already
 used for MCP's shared secret (ADR-017). Shows a real
-audit log viewer (`AuditRepository.get_all_recent_entries`) and a real
-document-permissions list (`PermissionRepository.list_all_permissions`),
-both entirely built from components already extracted in prior
-sessions (`ListCard`, `StatTile`) — the first frontend page needing no
-new shared component. Tenant management is an honest placeholder, the
-same reasoning as every other data-less widget on the Dashboard and
-Analytics pages: there's no tenant concept in this system's data model
-at all yet. `admin/error.tsx` deliberately shows the real error
+audit log viewer (`AuditRepository.get_all_recent_entries`, now
+spanning every tenant too, not just every user) and, since ADR-046, a
+real tenant-management panel: a list of every registered tenant
+(`TenantRepository.list_tenants`, via the public `GET /tenants`) and a
+register-a-new-tenant form (`POST /admin/tenants`) — replacing the
+honest placeholder this section used to describe, now that a tenant
+concept actually exists in the data model. The page's own sidebar
+navigation (`AdminDashboard`, a Client Component) was rebuilt into two
+sections instead of three when the old per-document permissions viewer
+was deleted along with `DocumentPermission` itself. `admin/error.tsx` deliberately shows the real error
 message rather than a fixed generic one — a `403` ("you're not an
 admin") and a genuine server failure are different situations worth
 telling apart here specifically. Talks to: `GET /admin` on the
@@ -1149,14 +1214,15 @@ flowchart LR
 
 **API route (`app/api/documents.py`)** — the "front door." Accepts an
 uploaded file over the network, rejects unsupported file types
-immediately, creates the document row and grants access synchronously,
-schedules the rest of the pipeline as a background task, and returns
-without waiting for it. Also owns `_process_uploaded_document`, the
+immediately, creates the document row owned by the caller's own tenant
+(ADR-046 — no separate grant step since), schedules the rest of the
+pipeline as a background task, and returns without waiting for it.
+Also owns `_process_uploaded_document`, the
 background task function itself — it opens its own fresh database and
 Neo4j sessions (the request's are already gone by the time it runs),
 calls `IngestionService.process_document`, and then best-effort builds
 the reference graph if the document reached `ready`. Also exposes `GET
-/{document_id}/status`, permission-checked, for the frontend to poll.
+/{document_id}/status`, tenant-checked, for the frontend to poll.
 Talks to: the ingestion service. If it disappeared, there'd be no way
 to get a file into the system, or to check on one already uploading,
 at all.
@@ -1165,22 +1231,30 @@ at all.
 sits alongside the correlation ID middleware and stamps every request
 with whoever's calling — but, since ADR-036, it no longer just believes
 what it's told. It branches on the request path: anything under `/mcp`
-still trusts a self-asserted `X-User-Id` header, MCP's own deliberately
-separate trust model (an MCP client can't hold a browser session cookie
-the way REST callers now do); everything else must present a
+trusts a self-asserted `X-User-Id` header only as far as it can be
+verified — since ADR-046, that header must resolve to a real account
+via `UserRepository.get_user_by_id`, not just parse as a UUID, because
+every document-access call now needs a real `tenant_id` to scope to
+and a fabricated id has none; everything else must present a
 `session_token` cookie that resolves, via `SessionRepository`, to a
-real, unexpired row in the `sessions` table. `/auth/signup` and
-`/auth/login` are exempt from this check entirely — they're how a
-caller gets a session in the first place. Unlike a correlation ID, this
+real, unexpired row in the `sessions` table. Either way, a resolved
+identity now sets both `user_id` and `tenant_id` context vars —
+`get_current_tenant_id()` is what every document-access call actually
+scopes to; `user_id` is kept purely for attribution (conversation
+ownership, audit logs, tracing). `/auth/signup`, `/auth/login`, and
+`/tenants` are exempt from this check entirely — they're how a caller
+gets a session, or the tenant list needed before one exists, in the
+first place. Unlike a correlation ID, this
 one can't be invented when missing — no valid identity means an
 immediate 401, logged to the audit table as its own event. Also exempts
 Swagger UI's own pages (`/docs`, `/openapi.json`, `/redoc`), so the
 API's documentation stays browsable without an identity. Talks to: the
 audit log directly (it opens its own database session, the same way
 MCP's tools do, since middleware runs outside FastAPI's dependency
-injection) and, for REST requests, the new `sessions`/`users` tables via
-`SessionRepository`. If it disappeared, every permission check
-downstream would have nothing to check against.
+injection) and, for both REST and MCP requests since ADR-046, the
+`sessions`/`users` tables via `SessionRepository`/`UserRepository`. If
+it disappeared, every tenant-scoped access check downstream would have
+nothing to check against.
 
 **Auth (`app/api/auth.py`, `app/services/auth_service.py`,
 `app/repositories/user_repository.py`,
@@ -1235,33 +1309,40 @@ backend at all. If it disappeared, every page would be back to
 ADR-036's original state — reachable by URL, but unable to prove who's
 asking, so immediately rejected.
 
-**Permission repository (`app/repositories/permission_repository.py`)**
-— all direct database access for who can see which document.
-`grant_access` is idempotent (`ON CONFLICT DO NOTHING`, not
-check-then-insert, so two concurrent grants for the same pair can't
-race into an error); `has_access` is a plain existence check.
-`list_all_permissions` (ADR-034) is the one method here that doesn't
-scope to a single user or document — every grant, across everyone,
-joined against `Document` for filenames, powering the Admin page. It
-does no authorization of its own; enforcing that only an admin can
-call it is `require_admin`'s job, at the route layer, not this
-repository's. Talks to: nothing but the database — this table is
-intentionally simple, one row per (document, user) grant, no roles or
-ownership tiers. If it disappeared, nothing could ever be shared, and
-no document would be retrievable by anyone, including its own uploader.
+**Tenant repository (`app/repositories/tenant_repository.py`) and model
+(`app/models/tenant.py`)** — added with ADR-046, replacing the deleted
+`PermissionRepository` (`app/repositories/permission_repository.py`)
+and `DocumentPermission` model as the whole of document access control.
+`create_tenant` inserts a new `Tenant` row (name unique, enforced by
+the database, not just an application-level check — see the race
+condition named in ADR-046's Consequences); `list_tenants` powers both
+the signup picker (public, via `GET /tenants`) and the Admin page's
+tenant list; `get_tenant_by_id` validates a signup's chosen tenant
+actually exists; `get_tenant_by_name` backs a friendlier pre-check
+before `create_tenant`'s own unique constraint is the real guarantee.
+No method here does any authorization of its own — `GET /tenants` is
+intentionally public (a user needs the list before any session exists
+to prove an identity with), and `POST /admin/tenants` is gated by
+`require_admin` at the route layer, the same separation this project
+uses everywhere else. Talks to: nothing but the database. If it
+disappeared, no new company could ever be onboarded, and — since every
+`User` and `Document` row requires a `tenant_id` — no new account or
+upload could be created at all.
 
 ```mermaid
 flowchart LR
-    UP[Document uploaded] --> AUTO["Auto-grant uploader<br/>(unconditional, before any<br/>processing can fail)"]
-    SHARE["POST /documents/id/access<br/>(caller must already have access)"] --> GRANT[grant_access:<br/>idempotent insert]
-    AUTO --> GRANT
-    GRANT --> TABLE[(document_permissions)]
-    TABLE --> CHECK["Every retrieval query joins<br/>against this table, filtered<br/>before ranking"]
+    SIGNUP["User picks a tenant<br/>at signup"] -->|"GET /tenants<br/>(public)"| LIST[list_tenants]
+    ADMIN["Admin registers<br/>a new tenant"] -->|"POST /admin/tenants<br/>(require_admin)"| CREATE[create_tenant]
+    LIST --> TABLE[(tenants)]
+    CREATE --> TABLE
+    TABLE -->|"users.tenant_id,<br/>documents.tenant_id"| SCOPE["Every document-access query<br/>filters on this — the whole<br/>ACL now, no per-document grant"]
 ```
 
 **Ingestion service (`app/services/ingestion_service.py`)** — the
 conductor, split into two methods since ADR-030. `create_document` is
-the fast part: insert the row, grant the uploader access, and — since
+the fast part: insert the row, owned by the uploader's own `tenant_id`
+(a required argument since ADR-046 — no separate grant step exists
+anymore), and — since
 ADR-044 — upload the file's original bytes to Blob Storage, recording
 the result as `storage_path`. Still small on purpose, since it all has
 to finish before an HTTP response goes out; a single blob upload is
@@ -1337,9 +1418,12 @@ down instead of building its graph links up. Deletes the file from Blob
 Storage and the node (plus every edge touching it) from Neo4j, both
 best-effort — the same failure-isolation shape this project already
 applies to every external dependency elsewhere — then deletes the
-document row, whose chunks and permission grants cascade with it
-automatically via a `Document.permissions` relationship added
-alongside this feature. The database delete is the one step that must
+document row, whose chunks cascade with it
+automatically via the existing `Document.chunks` relationship (the
+docstring here used to also mention a `Document.permissions`
+relationship — removed along with `DocumentPermission` itself by
+ADR-046, and the stale reference was caught and fixed by the
+`/code-review` pass that ADR ran). The database delete is the one step that must
 actually succeed; a Blob Storage or Neo4j hiccup degrades to "a
 leftover file or graph node sits there," never blocks a user from
 deleting a document. Talks to: the document repository, the graph
@@ -1349,9 +1433,12 @@ repository, and blob storage.
 — runs once per document, right after ingestion succeeds. Reads what
 the document explicitly mentions (via reference extraction), checks
 whether any mention actually matches content already in another
-document (via `find_by_keyword_unrestricted`, deliberately not
-permission-filtered — this step establishes a system-wide fact about
-which documents reference which, not a view scoped to any one user),
+document within the *same tenant* (via the tenant-scoped
+`find_by_keyword` — ADR-046 deleted the earlier, unrestricted
+`find_by_keyword_unrestricted` this step used to call, since an
+unscoped search here could create a reference edge crossing a tenant
+boundary, which the query pipeline's graph-context step would then
+read a snippet from and leak into an unrelated tenant's answer),
 and records a `REFERENCES` edge in Neo4j for each real match. Talks to:
 reference extraction, the repository, and the graph repository.
 Best-effort — if it fails, the document still uploads successfully, it
@@ -1383,39 +1470,45 @@ instead of just by exact keyword.
 place in the codebase that talks directly to the database. Everything else
 asks the repository to save or update things, rather than writing its own
 database queries. Also the actual enforcement point for document
-permissions: `find_similar_chunks` and `find_by_keyword` both join
-against `document_permissions`, and `get_first_chunk_text` (used for
-graph context) does the same — deliberately not centralized behind one
-shared check, since each query needs the join applied to its own SQL.
-`find_by_keyword_unrestricted` exists specifically *without* that join,
-for the one caller (reference-building) that needs to see every
-document regardless of ownership. `list_documents_for_user` (added for
-the Document Library page) is the same pattern applied to browsing
-instead of search — a document with no matching permission row for the
-calling user simply never appears in the result. `get_document_for_user`
-(added for status polling, ADR-030) is the same join narrowed to one
-document by id, returning `None` identically whether the document
-doesn't exist or the caller just lacks access — the two cases are
-deliberately indistinguishable from outside. `get_by_id` is the
-one exception to "every read checks permissions" — a plain
+access: since ADR-046 replaced per-user grants with tenant-wide
+sharing, `find_similar_chunks`, `find_by_keyword`, and
+`get_first_chunk_text` (used for graph context) all join against
+`Document.tenant_id` instead of a `document_permissions` grant table —
+deliberately not centralized behind one shared check, since each query
+needs the join applied to its own SQL. The old
+`find_by_keyword_unrestricted`, which used to exist specifically
+*without* that join for reference-building's benefit, is gone — once
+per-user grants were replaced by tenant-wide sharing, "unrestricted
+within a tenant" and "any user's access within that tenant" became the
+same set, so `find_by_keyword` itself now serves both callers.
+`list_documents_for_tenant` (added for the Document Library page,
+renamed from `_for_user` by ADR-046) is the same pattern applied to
+browsing instead of search — a document belonging to a different
+tenant simply never appears in the result. `get_document_for_tenant`
+(added for status polling, ADR-030; renamed the same way) is the same
+join narrowed to one document by id, returning `None` identically
+whether the document doesn't exist or belongs to another tenant — the
+two cases are deliberately indistinguishable from outside. `get_by_id`
+is the one exception to "every read checks tenant" — a plain
 primary-key lookup with no join at all, for the background task's own
-internal use deciding whether to build graph references, mirroring
-`find_by_keyword_unrestricted`'s reasoning: system-level code, not a
-user-facing read. `update_processing_stage` mirrors `update_status`'s
-exact shape, writing to the new progress-tracking column instead.
-`create_document` dedupes its `domains` argument (order-preserving) —
+internal use deciding whether to build graph references, system-level
+code rather than a tenant-facing read. `update_processing_stage`
+mirrors `update_status`'s exact shape, writing to the new
+progress-tracking column instead. `create_document` dedupes its
+`domains` argument (order-preserving) —
 the one point both the REST upload route and the MCP upload tool
 converge on, so a repeated tag like "HR, HR" is caught once, centrally,
 rather than needing the same fix in two callers (ADR-040, found by
-`/code-review`). `find_similar_chunks` and `find_by_keyword` both
+`/code-review`), and now also takes the uploader's `tenant_id`
+directly as a required argument (ADR-046). `find_similar_chunks` and `find_by_keyword` both
 gained an optional `domain` parameter, joining `Document` and narrowing
 with `Document.domains.any()` only when one is given — the actual
 mechanism a domain-scoped `RetrievalService.run_query` call uses to see
-only its own slice of the knowledge base. `list_domains_for_user`
-(ADR-040) returns the distinct domains across documents a user can
-access — untagged documents and domains behind documents the user
-can't see never appear, so `classify_domains` is never offered a choice
-that isn't real for that user.
+only its own slice of the knowledge base. `list_domains_for_tenant`
+(ADR-040, renamed by ADR-046) returns the distinct domains across
+documents a tenant can access — untagged documents and domains behind
+another tenant's documents never appear, so `classify_domains` is
+never offered a choice that isn't real for that tenant.
 
 **Retrieval service (`app/services/retrieval_service.py`)** — the
 single-domain conductor for answering one question. `__init__` builds a
@@ -1554,7 +1647,8 @@ ADR-033), and three reads: `get_recent_queries_for_user` and
 `get_query_entries_for_user` (ADR-032, ADR-033), both scoped to one
 user, and `get_all_recent_entries` (ADR-034), the first read here that
 isn't — every user, every action type, powering the Admin page's
-audit viewer. Same contract as `list_all_permissions`: it does no
+audit viewer. Same contract `TenantRepository`'s methods follow now
+too: it does no
 authorization itself, `require_admin` does. Talks to: called directly
 from the API routes, right after each action succeeds, and read from
 the Dashboard/Analytics/Admin routes' services.
@@ -2189,6 +2283,23 @@ pattern with the rest of this app rather than introduce a second
 pattern on top of everything else being new this session. See
 ADR-037.
 
+For multi-tenancy, we chose to replace the per-user `DocumentPermission`
+grant table outright rather than keep it as a finer-grained layer on
+top of tenant-wide sharing — the stated requirement was tenant-wide
+sharing itself, not a floor with per-user restriction on top, and
+nothing in the product had a UI to create a grant more specific than
+"the uploader has access" anyway, so keeping it would have meant two
+overlapping access-control systems, one of them permanently
+unreachable through any real user action. We migrated the three
+pre-existing users and thirty-two pre-existing documents into one
+named backfill tenant ("Microsoft") rather than leaving `tenant_id`
+nullable indefinitely, since the "no tenant yet" state only needed to
+exist for one migration, not as a permanent three-way branch every
+future query has to account for. See ADR-046 — including its
+Reasoning section for the real, named tension this creates with this
+project's own Enterprise Requirement 5, which this decision does not
+fully satisfy.
+
 ## How data moves through the system
 
 **Uploading a document through the REST endpoint:** a user sends a
@@ -2196,8 +2307,10 @@ file, with their logged-in session's cookie identifying who they are —
 checked against the `sessions` table before any of this runs; missing
 or expired, the request is rejected right there. The system checks
 the file type is supported, creates a database record for the document
-immediately (marked "pending"), immediately grants the uploader access
-to it, saves the file's original bytes to Blob Storage (best-effort —
+immediately (marked "pending"), owned by the uploader's own tenant —
+which is the whole of its access control now (ADR-046): every user in
+that tenant can see it, with no separate grant step — saves the file's
+original bytes to Blob Storage (best-effort —
 a failure here is logged, not raised, and just means this document has
 nothing to view later; see ADR-044), writes an audit log entry,
 schedules the rest of the work as a background task, and returns right
@@ -2227,9 +2340,9 @@ link. This step can't fail the upload; if Neo4j or the extraction call
 is unavailable, the document is still "ready," it just has no graph
 links. Alongside the file, the uploader can optionally attach one or
 more free-text domain tags (a comma-separated form field), stored on
-the document row and deduped — the same mechanism `list_domains_for_user`
-later reads from to know which domains actually exist for a given user
-(see ADR-040).
+the document row and deduped — the same mechanism `list_domains_for_tenant`
+later reads from to know which domains actually exist for a given
+tenant (see ADR-040, and ADR-046 for the rename from `_for_user`).
 
 **Uploading a document through MCP:** the same journey, with one
 difference — there's no separate response-then-background split, since
@@ -2243,7 +2356,8 @@ tool arguments carry real JSON types.
 **Viewing a document:** a user clicks "View" on a document that has
 one — a plain link, no JavaScript involved, opening
 `/api/documents/{id}/content` in a new tab. The backend checks the same
-access-grant permission every other document route checks, then fetches
+tenant membership every other document route checks — is this document
+owned by the caller's own tenant? — then fetches
 the file's bytes from Blob Storage and returns them with the content
 type it was tagged with at upload time and `Content-Disposition:
 inline`, so the browser renders a PDF or text file directly instead of
@@ -2253,13 +2367,15 @@ same 404 a nonexistent or inaccessible document would. See ADR-044.
 
 **Deleting a document:** a user confirms deletion in a dialog, which
 only then sends `DELETE /api/documents/{id}`. The backend checks the
-same access-grant permission as viewing — anyone with access can delete
-a document today, the same rule that already governs sharing one, since
-this project has no separate "owner" concept. The file is deleted from
+same tenant membership as viewing — anyone in the tenant that owns a
+document can delete it today, since this project has no separate
+"owner" concept within a tenant (ADR-045's reasoning, now inherited by
+tenant-wide sharing rather than the per-user grant it originally
+applied to — see ADR-046). The file is deleted from
 Blob Storage and the document's node (and every edge touching it) is
 deleted from Neo4j, both best-effort — an outage in either is logged
 and skipped, never blocks the deletion. The document row is deleted
-last, and its chunks and permission grants disappear with it
+last, and its chunks disappear with it
 automatically. An audit log entry records who deleted it. See ADR-045.
 
 **Asking a question:** a user sends a question to the query address,
@@ -2279,8 +2395,10 @@ doubly-unreachable check stops everything right there: no embedding,
 no search, no LLM call, replaced with the same fixed, friendly blocked
 message every guardrail in this system uses (see ADR-040's extension of
 ADR-039's pattern to the input side). A clean question then goes to a
-supervisor, `classify_domains`, which decides how many of this user's
-own accessible domains the question needs. Zero or one domain — every
+supervisor, `classify_domains`, which decides how many of this
+tenant's own accessible domains the question needs (ADR-046: domains
+are scoped to the tenant, not the individual user, matching document
+access itself). Zero or one domain — every
 question today, since domains are opt-in — takes the path this
 paragraph already describes below, exactly once, at no extra cost.
 
@@ -2288,8 +2406,8 @@ The path itself: the question is turned into a meaning-vector using the
 same embedding model used for chunks, so the two are comparable.
 Postgres finds 20 candidate chunks by vector similarity and,
 separately, 20 by keyword match — both searches joined against the
-permissions table, so a document this user was never granted access to
-is never a candidate at all, not filtered out afterward, and both
+document's own `tenant_id`, so a document belonging to a different
+tenant is never a candidate at all, not filtered out afterward, and both
 optionally narrowed to one domain — and merges the two ranked lists
 into one with Reciprocal Rank Fusion. Voyage AI's reranking model then
 looks at the actual question and each of those 20 candidates together,
@@ -2302,8 +2420,11 @@ retry unchanged, since it was set once in the graph's shared state and
 no node along the way touches it. Once there are chunks worth using,
 the system asks Neo4j what the documents behind those chunks explicitly
 reference — one hop only — and pulls in a snippet from each, subject to
-the same permission check: a referenced document this user can't see
-contributes no snippet. Those chunks, the graph snippets, and the
+the same tenant check: a referenced document outside the caller's own
+tenant contributes no snippet, even if a reference edge somehow pointed
+at it (ADR-046 scopes both the edge-building step and this read
+independently, so either one alone would still block the leak). Those
+chunks, the graph snippets, and the
 *original* question are sent to an LLM, which writes an answer grounded
 only in that retrieved text. Before that answer goes anywhere, the
 output guardrail runs: a moderation check and an LLM injection judge
@@ -3216,30 +3337,52 @@ differently for different checks, depending on what's actually at risk
 if the check is silently skipped.
 
 **Access control list (ACL)** — a record of exactly who is allowed to
-access a specific resource — here, one row per (document, user) pair
-that's been explicitly granted, stored in `document_permissions`. Not
-the same as a role (like "admin"), which grants broad, resource-agnostic
-capability; an ACL entry only ever says something about one specific
-document and one specific user.
+access a specific resource. This project used to keep one, literally:
+one row per (document, user) pair explicitly granted, stored in
+`document_permissions`. ADR-046 replaced it with something coarser —
+tenant membership is now the whole of document access control, so
+there's no longer a per-document, per-user list to speak of; a
+document is visible to everyone in the tenant that owns it, full stop.
+Not the same as a role (like "admin"), which grants broad,
+resource-agnostic capability regardless of which specific resource is
+involved.
+
+**Tenant** — a company or workspace: the group every user and document
+belongs to (ADR-046). Every document is shared with every user in its
+own tenant and invisible to everyone outside it; a user picks their
+tenant once, at signup, from a list an admin has already registered,
+and nothing lets them change it afterward. Not the same as a *role*
+(like "admin," which grants capability regardless of tenant) or an
+*ACL entry* (the finer-grained, now-deleted mechanism above) — a
+tenant is a boundary around a whole group of users and documents at
+once, not a grant to one specific person.
 
 **Identity vs. authentication** — identity is *who a request claims to
 be*; authentication is *proving that claim is true*. This project now
 has both for its REST API (ADR-036): a session cookie only exists
 because a password was already verified, so it proves identity rather
-than just asserting it. MCP still has identity without authentication
-— a self-asserted `X-User-Id` header, unchanged by design — and
-multi-tenancy, the other half of build-order item 14, isn't built yet.
+than just asserting it. MCP has both too, since ADR-046: its
+self-asserted `X-User-Id` header must now resolve to a real account in
+the database, not just parse as a UUID — closing what used to be
+identity without authentication on that path. Multi-tenancy itself, the
+other half of build-order item 14, is now built (ADR-046); production
+hardening beyond that remains future work.
 
 **Idempotent** — an operation that produces the same end result no
-matter how many times it runs. `grant_access`'s `ON CONFLICT DO
-NOTHING` makes granting the same permission twice safe — the second
-call changes nothing, rather than erroring or creating a duplicate.
+matter how many times it runs. `TenantRepository.create_tenant` relies
+on the database's own unique constraint on `tenants.name` for this
+guarantee under concurrency (see ADR-046's Consequences for the race
+its own pre-check alone can't close) — a pattern the now-deleted
+`grant_access` used to demonstrate with `ON CONFLICT DO NOTHING`
+instead, safely granting the same permission twice with no error and
+no duplicate.
 
 **SQL join** — combining rows from two database tables based on a
 shared value between them, evaluated as part of one query rather than
-as two separate steps in application code. This project's permission
+as two separate steps in application code. This project's document-access
 filter is a join between `chunks` (by way of their `document_id`) and
-`document_permissions`, so the database itself restricts which rows
+`documents.tenant_id` (since ADR-046 — previously `document_permissions`),
+so the database itself restricts which rows
 are ever candidates for ranking — nothing gets fetched and then
 discarded afterward.
 

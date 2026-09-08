@@ -1,23 +1,22 @@
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.permission_repository import PermissionRepository
+from app.repositories.tenant_repository import TenantRepository
 
 
-async def test_count_documents_for_user_only_counts_accessible_documents(db_session):
-    """A user's count should include only documents they've been granted access to."""
+async def test_count_documents_for_tenant_only_counts_that_tenants_documents(db_session):
+    """A tenant's count should include only documents uploaded within that tenant (ADR-046)."""
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenants = TenantRepository(db_session)
 
-    doc_a = await repository.create_document("a.txt")
-    doc_b = await repository.create_document("b.txt")
-    doc_c = await repository.create_document("c.txt")
-    await permissions.grant_access(doc_a.id, "alice")
-    await permissions.grant_access(doc_b.id, "alice")
-    await permissions.grant_access(doc_c.id, "bob")
+    tenant_a = await tenants.create_tenant("Acme")
+    tenant_b = await tenants.create_tenant("Globex")
 
-    assert await repository.count_documents_for_user("alice") == 2
-    assert await repository.count_documents_for_user("bob") == 1
-    assert await repository.count_documents_for_user("nobody") == 0
+    await repository.create_document("a.txt", tenant_a.id)
+    await repository.create_document("b.txt", tenant_a.id)
+    await repository.create_document("c.txt", tenant_b.id)
+
+    assert await repository.count_documents_for_tenant(tenant_a.id) == 2
+    assert await repository.count_documents_for_tenant(tenant_b.id) == 1
 
 
 async def test_get_recent_queries_for_user_scoped_and_ordered(db_session):

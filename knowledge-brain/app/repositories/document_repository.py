@@ -6,7 +6,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
-from app.models.document_permission import DocumentPermission
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +16,20 @@ class DocumentRepository:
     Services call these methods instead of writing queries themselves,
     so query logic stays in one place, and can be swapped or tested
     independently of business logic.
+
+    Since ADR-046, every document-scoped read here filters by
+    `tenant_id`, not a per-user grant — a document is visible to every
+    user in the tenant that uploaded it, full stop. There is no more
+    per-document, per-user access list to check.
     """
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_document(self, filename: str, domains: list[str] | None = None) -> Document:
-        """Insert a new document row (status defaults to pending).
+    async def create_document(
+        self, filename: str, tenant_id: uuid.UUID, domains: list[str] | None = None
+    ) -> Document:
+        """Insert a new document row (status defaults to pending), owned by one tenant.
 
         Deduped here, in the one place both the REST upload route (parsing
         a comma-separated string) and the MCP upload tool (taking a list
@@ -32,7 +38,7 @@ class DocumentRepository:
         renders as two React list items sharing the same key.
         """
         deduped_domains = list(dict.fromkeys(domains or []))
-        document = Document(filename=filename, domains=deduped_domains)
+        document = Document(filename=filename, tenant_id=tenant_id, domains=deduped_domains)
         self.session.add(document)
         try:
             await self.session.commit()
@@ -129,11 +135,11 @@ class DocumentRepository:
             raise
 
     async def delete_document(self, document: Document) -> None:
-        """Delete a document row — its chunks and permission grants cascade with it (ADR-045).
+        """Delete a document row — its chunks cascade with it (ADR-045).
 
         Takes the already-loaded Document, not an id, since the caller
         (DocumentDeletionService) already fetched it once via
-        get_document_for_user for the permission check, and needs its
+        get_document_for_tenant for the permission check, and needs its
         storage_path *before* this call removes the row.
         """
         await self.session.delete(document)
@@ -146,7 +152,7 @@ class DocumentRepository:
     async def find_similar_chunks(
         self,
         query_embedding: list[float],
-        user_id: str,
+        tenant_id: uuid.UUID,
         limit: int = 5,
         domain: str | None = None,
     ) -> list[Chunk]:
@@ -155,28 +161,26 @@ class DocumentRepository:
         `cosine_distance` returns 0 for identical direction and larger
         values for less similar vectors, so ordering ascending and
         taking the first few gives us the most relevant chunks first.
-        Joined against document_permissions so only chunks from documents
-        this user can access are ever candidates — filtered before the
-        ranking and the limit, not after, so an inaccessible chunk can
-        never take a slot in the results a promotable one should've had.
+        Joined against documents so only chunks from this tenant's own
+        documents are ever candidates (ADR-046) — filtered before the
+        ranking and the limit, not after, so a chunk from another
+        tenant's document can never take a slot in the results.
         `domain`, when given, narrows candidates further to documents
         tagged with that domain — the actual mechanism a domain-scoped
         retrieval agent uses to only see its own slice of the knowledge
         base (see FederatedRetrievalService). Omitted, this searches
-        exactly as it always has: every document the user can access,
+        exactly as it always has: every document this tenant can access,
         regardless of domain.
         """
         stmt = (
             select(Chunk)
-            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
-            .where(DocumentPermission.user_id == user_id)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(Document.tenant_id == tenant_id)
             .order_by(Chunk.embedding.cosine_distance(query_embedding))
             .limit(limit)
         )
         if domain is not None:
-            stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
-                Document.domains.any(domain)
-            )
+            stmt = stmt.where(Document.domains.any(domain))
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
@@ -185,7 +189,7 @@ class DocumentRepository:
         return list(result.scalars().all())
 
     async def find_by_keyword(
-        self, query: str, user_id: str, limit: int = 5, domain: str | None = None
+        self, query: str, tenant_id: uuid.UUID, limit: int = 5, domain: str | None = None
     ) -> list[Chunk]:
         """Return the chunks that best match a query via Postgres full-text search.
 
@@ -193,23 +197,29 @@ class DocumentRepository:
         (lowercased, stop words removed, words stemmed to their root) by
         `to_tsvector`/`plainto_tsquery` before comparing, and `ts_rank`
         scores how well each match is, not just whether one exists. Same
-        permission join as find_similar_chunks, same reasoning: filtered
+        tenant filter as find_similar_chunks, same reasoning: filtered
         before ranking, not after. Same optional `domain` narrowing too.
+
+        This also serves the one caller that used to need an
+        "unrestricted" version (DocumentGraphService, building reference
+        edges at ingestion time) — now that every user in a tenant can
+        see every document in it, "everything this tenant's documents
+        say" and "everything a specific user in that tenant can see" are
+        the same set, so a separate unrestricted method would just
+        duplicate this one.
         """
         tsquery = func.plainto_tsquery("english", query)
         tsvector = func.to_tsvector("english", Chunk.text)
 
         stmt = (
             select(Chunk)
-            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
-            .where(tsvector.op("@@")(tsquery), DocumentPermission.user_id == user_id)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(tsvector.op("@@")(tsquery), Document.tenant_id == tenant_id)
             .order_by(func.ts_rank(tsvector, tsquery).desc())
             .limit(limit)
         )
         if domain is not None:
-            stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
-                Document.domains.any(domain)
-            )
+            stmt = stmt.where(Document.domains.any(domain))
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
@@ -217,50 +227,23 @@ class DocumentRepository:
             raise
         return list(result.scalars().all())
 
-    async def list_domains_for_user(self, user_id: str) -> list[str]:
-        """Return every distinct domain tag across documents this user can see.
+    async def list_domains_for_tenant(self, tenant_id: uuid.UUID) -> list[str]:
+        """Return every distinct domain tag across documents this tenant can see.
 
         The set the domain-classification supervisor actually chooses
-        from — a domain this user has no accessible documents in isn't a
+        from — a domain this tenant has no documents in isn't a
         meaningful choice, so it's never even offered. Untagged documents
         (an empty domains array) contribute nothing here.
         """
         stmt = (
             select(func.unnest(Document.domains).label("domain"))
-            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
-            .where(DocumentPermission.user_id == user_id)
+            .where(Document.tenant_id == tenant_id)
             .distinct()
         )
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
-            logger.exception("Failed to list domains for user %s", user_id)
-            raise
-        return list(result.scalars().all())
-
-    async def find_by_keyword_unrestricted(self, query: str, limit: int = 5) -> list[Chunk]:
-        """Same search as find_by_keyword, deliberately with no permission filter.
-
-        For internal, system-level use only — building the Neo4j reference
-        graph at ingestion time, which asks "does any document define this
-        term" as a fact about the documents themselves, not "what can this
-        particular user see." Never call this on behalf of a user-facing
-        request; every caller answering a real question must use
-        find_by_keyword instead.
-        """
-        tsquery = func.plainto_tsquery("english", query)
-        tsvector = func.to_tsvector("english", Chunk.text)
-
-        stmt = (
-            select(Chunk)
-            .where(tsvector.op("@@")(tsquery))
-            .order_by(func.ts_rank(tsvector, tsquery).desc())
-            .limit(limit)
-        )
-        try:
-            result = await self.session.execute(stmt)
-        except SQLAlchemyError:
-            logger.exception("Failed to search for chunks by keyword (unrestricted)")
+            logger.exception("Failed to list domains for tenant %s", tenant_id)
             raise
         return list(result.scalars().all())
 
@@ -283,93 +266,81 @@ class DocumentRepository:
             raise
         return result.scalar_one_or_none()
 
-    async def list_documents_for_user(self, user_id: str) -> list[Document]:
-        """Return every document this user has been granted access to, newest first.
-
-        Same permission join as find_by_keyword/find_similar_chunks — a
-        document with no matching document_permissions row for this user
-        never appears, the same rule applied to browsing instead of search.
-        """
+    async def list_documents_for_tenant(self, tenant_id: uuid.UUID) -> list[Document]:
+        """Return every document this tenant can see, newest first (ADR-046)."""
         stmt = (
             select(Document)
-            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
-            .where(DocumentPermission.user_id == user_id)
+            .where(Document.tenant_id == tenant_id)
             .order_by(Document.uploaded_at.desc())
         )
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
-            logger.exception("Failed to list documents for user %s", user_id)
+            logger.exception("Failed to list documents for tenant %s", tenant_id)
             raise
         return list(result.scalars().all())
 
-    async def count_documents_for_user(self, user_id: str) -> int:
-        """Return how many documents this user has access to, without fetching the rows.
+    async def count_documents_for_tenant(self, tenant_id: uuid.UUID) -> int:
+        """Return how many documents this tenant can see, without fetching the rows.
 
-        Same permission join as list_documents_for_user, but a COUNT
-        instead of a SELECT — the dashboard only needs the number, and
-        fetching every row just to call len() on it wastes a full,
-        unnecessary transfer of every document's data.
+        The dashboard only needs the number, and fetching every row just
+        to call len() on it wastes a full, unnecessary transfer of every
+        document's data.
         """
-        stmt = (
-            select(func.count())
-            .select_from(Document)
-            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
-            .where(DocumentPermission.user_id == user_id)
-        )
+        stmt = select(func.count()).select_from(Document).where(Document.tenant_id == tenant_id)
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
-            logger.exception("Failed to count documents for user %s", user_id)
+            logger.exception("Failed to count documents for tenant %s", tenant_id)
             raise
         return result.scalar_one()
 
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
-        """Return a document by id with no permission check — internal use only.
+        """Return a document by id with no tenant check — internal use only.
 
-        Same reasoning as find_by_keyword_unrestricted: for system-level
-        code (here, the background job deciding whether to build graph
-        references) that isn't answering on behalf of a particular user.
-        Never call this to serve a user-facing request.
+        For system-level code (here, the background job deciding whether
+        to build graph references) that isn't answering on behalf of a
+        particular tenant. Never call this to serve a user-facing request.
         """
         return await self.session.get(Document, document_id)
 
-    async def get_document_for_user(self, document_id: uuid.UUID, user_id: str) -> Document | None:
-        """Return one document if this user has been granted access to it, else None.
+    async def get_document_for_tenant(
+        self, document_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> Document | None:
+        """Return one document if this tenant can see it, else None (ADR-046).
 
-        Same permission join as list_documents_for_user — a document with no
-        matching document_permissions row for this user is invisible, whether
-        someone is browsing the full list or polling one document directly
-        by id.
+        Same tenant filter as list_documents_for_tenant — a document
+        belonging to another tenant is invisible, whether someone is
+        browsing the full list or polling one document directly by id.
         """
-        stmt = (
-            select(Document)
-            .join(DocumentPermission, DocumentPermission.document_id == Document.id)
-            .where(Document.id == document_id, DocumentPermission.user_id == user_id)
-            .limit(1)
+        stmt = select(Document).where(
+            Document.id == document_id, Document.tenant_id == tenant_id
         )
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
-            logger.exception("Failed to fetch document %s for user %s", document_id, user_id)
+            logger.exception("Failed to fetch document %s for tenant %s", document_id, tenant_id)
             raise
         return result.scalar_one_or_none()
 
-    async def get_first_chunk_text(self, document_id: uuid.UUID, user_id: str) -> str | None:
+    async def get_first_chunk_text(self, document_id: uuid.UUID, tenant_id: uuid.UUID) -> str | None:
         """Return a referenced document's first chunk as a representative snippet.
 
         Used for graph context, not primary retrieval, so one chunk is
         enough to give the LLM a sense of what the referenced document
-        is about, without pulling in its full text. Same permission join
+        is about, without pulling in its full text. Same tenant filter
         as every other retrieval path — a document being *referenced* by
-        one this user can see doesn't mean this user can see it too, and
-        without this filter that's exactly how confidential content could
-        leak into an answer through the graph-context feature.
+        one this tenant can see doesn't mean this tenant can see it too
+        (the reference itself could, in principle, point across a tenant
+        boundary if the graph were ever built without tenant scoping —
+        see DocumentGraphService, which is why it's scoped too), and
+        without this filter that's exactly how confidential content
+        could leak into an answer through the graph-context feature.
         """
         stmt = (
             select(Chunk.text)
-            .join(DocumentPermission, DocumentPermission.document_id == Chunk.document_id)
-            .where(Chunk.document_id == document_id, DocumentPermission.user_id == user_id)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(Chunk.document_id == document_id, Document.tenant_id == tenant_id)
             .order_by(Chunk.chunk_index)
             .limit(1)
         )

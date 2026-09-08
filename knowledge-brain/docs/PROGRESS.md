@@ -4225,3 +4225,137 @@ the standing reliability and test-coverage gaps. At 3–4 hours/day,
 still roughly 4–5 working days left on that list, with the honest
 caveat that new, unplanned feature requests have consistently kept the
 total finish line moving rather than shrinking to zero.
+
+## Session: 2026-09-08 — Multi-tenancy
+
+### What we built
+- Multi-tenancy — this time an item that *was* already sitting on the
+  tracked remaining-scope list, not a new request. You specified it
+  precisely up front: documents shared within a tenant, conversations
+  private to the individual user, a user picks their tenant at signup
+  from an already-registered list, only an admin can register a new
+  one.
+- Confirmed via a real Step 1/3 conversation, not assumed: replacing
+  the old per-user `DocumentPermission` grant table entirely (not
+  layering tenant sharing on top of it) and backfilling the three
+  existing users and thirty-two existing documents into one new tenant
+  you named "Microsoft." Both were real, explicit decisions you made,
+  not ones I picked myself.
+- The backend refactor touched roughly 30 files: a new `Tenant`
+  model/repository/route, `tenant_id` added to `users` and
+  `documents`, every document-access method in `DocumentRepository`
+  rewritten to filter by tenant instead of a grant, `tenant_id`
+  threaded through the entire retrieval pipeline
+  (`QueryState`/`RetrievalService`/`FederatedRetrievalService`) as the
+  new access-control parameter, with `user_id` kept on purely for
+  identity/attribution. `DocumentPermission`, `PermissionRepository`,
+  and the `grant_document_access` route were deleted outright, not
+  kept alongside the new mechanism.
+- Two real security hardenings fell out of the change itself, not
+  requested separately: `DocumentGraphService`'s reference-graph
+  builder used to search every document system-wide, which under
+  tenant sharing could have linked two different tenants' documents —
+  closed by scoping that search (and the query pipeline's own snippet
+  read, independently, as a second layer) to the ingesting document's
+  own tenant. MCP's `X-User-Id` header, previously trusted with zero
+  database check, now has to resolve to a real account, since a
+  fabricated id has no real tenant to scope access to.
+- Wrote the hand-run SQL migration myself, handed it to you to run
+  (never touched the database directly) — created `tenants`, added
+  `tenant_id` to both tables, backfilled the "Microsoft" tenant,
+  dropped `document_permissions`. My first attempt at the verification
+  query I gave you afterward had a real Postgres bug (a correlated
+  subquery reaching for an ungrouped column) — you hit the error
+  running it, I fixed it on the spot with a plain join instead.
+- Built the frontend half after the backend was done: a tenant picker
+  on the signup form, and the Admin page's "Tenant management" section
+  — previously an honest placeholder — now real: a list of registered
+  tenants and a register-a-new-tenant form, replacing the deleted
+  per-document permissions viewer.
+- Verified all three claims live in the browser, not just by test:
+  signup landing a new user in the chosen tenant (checked directly in
+  Postgres); two independent users in the same tenant, one instantly
+  seeing a document the other had just uploaded, with zero grant; a
+  second tenant registered, a third user signed into it landing at
+  zero documents, and a question answerable only from the first
+  tenant's data coming back "I don't know" — confirming isolation
+  holds at retrieval itself, not just in what the document list shows.
+- Ran `/code-review` (backgrounded, survived a session usage-limit
+  reset mid-run by resuming the same agent rather than restarting) and
+  fixed the two real correctness bugs it found: a concurrent-registration
+  race in `create_tenant` that surfaced an unhandled 500 instead of a
+  409, and a whitespace-padded tenant name that bypassed the
+  duplicate-name check — fixed at the actual boundary (a Pydantic
+  validator), not just the one frontend form that exposed it.
+- Wrote 17 new backend tests across the whole feature, including two
+  regression tests aimed specifically at the code-review findings and
+  two aimed specifically at the cross-tenant graph-leak fix (one fake
+  graph edge that *claims* a cross-tenant reference exists, asserting
+  the snippet still never comes back). Backend suite: 133 → 150
+  passing. Frontend: 37 passing, unchanged in count — the admin
+  dashboard's tests were restructured, not added to.
+- Wrote ADR-046, naming a real, current, still-open trade-off plainly
+  rather than smoothing it over: this system's own written Enterprise
+  Requirement 5 says tenant-level scoping alone "is not enough," and
+  as shipped, that's exactly what document access now is. Recorded as
+  a deliberate scope decision for this feature, not an oversight —
+  reconciling it is future work.
+
+### What I struggled with
+- Nothing on the decisions themselves — both were confirmed explicitly
+  before I built anything. The one real mid-build interruption was
+  external: a session usage-limit reset while `/code-review`'s
+  sub-agents were still verifying findings, requiring an agent-identity
+  resolution step (the same name had started pointing at a different,
+  newer agent) before I could resume the right one by its raw agent id
+  instead.
+- My own SQL mistake, caught by you running it: the first verification
+  query I handed you grouped by `tenant.name` but reached into a
+  subquery for `tenant.id`, which Postgres correctly refused. Fixed
+  immediately once you reported the exact error back.
+
+### Concepts to revisit
+- Why "tenant membership is not enough" (Requirement 5) and "tenant
+  membership is the goal" (this feature's actual spec) are two
+  different, both legitimate requirements that this session's decision
+  satisfies only the second of — and what a later feature would need
+  to add (a per-document restriction *within* a tenant) to satisfy
+  both at once.
+- Why the same defense — tenant-scoping a query — had to be applied at
+  two separate points (the graph-edge write, and the graph-context
+  read) rather than once: the second one is what actually kept the
+  system safe even if the first check were ever removed or bypassed by
+  a future change, the same "defense in depth" reasoning worth being
+  able to explain concretely, not just name.
+- Why caching the user-to-tenant mapping would be a real, worthwhile
+  fix at scale even though it isn't one today: `user_id_middleware` now
+  opens a fresh database session on every authenticated request purely
+  to resolve `tenant_id`, and that mapping never changes after signup —
+  about as cache-friendly a value as exists in this system, currently
+  not cached at all.
+
+### What's next
+- The Enterprise Requirement 5 gap this ADR named: does this project
+  want a later feature restricting a document to a subset of users
+  *within* a tenant, on top of tenant-wide sharing? Not yet decided.
+- The `user_id_middleware` per-request database round trip named above
+  — a real, avoidable cost at higher traffic, not urgent today.
+- Everything else from prior sessions still stands: APIM's remaining
+  gaps, the missing migration tool, the PII review workflow (still no
+  reviewer UI), Postgres' still-open cost fix, the federated-retrieval
+  failure-isolation gap, domain vocabulary drift, and prior
+  test-coverage gaps.
+
+**Estimated completion: ~92% of the tracked build (weighted by real
+effort, not a flat step count) is now done** — multi-tenancy was the
+single largest item on the previously-tracked remaining-scope list,
+and it's now off it entirely, verified live and tested. What's left is
+narrower and more maintenance-shaped than any single remaining feature:
+APIM's gaps, a real migration tool, the PII reviewer UI, Postgres'
+cost fix, and standing reliability/test-coverage work, plus the
+now-named, still-open question of whether document sharing needs a
+finer grain within a tenant. Rough remaining effort: ~8 hours. At 3–4
+hours/day, roughly 2 working days left on the currently-known list,
+with the same honest caveat as every prior estimate: a genuinely new
+feature request would grow this list again, the same way multi-tenancy
+itself did until this session actually built it.

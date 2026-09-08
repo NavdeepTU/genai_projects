@@ -1461,9 +1461,43 @@
     <p class="caveat"><strong>Verified live:</strong> a real document deleted through the actual confirmation dialog, then checked directly — zero orphaned rows in <code>chunks</code> or <code>document_permissions</code> across the whole database, the blob actually gone from Azurite (container contents listed before and after), and the audit log entry carrying the correct deleting <code>user_id</code>. Backend suite: 119 → 133 passing · frontend suite: 28 → 33 passing. See <a href="adr/ADR-045-document-deletion.md">ADR-045</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 27 — Multi-tenancy <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">tenant-wide document sharing replaces the old per-user grant table; conversations stay per-user</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Tenant model + repository</span>
+        <span class="path mono">GET /tenants (public) · POST /admin/tenants (require_admin)</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">tenant_id replaces document_permissions</span>
+        <span class="path mono">DocumentPermission + PermissionRepository deleted outright</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Two cross-tenant leak fixes</span>
+        <span class="path mono">Neo4j reference-graph scoping · MCP X-User-Id now DB-verified</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real, named tension with this project's own Enterprise Requirement 5:</strong> "multi-tenancy is not enough — users should only retrieve chunks from documents they have explicit access to." As built, tenant membership is the whole of document access control — every user in a tenant can read every document that tenant owns, with no remaining per-document restriction. A deliberate trade-off for this feature's stated scope, not an oversight, recorded plainly in <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a> rather than smoothed over.</p>
+    <p class="caveat"><strong>Two real bugs caught by <code>/code-review</code>, both fixed the same session:</strong> two concurrent requests to register the same tenant name could both pass the pre-check and the second would surface an unhandled 500 instead of a 409 — fixed by catching the underlying <code>IntegrityError</code>. A tenant name with leading/trailing whitespace could bypass the duplicate-name check entirely — fixed with a Pydantic validator on the request model itself, not just the one frontend form that exposed it.</p>
+    <p class="caveat"><strong>Verified live:</strong> two independent users signed up into the same tenant, one instantly saw a document the other had just uploaded, with zero grant. A second tenant registered, a third user signed into it landed at zero documents, and a question answerable only from the first tenant's data came back "I don't know" — confirming isolation holds at retrieval, not just in the document list. Backend suite: 133 → 150 passing · frontend suite: 37 passing (restructured, not added to). See <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a>.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
-    <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, and document deletion. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>
+    <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, and multi-tenancy. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy, and ADR-046 for the one place multi-tenancy currently falls short of Requirement 5.</p>
   </footer>
 
 </div>

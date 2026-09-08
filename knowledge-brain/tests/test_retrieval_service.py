@@ -6,13 +6,19 @@ from openai import OpenAIError
 from app.core.circuit_breaker import CircuitOpenError
 from app.models.document import Chunk
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.retrieval_service import BLOCKED_MESSAGE, RetrievalService
+
+
+async def _tenant_id(db_session) -> uuid.UUID:
+    tenant = await TenantRepository(db_session).create_tenant("Acme")
+    return tenant.id
 
 
 async def test_build_sources_and_confidence_includes_filename_and_score(db_session):
     """Each reranked chunk should become a source carrying its own document's filename."""
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("policy.pdf")
+    document = await repository.create_document("policy.pdf", await _tenant_id(db_session))
     service = RetrievalService(repository, graph_repository=None)
 
     state = {
@@ -36,7 +42,7 @@ async def test_build_sources_and_confidence_includes_filename_and_score(db_sessi
 async def test_build_sources_and_confidence_dedupes_filename_lookups(db_session):
     """Two chunks from the same document should only need one filename lookup, not two."""
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("handbook.txt")
+    document = await repository.create_document("handbook.txt", await _tenant_id(db_session))
     service = RetrievalService(repository, graph_repository=None)
 
     lookups = []
@@ -66,7 +72,7 @@ async def test_build_sources_and_confidence_dedupes_filename_lookups(db_session)
 async def test_build_sources_and_confidence_confidence_is_none_when_reranker_unavailable(db_session):
     """A fallback-ranked answer must never report a real-looking confidence number."""
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("notes.txt")
+    document = await repository.create_document("notes.txt", await _tenant_id(db_session))
     service = RetrievalService(repository, graph_repository=None)
 
     state = {
@@ -102,7 +108,7 @@ async def test_build_sources_and_confidence_handles_missing_document(db_session)
 async def test_build_sources_and_confidence_returns_nothing_when_blocked(db_session):
     """A blocked answer must never show the sources that tripped the guardrail."""
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("secret.txt")
+    document = await repository.create_document("secret.txt", await _tenant_id(db_session))
     service = RetrievalService(repository, graph_repository=None)
 
     state = {
@@ -304,3 +310,79 @@ def test_should_proceed_after_input_check_routes_by_blocked_flag():
 
     assert service._should_proceed_after_input_check({"blocked": False}) == "proceed"
     assert service._should_proceed_after_input_check({"blocked": True}) == "block"
+
+
+class _FakeGraphRepository:
+    """Just enough of GraphRepository for _graph_context_node to run.
+
+    Always claims the same referenced_ids regardless of which document
+    asks — good enough to simulate a graph edge that (by mistake or by
+    design of the test) points at a document outside the asking
+    tenant, without needing a real Neo4j session.
+    """
+
+    def __init__(self, referenced_ids: list[str]) -> None:
+        self._referenced_ids = referenced_ids
+
+    async def get_referenced_documents(self, document_id: str) -> list[str]:
+        return self._referenced_ids
+
+
+async def test_graph_context_node_includes_snippet_from_a_same_tenant_referenced_document(db_session):
+    """A reference edge to a document in the caller's own tenant should surface its snippet."""
+    repository = DocumentRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
+
+    source = await repository.create_document("policy-overview.txt", tenant_id)
+    referenced = await repository.create_document("expense-policy.txt", tenant_id)
+    await repository.save_chunks(
+        [Chunk(document_id=referenced.id, chunk_index=0, text="expense policy details", embedding=[0.1] * 1536)]
+    )
+
+    graph_repository = _FakeGraphRepository([str(referenced.id)])
+    service = RetrievalService(repository, graph_repository)
+
+    state = {
+        "reranked_chunks": [Chunk(document_id=source.id, chunk_index=0, text="source chunk")],
+        "tenant_id": str(tenant_id),
+    }
+
+    result = await service._graph_context_node(state)
+
+    assert result["graph_context"] == ["expense policy details"]
+
+
+async def test_graph_context_node_excludes_snippet_from_a_different_tenant_referenced_document(db_session):
+    """ADR-046 defense in depth: even if a graph edge somehow pointed at a document outside
+    the caller's own tenant, the final snippet read is still tenant-scoped (get_first_chunk_text),
+    so no cross-tenant content ever reaches the LLM's context — regardless of whether
+    DocumentGraphService.build_references' own tenant scoping ever let that edge through.
+    """
+    repository = DocumentRepository(db_session)
+    tenant_a = await _tenant_id(db_session)
+    tenant_b = (await TenantRepository(db_session).create_tenant("Globex")).id
+
+    source = await repository.create_document("policy-overview.txt", tenant_a)
+    other_tenants_document = await repository.create_document("secret-plan.txt", tenant_b)
+    await repository.save_chunks(
+        [
+            Chunk(
+                document_id=other_tenants_document.id,
+                chunk_index=0,
+                text="confidential Globex content",
+                embedding=[0.1] * 1536,
+            )
+        ]
+    )
+
+    graph_repository = _FakeGraphRepository([str(other_tenants_document.id)])
+    service = RetrievalService(repository, graph_repository)
+
+    state = {
+        "reranked_chunks": [Chunk(document_id=source.id, chunk_index=0, text="source chunk")],
+        "tenant_id": str(tenant_a),
+    }
+
+    result = await service._graph_context_node(state)
+
+    assert result["graph_context"] == []

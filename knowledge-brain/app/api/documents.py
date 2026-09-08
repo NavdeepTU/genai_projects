@@ -14,7 +14,7 @@ from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.graph_database import driver as graph_driver
 from app.core.graph_database import get_graph_session
-from app.core.middleware import get_correlation_id, get_current_user_id
+from app.core.middleware import get_correlation_id, get_current_tenant_id, get_current_user_id
 from app.models.document import (
     DocumentListItem,
     DocumentListResponse,
@@ -22,11 +22,9 @@ from app.models.document import (
     DocumentStatusResponse,
     DocumentUploadResponse,
 )
-from app.models.document_permission import GrantAccessRequest, GrantAccessResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
-from app.repositories.permission_repository import PermissionRepository
 from app.services.document_deletion_service import DocumentDeletionService
 from app.services.document_graph_service import DocumentGraphService
 from app.services.extraction import extract_text
@@ -55,7 +53,7 @@ async def _process_uploaded_document(
     """
     async with AsyncSessionLocal() as db:
         repository = DocumentRepository(db)
-        service = IngestionService(repository, PermissionRepository(db))
+        service = IngestionService(repository)
         await service.process_document(document_id, filename, content)
 
         document = await repository.get_by_id(document_id)
@@ -92,10 +90,11 @@ async def upload_document(
     domain_list = [d.strip() for d in domains.split(",") if d.strip()]
     content = await file.read()
     user_id = get_current_user_id()
+    tenant_id = uuid.UUID(get_current_tenant_id())
     correlation_id = get_correlation_id()
 
-    service = IngestionService(DocumentRepository(db), PermissionRepository(db))
-    document = await service.create_document(file.filename, content, user_id, domain_list)
+    service = IngestionService(DocumentRepository(db))
+    document = await service.create_document(file.filename, content, tenant_id, domain_list)
 
     await AuditRepository(db).log_action(
         correlation_id=correlation_id,
@@ -103,6 +102,7 @@ async def upload_document(
         resource_type="document",
         resource_id=str(document.id),
         extra_data={"filename": document.filename, "status": document.status.value, "domains": domain_list},
+        tenant_id=str(tenant_id),
         user_id=user_id,
     )
 
@@ -123,9 +123,9 @@ async def upload_document(
 async def list_documents(
     db: AsyncSession = Depends(get_db),
 ) -> DocumentListResponse:
-    """Return every document the calling user has access to, newest first."""
-    user_id = get_current_user_id()
-    documents = await DocumentRepository(db).list_documents_for_user(user_id)
+    """Return every document the calling user's tenant can see, newest first (ADR-046)."""
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    documents = await DocumentRepository(db).list_documents_for_tenant(tenant_id)
     return DocumentListResponse(
         documents=[DocumentListItem.model_validate(doc) for doc in documents],
         correlation_id=get_correlation_id(),
@@ -138,8 +138,8 @@ async def get_document_status(
     db: AsyncSession = Depends(get_db),
 ) -> DocumentStatusResponse:
     """Report one document's progress through the ingestion pipeline, for polling."""
-    user_id = get_current_user_id()
-    document = await DocumentRepository(db).get_document_for_user(document_id, user_id)
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -160,17 +160,17 @@ async def get_document_content(
 ) -> Response:
     """Serve a document's original file, so it can be opened in the browser (ADR-044).
 
-    Permission-checked exactly like every other document access in this
-    system — get_document_for_user returns None for a document this user
-    was never granted access to, the same as a nonexistent id. A document
-    with no storage_path (uploaded before this feature existed, or whose
-    blob save itself failed) has nothing to serve, a 404 same as a
-    missing document rather than a different error shape to handle.
-    Content-Disposition: inline is what makes the browser render a PDF or
-    text file directly instead of downloading it.
+    Tenant-checked exactly like every other document access in this
+    system (ADR-046) — get_document_for_tenant returns None for a
+    document belonging to another tenant, the same as a nonexistent id.
+    A document with no storage_path (uploaded before this feature
+    existed, or whose blob save itself failed) has nothing to serve, a
+    404 same as a missing document rather than a different error shape
+    to handle. Content-Disposition: inline is what makes the browser
+    render a PDF or text file directly instead of downloading it.
     """
-    user_id = get_current_user_id()
-    document = await DocumentRepository(db).get_document_for_user(document_id, user_id)
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
     if document is None or document.storage_path is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -198,13 +198,13 @@ async def delete_document(
 ) -> Response:
     """Delete a document completely — its file, its graph node, and its database rows (ADR-045).
 
-    Permission-checked exactly like viewing or listing: anyone with
-    access to a document can delete it today, the same has_access rule
-    grant_document_access already uses — there's no separate "owner"
-    concept in this project's permission model yet.
+    Tenant-checked exactly like viewing or listing (ADR-046): anyone in
+    the same tenant as a document can delete it today, the same
+    tenant-membership rule that already governs seeing it — there's no
+    separate "owner" concept in this project's permission model.
     """
-    user_id = get_current_user_id()
-    document = await DocumentRepository(db).get_document_for_user(document_id, user_id)
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -224,37 +224,8 @@ async def delete_document(
         resource_type="document",
         resource_id=str(document_id),
         extra_data={"filename": filename},
-        user_id=user_id,
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
     )
 
     return Response(status_code=204)
-
-
-@router.post("/{document_id}/access", response_model=GrantAccessResponse, status_code=201)
-async def grant_document_access(
-    document_id: uuid.UUID,
-    body: GrantAccessRequest,
-    db: AsyncSession = Depends(get_db),
-) -> GrantAccessResponse:
-    """Share a document with another user — only someone who already has access can do this."""
-    user_id = get_current_user_id()
-    permission_repository = PermissionRepository(db)
-
-    if not await permission_repository.has_access(document_id, user_id):
-        raise HTTPException(status_code=403, detail="You don't have access to this document")
-
-    await permission_repository.grant_access(document_id, body.user_id)
-
-    correlation_id = get_correlation_id()
-    await AuditRepository(db).log_action(
-        correlation_id=correlation_id,
-        action="permission_granted",
-        resource_type="document",
-        resource_id=str(document_id),
-        extra_data={"granted_to": body.user_id},
-        user_id=user_id,
-    )
-
-    return GrantAccessResponse(
-        document_id=document_id, granted_to=body.user_id, correlation_id=correlation_id
-    )

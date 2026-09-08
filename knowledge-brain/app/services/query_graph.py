@@ -22,6 +22,7 @@ class QueryState(TypedDict):
     original_question: str
     question: str
     user_id: str
+    tenant_id: str
     domain: str | None
     candidates: list[Chunk]
     reranked_chunks: list[Chunk]

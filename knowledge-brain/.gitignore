@@ -37,3 +37,8 @@ infra/*.tfstate
 infra/*.tfstate.*
 infra/terraform.tfvars
 !infra/terraform.tfvars.example
+
+# One-off, hand-run schema migrations (this project's no-Alembic
+# convention — I write the exact SQL, you run it yourself once against
+# your own database; the ADR is the durable record, not the file)
+scripts/*.sql

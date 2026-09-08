@@ -49,7 +49,13 @@ class AuditRepository:
             raise
 
     async def log_query_made(
-        self, *, correlation_id: str, user_id: str, question: str, duration_ms: float
+        self,
+        *,
+        correlation_id: str,
+        user_id: str,
+        question: str,
+        duration_ms: float,
+        tenant_id: str | None = None,
     ) -> None:
         """Record one query_made action — the one shape both /query and MCP's ask_knowledge_base need.
 
@@ -64,11 +70,18 @@ class AuditRepository:
             resource_type="query",
             resource_id=correlation_id,
             extra_data={"question": question, "duration_ms": duration_ms},
+            tenant_id=tenant_id,
             user_id=user_id,
         )
 
     async def log_answer_blocked(
-        self, *, correlation_id: str, user_id: str, question: str, block_reason: str
+        self,
+        *,
+        correlation_id: str,
+        user_id: str,
+        question: str,
+        block_reason: str,
+        tenant_id: str | None = None,
     ) -> None:
         """Record one answer_blocked action — same shared-shape reasoning as log_query_made.
 
@@ -82,6 +95,7 @@ class AuditRepository:
             resource_type="query",
             resource_id=correlation_id,
             extra_data={"question": question, "block_reason": block_reason},
+            tenant_id=tenant_id,
             user_id=user_id,
         )
 

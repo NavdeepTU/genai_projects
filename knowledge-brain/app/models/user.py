@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,7 +14,9 @@ class User(Base):
 
     hashed_password never holds the actual password, only the one-way
     Argon2id hash of it (see app/services/auth_service.py) — even a full
-    database leak never exposes a real password.
+    database leak never exposes a real password. tenant_id is chosen
+    once, at signup, from an already-registered tenant (ADR-046) — there
+    is no route that lets a user change it afterward.
     """
 
     __tablename__ = "users"
@@ -22,6 +24,7 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -29,10 +32,15 @@ class User(Base):
 
 
 class SignupRequest(BaseModel):
-    """Request body for creating a new account."""
+    """Request body for creating a new account.
+
+    tenant_id must be one of the tenants an admin has already registered
+    (GET /tenants) — a user picks, never creates, their tenant (ADR-046).
+    """
 
     email: EmailStr
     password: str
+    tenant_id: uuid.UUID
 
 
 class LoginRequest(BaseModel):
@@ -49,5 +57,6 @@ class UserResponse(BaseModel):
 
     id: uuid.UUID
     email: str
+    tenant_id: uuid.UUID
     is_admin: bool
     correlation_id: str

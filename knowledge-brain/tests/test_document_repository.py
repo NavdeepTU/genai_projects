@@ -1,36 +1,46 @@
+import uuid
+
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.permission_repository import PermissionRepository
+from app.repositories.tenant_repository import TenantRepository
+
+
+async def _tenant_id(db_session, name: str = "Acme") -> uuid.UUID:
+    tenant = await TenantRepository(db_session).create_tenant(name)
+    return tenant.id
 
 
 async def test_create_document_stores_domains(db_session):
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("handbook.pdf", domains=["HR", "Finance"])
+    tenant_id = await _tenant_id(db_session)
+    document = await repository.create_document("handbook.pdf", tenant_id, domains=["HR", "Finance"])
 
     assert document.domains == ["HR", "Finance"]
 
 
 async def test_create_document_dedupes_repeated_domains(db_session):
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("handbook.pdf", domains=["HR", "HR", "Finance"])
+    tenant_id = await _tenant_id(db_session)
+    document = await repository.create_document(
+        "handbook.pdf", tenant_id, domains=["HR", "HR", "Finance"]
+    )
 
     assert document.domains == ["HR", "Finance"]
 
 
 async def test_create_document_defaults_to_no_domains(db_session):
     repository = DocumentRepository(db_session)
-    document = await repository.create_document("misc.txt")
+    tenant_id = await _tenant_id(db_session)
+    document = await repository.create_document("misc.txt", tenant_id)
 
     assert document.domains == []
 
 
 async def test_find_by_keyword_domain_filter_excludes_other_domains(db_session):
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
 
-    hr_doc = await repository.create_document("hr.txt", domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", domains=["Finance"])
-    await permissions.grant_access(hr_doc.id, "user-1")
-    await permissions.grant_access(finance_doc.id, "user-1")
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
 
     from app.models.document import Chunk
 
@@ -42,19 +52,17 @@ async def test_find_by_keyword_domain_filter_excludes_other_domains(db_session):
         ]
     )
 
-    results = await repository.find_by_keyword("vacation", "user-1", domain="HR")
+    results = await repository.find_by_keyword("vacation", tenant_id, domain="HR")
 
     assert [c.document_id for c in results] == [hr_doc.id]
 
 
 async def test_find_by_keyword_without_domain_searches_everything(db_session):
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
 
-    hr_doc = await repository.create_document("hr.txt", domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", domains=["Finance"])
-    await permissions.grant_access(hr_doc.id, "user-1")
-    await permissions.grant_access(finance_doc.id, "user-1")
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
 
     from app.models.document import Chunk
 
@@ -66,19 +74,41 @@ async def test_find_by_keyword_without_domain_searches_everything(db_session):
         ]
     )
 
-    results = await repository.find_by_keyword("vacation", "user-1")
+    results = await repository.find_by_keyword("vacation", tenant_id)
 
     assert {c.document_id for c in results} == {hr_doc.id, finance_doc.id}
 
 
+async def test_find_by_keyword_excludes_other_tenants_documents(db_session):
+    """A tenant search must never surface another tenant's chunks (ADR-046)."""
+    repository = DocumentRepository(db_session)
+    tenant_a = await _tenant_id(db_session, "Acme")
+    tenant_b = await _tenant_id(db_session, "Globex")
+
+    doc_a = await repository.create_document("a.txt", tenant_a)
+    doc_b = await repository.create_document("b.txt", tenant_b)
+
+    from app.models.document import Chunk
+
+    embedding = [0.1] * 1536
+    await repository.save_chunks(
+        [
+            Chunk(document_id=doc_a.id, chunk_index=0, text="vacation policy details", embedding=embedding),
+            Chunk(document_id=doc_b.id, chunk_index=0, text="vacation policy details", embedding=embedding),
+        ]
+    )
+
+    results = await repository.find_by_keyword("vacation", tenant_a)
+
+    assert [c.document_id for c in results] == [doc_a.id]
+
+
 async def test_find_similar_chunks_domain_filter_excludes_other_domains(db_session):
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
 
-    hr_doc = await repository.create_document("hr.txt", domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", domains=["Finance"])
-    await permissions.grant_access(hr_doc.id, "user-1")
-    await permissions.grant_access(finance_doc.id, "user-1")
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
 
     from app.models.document import Chunk
 
@@ -90,53 +120,49 @@ async def test_find_similar_chunks_domain_filter_excludes_other_domains(db_sessi
         ]
     )
 
-    results = await repository.find_similar_chunks(embedding, "user-1", domain="HR")
+    results = await repository.find_similar_chunks(embedding, tenant_id, domain="HR")
 
     assert [c.document_id for c in results] == [hr_doc.id]
 
 
-async def test_list_domains_for_user_returns_distinct_domains_across_accessible_documents(db_session):
+async def test_list_domains_for_tenant_returns_distinct_domains_across_documents(db_session):
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
+    other_tenant_id = await _tenant_id(db_session, "Globex")
 
-    doc_a = await repository.create_document("a.txt", domains=["HR", "Onboarding"])
-    doc_b = await repository.create_document("b.txt", domains=["HR"])
-    doc_c = await repository.create_document("c.txt", domains=["Finance"])
-    await permissions.grant_access(doc_a.id, "user-1")
-    await permissions.grant_access(doc_b.id, "user-1")
-    # user-1 never gets access to doc_c — its "Finance" domain should not appear.
+    await repository.create_document("a.txt", tenant_id, domains=["HR", "Onboarding"])
+    await repository.create_document("b.txt", tenant_id, domains=["HR"])
+    # A different tenant's document — its "Finance" domain must not appear.
+    await repository.create_document("c.txt", other_tenant_id, domains=["Finance"])
 
-    domains = await repository.list_domains_for_user("user-1")
+    domains = await repository.list_domains_for_tenant(tenant_id)
 
     assert set(domains) == {"HR", "Onboarding"}
 
 
-async def test_list_domains_for_user_ignores_untagged_documents(db_session):
+async def test_list_domains_for_tenant_ignores_untagged_documents(db_session):
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
 
-    doc = await repository.create_document("untagged.txt")
-    await permissions.grant_access(doc.id, "user-1")
+    await repository.create_document("untagged.txt", tenant_id)
 
-    domains = await repository.list_domains_for_user("user-1")
+    domains = await repository.list_domains_for_tenant(tenant_id)
 
     assert domains == []
 
 
-async def test_delete_document_cascades_chunks_and_permission_grants(db_session):
-    """Deleting a document must remove its chunks and access grants too, not just the row —
-    a leftover chunk or grant pointing at a deleted document would be a real data-integrity gap.
+async def test_delete_document_cascades_chunks(db_session):
+    """Deleting a document must remove its chunks too, not just the row —
+    a leftover chunk pointing at a deleted document would be a real data-integrity gap.
     """
     repository = DocumentRepository(db_session)
-    permissions = PermissionRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
 
-    document = await repository.create_document("handbook.pdf")
-    await permissions.grant_access(document.id, "user-1")
+    document = await repository.create_document("handbook.pdf", tenant_id)
 
     from sqlalchemy import select
 
     from app.models.document import Chunk
-    from app.models.document_permission import DocumentPermission
 
     await repository.save_chunks(
         [Chunk(document_id=document.id, chunk_index=0, text="a chunk", embedding=[0.1] * 1536)]
@@ -151,7 +177,13 @@ async def test_delete_document_cascades_chunks_and_permission_grants(db_session)
     )
     assert remaining_chunks.scalars().all() == []
 
-    remaining_permissions = await db_session.execute(
-        select(DocumentPermission).where(DocumentPermission.document_id == document.id)
-    )
-    assert remaining_permissions.scalars().all() == []
+
+async def test_get_document_for_tenant_hides_other_tenants_documents(db_session):
+    repository = DocumentRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
+    other_tenant_id = await _tenant_id(db_session, "Globex")
+
+    document = await repository.create_document("handbook.pdf", other_tenant_id)
+
+    assert await repository.get_document_for_tenant(document.id, tenant_id) is None
+    assert await repository.get_document_for_tenant(document.id, other_tenant_id) is not None

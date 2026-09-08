@@ -55,7 +55,7 @@ class RetrievalService:
         self._graph = build_query_graph(self)
 
     async def _prepare_for_generation(
-        self, question: str, user_id: str, domain: str | None = None
+        self, question: str, user_id: str, tenant_id: str, domain: str | None = None
     ) -> QueryState:
         """Run the graph up through graph context — everything generation needs,
         stopping one step short of actually generating an answer (see ADR-043).
@@ -68,11 +68,16 @@ class RetrievalService:
         blocked, with generation never having been reached — exactly as
         before this method existed, just without generation being part of
         the same graph invocation.
+
+        tenant_id (ADR-046) is what actually scopes retrieval — user_id
+        still flows through for tracing/audit attribution only, since
+        every user in a tenant can see the same documents now.
         """
         initial_state: QueryState = {
             "original_question": question,
             "question": question,
             "user_id": user_id,
+            "tenant_id": tenant_id,
             "domain": domain,
             "candidates": [],
             "reranked_chunks": [],
@@ -98,7 +103,9 @@ class RetrievalService:
             },
         )
 
-    async def run_query(self, question: str, user_id: str, domain: str | None = None) -> QueryState:
+    async def run_query(
+        self, question: str, user_id: str, tenant_id: str, domain: str | None = None
+    ) -> QueryState:
         """Run one question through the full pipeline and return the final state.
 
         domain optionally restricts retrieval to documents tagged with that
@@ -112,7 +119,7 @@ class RetrievalService:
         skipped them via the graph's own routing either way.
         """
         start = time.monotonic()
-        state = await self._prepare_for_generation(question, user_id, domain)
+        state = await self._prepare_for_generation(question, user_id, tenant_id, domain)
         if not state["blocked"]:
             state.update(await self._generate_node(state))
             state.update(await self._output_guardrail_node(state))
@@ -204,10 +211,10 @@ class RetrievalService:
         # Run sequentially, not concurrently: both share one AsyncSession,
         # which isn't safe for two queries running at the same time.
         vector_chunks, vector_failed = await self._find_similar_chunks_safely(
-            query_embedding, state["user_id"], state["domain"]
+            query_embedding, state["tenant_id"], state["domain"]
         )
         keyword_chunks, keyword_failed = await self._find_by_keyword_safely(
-            state["question"], state["user_id"], state["domain"]
+            state["question"], state["tenant_id"], state["domain"]
         )
 
         if vector_failed and keyword_failed:
@@ -267,7 +274,7 @@ class RetrievalService:
             for referenced_id in referenced_ids:
                 try:
                     snippet = await self.repository.get_first_chunk_text(
-                        uuid.UUID(referenced_id), state["user_id"]
+                        uuid.UUID(referenced_id), uuid.UUID(state["tenant_id"])
                     )
                 except SQLAlchemyError:
                     logger.error(
@@ -375,12 +382,12 @@ class RetrievalService:
             return False, False
 
     async def _find_similar_chunks_safely(
-        self, query_embedding: list[float], user_id: str, domain: str | None = None
+        self, query_embedding: list[float], tenant_id: str, domain: str | None = None
     ) -> tuple[list[Chunk], bool]:
         """Run vector search; on failure, roll back and report no results rather than raising."""
         try:
             chunks = await self.repository.find_similar_chunks(
-                query_embedding, user_id, limit=settings.retrieval_candidate_pool, domain=domain
+                query_embedding, uuid.UUID(tenant_id), limit=settings.retrieval_candidate_pool, domain=domain
             )
             self.repository.detach(chunks)
             return chunks, False
@@ -393,12 +400,12 @@ class RetrievalService:
             return [], True
 
     async def _find_by_keyword_safely(
-        self, question: str, user_id: str, domain: str | None = None
+        self, question: str, tenant_id: str, domain: str | None = None
     ) -> tuple[list[Chunk], bool]:
         """Run keyword search; on failure, roll back and report no results rather than raising."""
         try:
             chunks = await self.repository.find_by_keyword(
-                question, user_id, limit=settings.retrieval_candidate_pool, domain=domain
+                question, uuid.UUID(tenant_id), limit=settings.retrieval_candidate_pool, domain=domain
             )
             self.repository.detach(chunks)
             return chunks, False

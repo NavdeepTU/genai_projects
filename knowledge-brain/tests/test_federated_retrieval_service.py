@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,6 +11,8 @@ from app.services.federated_retrieval_service import (
 )
 from app.services.retrieval_service import BLOCKED_MESSAGE, RetrievalUnavailableError
 
+TENANT_ID = str(uuid.uuid4())
+
 
 class _FakeRepository:
     """Just enough of DocumentRepository for the classification step to run."""
@@ -17,7 +20,7 @@ class _FakeRepository:
     def __init__(self, domains: list[str]) -> None:
         self._domains = domains
 
-    async def list_domains_for_user(self, user_id: str) -> list[str]:
+    async def list_domains_for_tenant(self, tenant_id: uuid.UUID) -> list[str]:
         return self._domains
 
 
@@ -46,10 +49,12 @@ async def test_skips_classification_when_user_has_no_domains():
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(side_effect=AssertionError("should never be called")),
     ):
-        result = await service.run_query("What's our vacation policy?", "user-1")
+        result = await service.run_query("What's our vacation policy?", "user-1", TENANT_ID)
 
     assert result.domains_used == []
-    service._single.run_query.assert_awaited_once_with("What's our vacation policy?", "user-1", None)
+    service._single.run_query.assert_awaited_once_with(
+        "What's our vacation policy?", "user-1", TENANT_ID, None
+    )
 
 
 async def test_single_domain_delegates_straight_to_retrieval_service():
@@ -61,11 +66,13 @@ async def test_single_domain_delegates_straight_to_retrieval_service():
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(return_value=["HR"]),
     ):
-        result = await service.run_query("What's the leave policy?", "user-1")
+        result = await service.run_query("What's the leave policy?", "user-1", TENANT_ID)
 
     assert result.answer == "HR's answer"
     assert result.domains_used == ["HR"]
-    service._single.run_query.assert_awaited_once_with("What's the leave policy?", "user-1", "HR")
+    service._single.run_query.assert_awaited_once_with(
+        "What's the leave policy?", "user-1", TENANT_ID, "HR"
+    )
 
 
 async def test_falls_back_to_unrestricted_search_when_classification_unavailable():
@@ -77,16 +84,16 @@ async def test_falls_back_to_unrestricted_search_when_classification_unavailable
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(side_effect=CircuitOpenError("classifier is down")),
     ):
-        result = await service.run_query("some question", "user-1")
+        result = await service.run_query("some question", "user-1", TENANT_ID)
 
     assert result.domains_used == []
-    service._single.run_query.assert_awaited_once_with("some question", "user-1", None)
+    service._single.run_query.assert_awaited_once_with("some question", "user-1", TENANT_ID, None)
 
 
 async def test_two_domains_run_concurrently_and_get_synthesized():
     service = _service(["HR", "Finance"])
 
-    async def fake_run_query(question, user_id, domain=None):
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
         return _state(f"{domain}'s draft answer")
 
     service._single.run_query = AsyncMock(side_effect=fake_run_query)
@@ -103,7 +110,7 @@ async def test_two_domains_run_concurrently_and_get_synthesized():
             new=AsyncMock(return_value="merged answer"),
         ) as mock_synthesize,
     ):
-        result = await service.run_query("a cross-domain question", "user-1")
+        result = await service.run_query("a cross-domain question", "user-1", TENANT_ID)
 
     assert result.answer == "merged answer"
     assert result.blocked is False
@@ -117,7 +124,7 @@ async def test_two_domains_run_concurrently_and_get_synthesized():
 async def test_a_failing_domain_is_excluded_and_marks_the_result_partial():
     service = _service(["HR", "Finance"])
 
-    async def fake_run_query(question, user_id, domain=None):
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
         if domain == "Finance":
             raise RetrievalUnavailableError("both searches failed")
         return _state("HR's draft answer")
@@ -136,7 +143,7 @@ async def test_a_failing_domain_is_excluded_and_marks_the_result_partial():
             new=AsyncMock(return_value="merged answer, missing Finance"),
         ) as mock_synthesize,
     ):
-        result = await service.run_query("a cross-domain question", "user-1")
+        result = await service.run_query("a cross-domain question", "user-1", TENANT_ID)
 
     assert result.partial is True
     assert result.domains_used == ["HR"]
@@ -154,14 +161,14 @@ async def test_raises_when_every_domain_fails():
         ),
         pytest.raises(RetrievalUnavailableError),
     ):
-        await service.run_query("a cross-domain question", "user-1")
+        await service.run_query("a cross-domain question", "user-1", TENANT_ID)
 
 
 async def test_blocks_when_every_answerable_domain_was_itself_blocked():
     """If every domain that came back was blocked by its own guardrail, nothing safe exists to merge."""
     service = _service(["HR", "Finance"])
 
-    async def fake_run_query(question, user_id, domain=None):
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
         return _state(BLOCKED_MESSAGE, blocked=True, block_reason="jailbreak")
 
     service._single.run_query = AsyncMock(side_effect=fake_run_query)
@@ -176,7 +183,7 @@ async def test_blocks_when_every_answerable_domain_was_itself_blocked():
             new=AsyncMock(side_effect=AssertionError("should never be called")),
         ),
     ):
-        result = await service.run_query("a bad question", "user-1")
+        result = await service.run_query("a bad question", "user-1", TENANT_ID)
 
     assert result.blocked is True
     assert result.block_reason == "jailbreak"
@@ -186,7 +193,7 @@ async def test_blocks_when_every_answerable_domain_was_itself_blocked():
 async def test_blocks_the_synthesized_answer_when_it_flags_moderation():
     service = _service(["HR", "Finance"])
     service._single.run_query = AsyncMock(
-        side_effect=lambda q, u, domain=None: _state(f"{domain}'s draft answer")
+        side_effect=lambda q, u, t, domain=None: _state(f"{domain}'s draft answer")
     )
     service._single._check_moderation_safely = AsyncMock(return_value=(True, True))
     service._single._check_injection_safely = AsyncMock(return_value=(False, True))
@@ -201,7 +208,7 @@ async def test_blocks_the_synthesized_answer_when_it_flags_moderation():
             new=AsyncMock(return_value="merged answer"),
         ),
     ):
-        result = await service.run_query("a cross-domain question", "user-1")
+        result = await service.run_query("a cross-domain question", "user-1", TENANT_ID)
 
     assert result.blocked is True
     assert result.block_reason == "moderation"
@@ -211,7 +218,7 @@ async def test_blocks_the_synthesized_answer_when_it_flags_moderation():
 async def test_blocks_the_synthesized_answer_when_both_safety_checks_are_down():
     service = _service(["HR", "Finance"])
     service._single.run_query = AsyncMock(
-        side_effect=lambda q, u, domain=None: _state(f"{domain}'s draft answer")
+        side_effect=lambda q, u, t, domain=None: _state(f"{domain}'s draft answer")
     )
     service._single._check_moderation_safely = AsyncMock(return_value=(False, False))
     service._single._check_injection_safely = AsyncMock(return_value=(False, False))
@@ -226,7 +233,7 @@ async def test_blocks_the_synthesized_answer_when_both_safety_checks_are_down():
             new=AsyncMock(return_value="merged answer"),
         ),
     ):
-        result = await service.run_query("a cross-domain question", "user-1")
+        result = await service.run_query("a cross-domain question", "user-1", TENANT_ID)
 
     assert result.blocked is True
     assert result.block_reason == "guardrails_unavailable"
@@ -244,12 +251,12 @@ async def test_prepare_for_generation_single_domain_delegates_to_retrieval_servi
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(return_value=["HR"]),
     ):
-        prepared = await service.prepare_for_generation("What's the leave policy?", "user-1")
+        prepared = await service.prepare_for_generation("What's the leave policy?", "user-1", TENANT_ID)
 
     assert isinstance(prepared, SinglePrepared)
     assert prepared.state is fake_state
     service._single._prepare_for_generation.assert_awaited_once_with(
-        "What's the leave policy?", "user-1", "HR"
+        "What's the leave policy?", "user-1", TENANT_ID, "HR"
     )
 
 
@@ -259,7 +266,7 @@ async def test_prepare_for_generation_multi_domain_runs_every_domains_full_pass(
     """
     service = _service(["HR", "Finance"])
 
-    async def fake_run_query(question, user_id, domain=None):
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
         return _state(f"{domain}'s draft answer")
 
     service._single.run_query = AsyncMock(side_effect=fake_run_query)
@@ -268,7 +275,7 @@ async def test_prepare_for_generation_multi_domain_runs_every_domains_full_pass(
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(return_value=["HR", "Finance"]),
     ):
-        prepared = await service.prepare_for_generation("a cross-domain question", "user-1")
+        prepared = await service.prepare_for_generation("a cross-domain question", "user-1", TENANT_ID)
 
     assert isinstance(prepared, MultiPrepared)
     assert len(prepared.succeeded) == 2
@@ -288,7 +295,7 @@ async def test_prepare_for_generation_raises_when_every_domain_fails():
         ),
         pytest.raises(RetrievalUnavailableError),
     ):
-        await service.prepare_for_generation("a cross-domain question", "user-1")
+        await service.prepare_for_generation("a cross-domain question", "user-1", TENANT_ID)
 
 
 async def test_synthesize_and_finalize_reports_the_block_reason_from_a_multi_prepared_result():
@@ -298,7 +305,7 @@ async def test_synthesize_and_finalize_reports_the_block_reason_from_a_multi_pre
     """
     service = _service(["HR", "Finance"])
 
-    async def fake_run_query(question, user_id, domain=None):
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
         return _state(BLOCKED_MESSAGE, blocked=True, block_reason="jailbreak")
 
     service._single.run_query = AsyncMock(side_effect=fake_run_query)
@@ -307,7 +314,7 @@ async def test_synthesize_and_finalize_reports_the_block_reason_from_a_multi_pre
         "app.services.federated_retrieval_service.classify_domains",
         new=AsyncMock(return_value=["HR", "Finance"]),
     ):
-        prepared = await service.prepare_for_generation("a bad question", "user-1")
+        prepared = await service.prepare_for_generation("a bad question", "user-1", TENANT_ID)
 
     assert isinstance(prepared, MultiPrepared)
     result = await service.synthesize_and_finalize(

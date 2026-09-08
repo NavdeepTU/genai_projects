@@ -17,6 +17,7 @@ from app.api.dashboard import router as dashboard_router
 from app.api.documents import router as documents_router
 from app.api.query import router as query_router
 from app.api.query_stream import router as query_stream_router
+from app.api.tenants import router as tenants_router
 from app.core.blob_storage import ensure_container_exists
 from app.core.config import get_settings
 from app.core.middleware import (
@@ -65,5 +66,6 @@ app.include_router(dashboard_router)
 app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(query_stream_router)
+app.include_router(tenants_router)
 
 app.mount("/mcp", ApiKeyMiddleware(mcp_app))

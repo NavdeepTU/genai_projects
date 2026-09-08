@@ -10,8 +10,8 @@ from app.models import (  # noqa: F401  (import registers the tables with Base)
     audit_log,
     conversation,
     document,
-    document_permission,
     session,
+    tenant,
     user,
 )
 

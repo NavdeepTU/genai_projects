@@ -75,16 +75,15 @@ class Document(Base):
     # document uploaded before this feature existed, or if the upload's
     # blob save itself failed — either way, nothing to view.
     storage_path: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Which tenant this document belongs to — set from the uploader's own
+    # tenant at creation time, never changed afterward. This is the whole
+    # access control mechanism now: any user in this tenant can see this
+    # document, no per-document grant needed (ADR-046 replaced the old
+    # per-user DocumentPermission table with this).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"))
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
-    )
-    # Deliberately one-directional (no back_populates) — nothing needs a
-    # DocumentPermission.document attribute today. cascade="all,
-    # delete-orphan" is what makes deleting a Document also delete every
-    # access grant for it, the same way chunks already cascade (ADR-045).
-    permissions: Mapped[list["DocumentPermission"]] = relationship(
-        cascade="all, delete-orphan"
     )
 
     @property

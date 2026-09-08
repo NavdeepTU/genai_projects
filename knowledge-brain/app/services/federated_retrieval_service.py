@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 
 from openai import OpenAIError
@@ -91,18 +92,18 @@ class FederatedRetrievalService:
         self.graph_repository = graph_repository
         self._single = RetrievalService(repository, graph_repository)
 
-    async def run_query(self, question: str, user_id: str) -> FederatedResult:
+    async def run_query(self, question: str, user_id: str, tenant_id: str) -> FederatedResult:
         """Answer a question, routing across domains only when the question actually needs it."""
         start = time.monotonic()
 
-        available_domains = await self.repository.list_domains_for_user(user_id)
+        available_domains = await self.repository.list_domains_for_tenant(uuid.UUID(tenant_id))
         domains = await self._classify_domains_safely(question, available_domains)
 
         if len(domains) <= 1:
-            return await self._run_single_domain(question, user_id, domains, start)
-        return await self._run_federated(question, user_id, domains, start)
+            return await self._run_single_domain(question, user_id, tenant_id, domains, start)
+        return await self._run_federated(question, user_id, tenant_id, domains, start)
 
-    async def prepare_for_generation(self, question: str, user_id: str) -> Prepared:
+    async def prepare_for_generation(self, question: str, user_id: str, tenant_id: str) -> Prepared:
         """Run everything up to, but not including, producing the final answer text (ADR-043).
 
         For a single (or no) domain, that's retrieval through graph
@@ -119,16 +120,16 @@ class FederatedRetrievalService:
         one piece (multiple domains) — a deliberate, named scope
         decision, not a limitation this method itself has.
         """
-        available_domains = await self.repository.list_domains_for_user(user_id)
+        available_domains = await self.repository.list_domains_for_tenant(uuid.UUID(tenant_id))
         domains = await self._classify_domains_safely(question, available_domains)
 
         if len(domains) <= 1:
             domain = domains[0] if domains else None
-            state = await self._single._prepare_for_generation(question, user_id, domain)
+            state = await self._single._prepare_for_generation(question, user_id, tenant_id, domain)
             return SinglePrepared(state=state)
 
         runs = await asyncio.gather(
-            *(self._run_one_domain_safely(question, user_id, domain) for domain in domains)
+            *(self._run_one_domain_safely(question, user_id, tenant_id, domain) for domain in domains)
         )
         succeeded = [run for run in runs if run is not None]
         if not succeeded:
@@ -169,10 +170,10 @@ class FederatedRetrievalService:
             return []
 
     async def _run_single_domain(
-        self, question: str, user_id: str, domains: list[str], start: float
+        self, question: str, user_id: str, tenant_id: str, domains: list[str], start: float
     ) -> FederatedResult:
         domain = domains[0] if domains else None
-        state = await self._single.run_query(question, user_id, domain)
+        state = await self._single.run_query(question, user_id, tenant_id, domain)
         sources, confidence = await self._single.build_sources_and_confidence(state)
         return FederatedResult(
             answer=state["answer"],
@@ -185,10 +186,10 @@ class FederatedRetrievalService:
         )
 
     async def _run_federated(
-        self, question: str, user_id: str, domains: list[str], start: float
+        self, question: str, user_id: str, tenant_id: str, domains: list[str], start: float
     ) -> FederatedResult:
         runs = await asyncio.gather(
-            *(self._run_one_domain_safely(question, user_id, domain) for domain in domains)
+            *(self._run_one_domain_safely(question, user_id, tenant_id, domain) for domain in domains)
         )
         succeeded = [run for run in runs if run is not None]
         if not succeeded:
@@ -295,7 +296,7 @@ class FederatedRetrievalService:
         )
 
     async def _run_one_domain_safely(
-        self, question: str, user_id: str, domain: str
+        self, question: str, user_id: str, tenant_id: str, domain: str
     ) -> _DomainRun | None:
         """Run one domain's full retrieval pass; on failure, exclude it rather than raising.
 
@@ -306,7 +307,7 @@ class FederatedRetrievalService:
         domains actually came back, marked partial.
         """
         try:
-            state = await self._single.run_query(question, user_id, domain)
+            state = await self._single.run_query(question, user_id, tenant_id, domain)
         except (CircuitOpenError, RetrievalUnavailableError, OpenAIError):
             logger.error(
                 "Domain '%s' retrieval failed, excluding it from synthesis",

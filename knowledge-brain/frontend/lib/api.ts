@@ -113,24 +113,51 @@ export type AnalyticsResponse = {
 
 export type AdminAuditEntry = {
   timestamp: string;
+  tenant_id: string | null;
   user_id: string | null;
   action: string;
   resource_type: string;
   resource_id: string;
 };
 
-export type DocumentPermissionEntry = {
-  document_id: string;
-  filename: string;
-  user_id: string;
-  granted_at: string;
-};
-
 export type AdminResponse = {
   audit_entries: AdminAuditEntry[];
-  permissions: DocumentPermissionEntry[];
   correlation_id: string;
 };
+
+export type Tenant = {
+  id: string;
+  name: string;
+};
+
+// Called from the Admin page's tenant-management section (a Client
+// Component), so this hits the same-origin proxy at /api/admin/tenants,
+// never the backend directly — same reasoning as every other
+// client-triggered call in this file (ADR-046).
+export async function createTenant(name: string): Promise<Tenant> {
+  const response = await fetch("/api/admin/tenants", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to register tenant (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
 
 // Thrown by streamQuery on a 401, so the calling Client Component can
 // tell "you got logged out" apart from a real query failure and route

@@ -7,7 +7,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.graph_database import driver
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.graph_repository import GraphRepository
-from app.repositories.permission_repository import PermissionRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.ingestion_service import IngestionService
 from app.services.retrieval_service import RetrievalService
 from eval.judge import judge_correctness, judge_faithfulness
@@ -16,19 +16,34 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 DATASET_PATH = Path(__file__).parent / "dataset.json"
 
 # A fixed identity for the eval harness's own fixture documents — not a real
-# person, but every document needs an owner now that ACL exists.
+# person, but every query is tagged with who asked for tracing purposes.
 EVAL_USER_ID = "eval-harness"
+
+# A dedicated tenant for the eval harness's fixture documents (ADR-046) —
+# registered once, reused on every run, kept separate from any real tenant
+# so eval fixtures never mix into a real user's document pool.
+EVAL_TENANT_NAME = "Eval Harness"
+
+
+async def ensure_eval_tenant(tenant_repository: TenantRepository) -> uuid.UUID:
+    """Return the eval harness's own tenant id, registering it on the first run."""
+    existing = await tenant_repository.get_tenant_by_name(EVAL_TENANT_NAME)
+    if existing is not None:
+        return existing.id
+
+    tenant = await tenant_repository.create_tenant(EVAL_TENANT_NAME)
+    return tenant.id
 
 
 async def ensure_fixtures_ingested(
-    repository: DocumentRepository, permission_repository: PermissionRepository
+    repository: DocumentRepository, tenant_id: uuid.UUID
 ) -> dict[str, uuid.UUID]:
     """Make sure every fixture document exists, ingesting any that don't yet.
 
     Returns a mapping from filename to its document ID, so each test case
     can check whether the *correct* document was actually retrieved.
     """
-    ingestion = IngestionService(repository, permission_repository)
+    ingestion = IngestionService(repository)
     filename_to_document_id: dict[str, uuid.UUID] = {}
 
     for fixture_path in sorted(FIXTURES_DIR.glob("*.txt")):
@@ -38,7 +53,7 @@ async def ensure_fixtures_ingested(
             continue
 
         content = fixture_path.read_bytes()
-        document = await ingestion.create_document(fixture_path.name, EVAL_USER_ID)
+        document = await ingestion.create_document(fixture_path.name, content, tenant_id)
         await ingestion.process_document(document.id, fixture_path.name, content)
         filename_to_document_id[fixture_path.name] = document.id
 
@@ -46,10 +61,13 @@ async def ensure_fixtures_ingested(
 
 
 async def run_one_case(
-    service: RetrievalService, case: dict, filename_to_document_id: dict[str, uuid.UUID]
+    service: RetrievalService,
+    case: dict,
+    filename_to_document_id: dict[str, uuid.UUID],
+    tenant_id: uuid.UUID,
 ) -> dict:
     """Run one test case through the real pipeline and score all three dimensions."""
-    state = await service.run_query(case["question"], EVAL_USER_ID)
+    state = await service.run_query(case["question"], EVAL_USER_ID, str(tenant_id))
 
     expected_document_id = filename_to_document_id[case["source_fixture"]]
     retrieval_ok = any(
@@ -73,8 +91,9 @@ async def main() -> None:
     dataset = json.loads(DATASET_PATH.read_text())
 
     async with AsyncSessionLocal() as db_session:
+        tenant_id = await ensure_eval_tenant(TenantRepository(db_session))
         filename_to_document_id = await ensure_fixtures_ingested(
-            DocumentRepository(db_session), PermissionRepository(db_session)
+            DocumentRepository(db_session), tenant_id
         )
 
     results = []
@@ -85,7 +104,7 @@ async def main() -> None:
                 # Voyage's free tier caps unpaid accounts at 3 requests/minute;
                 # each case makes a rerank call, so pace them to stay under it.
                 await asyncio.sleep(20)
-            result = await run_one_case(service, case, filename_to_document_id)
+            result = await run_one_case(service, case, filename_to_document_id, tenant_id)
             results.append(result)
             print(
                 f"[{result['id']}] retrieval={result['retrieval_ok']} "

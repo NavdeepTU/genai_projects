@@ -94,7 +94,9 @@ class ConversationRepository:
         Returns None identically whether the conversation doesn't exist or
         belongs to someone else — the two cases are deliberately
         indistinguishable from outside, same reasoning
-        get_document_for_user already uses.
+        get_document_for_tenant already uses. Conversations stay scoped
+        to the individual user, not the tenant (ADR-046) — unlike
+        documents, they were never meant to be shared.
         """
         stmt = (
             select(Conversation)

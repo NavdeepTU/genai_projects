@@ -19,11 +19,17 @@ class DocumentGraphService:
         self.graph_repository = graph_repository
 
     async def build_references(self, document: Document, text: str) -> None:
-        """Extract, resolve, and record this document's references to others."""
+        """Extract, resolve, and record this document's references to others.
+
+        Scoped to this document's own tenant (ADR-046) — a reference edge
+        crossing a tenant boundary would let one tenant's answer pull in
+        graph context from a document belonging to another tenant
+        entirely, a real leak this project doesn't allow anywhere else.
+        """
         mentions = await extract_references(text)
 
         for mention in mentions:
-            matches = await self.repository.find_by_keyword_unrestricted(mention, limit=5)
+            matches = await self.repository.find_by_keyword(mention, document.tenant_id, limit=5)
             other_document_match = next(
                 (chunk for chunk in matches if chunk.document_id != document.id), None
             )

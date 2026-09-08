@@ -17,6 +17,7 @@ import type {
   DashboardResponse,
   DocumentListItem,
   DocumentListResponse,
+  Tenant,
 } from "@/lib/api";
 
 // Every Server Component page in this app calls the backend the same way:
@@ -70,6 +71,26 @@ export async function getAdmin(): Promise<AdminResponse> {
   }
 
   return response.json();
+}
+
+// Public on the backend (needed before a session exists — the signup
+// picker), but still goes through the same server-to-server path as
+// every other backend call, since APIM's gateway secret is required on
+// every route regardless of auth (ADR-046). Not run through
+// authenticatedFetch: a missing/expired session here is normal, not a
+// reason to redirect anyone to /login.
+export async function getTenants(): Promise<Tenant[]> {
+  const response = await fetch(`${BACKEND_URL}/tenants`, {
+    headers: await backendAuthHeaders(),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to load tenants (status ${response.status})`);
+  }
+
+  const data: { tenants: Tenant[] } = await response.json();
+  return data.tenants;
 }
 
 export async function getDocuments(): Promise<DocumentListItem[]> {

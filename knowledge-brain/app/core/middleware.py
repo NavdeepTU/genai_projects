@@ -10,9 +10,11 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.session_repository import SessionRepository
+from app.repositories.user_repository import UserRepository
 
 _correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 _user_id: ContextVar[str] = ContextVar("user_id", default="")
+_tenant_id: ContextVar[str] = ContextVar("tenant_id", default="")
 
 SESSION_COOKIE_NAME = "session_token"
 
@@ -21,10 +23,13 @@ SESSION_COOKIE_NAME = "session_token"
 PUBLIC_PATHS = {"/docs", "/openapi.json", "/redoc"}
 
 # Signup and login are how a caller gets a session in the first place —
-# requiring one to reach them would be a contradiction. Both still pass
-# through gateway_secret_middleware unchanged; only the identity check
-# below is skipped for these two.
-AUTH_EXEMPT_PATHS = {"/auth/signup", "/auth/login"}
+# requiring one to reach them would be a contradiction. /tenants is
+# exempt for the same reason (ADR-046): the signup form needs the list
+# of registered tenants to populate its picker, before any session
+# exists to prove an identity with. All three still pass through
+# gateway_secret_middleware unchanged; only the identity check below is
+# skipped for them.
+AUTH_EXEMPT_PATHS = {"/auth/signup", "/auth/login", "/tenants"}
 
 # MCP clients authenticate with a shared X-API-Key (see app/mcp/auth.py)
 # plus a self-asserted X-User-Id, a deliberately separate trust model
@@ -43,6 +48,17 @@ def get_correlation_id() -> str:
 def get_current_user_id() -> str:
     """Return the user ID for the request currently being handled."""
     return _user_id.get()
+
+
+def get_current_tenant_id() -> str:
+    """Return the tenant ID for the request currently being handled (ADR-046).
+
+    This is the actual document-access boundary now — every document
+    search/list/view/delete call is scoped by this, not by user_id
+    directly. user_id still flows separately for identity, conversation
+    ownership, and audit attribution.
+    """
+    return _tenant_id.get()
 
 
 async def correlation_id_middleware(
@@ -80,35 +96,52 @@ async def _reject_unauthenticated(request: Request, reason: str) -> JSONResponse
 async def user_id_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
-    """Attach the caller's identity to every request — proven, not self-asserted.
+    """Attach the caller's identity — and, since ADR-046, their tenant — to every request.
 
     Two different callers, two different trust models, checked here:
 
     - MCP clients (paths under /mcp) authenticate with a shared API key
-      (app/mcp/auth.py) plus a self-asserted X-User-Id header — unchanged
-      from before. They aren't browsers and can't hold a cookie session.
+      (app/mcp/auth.py) plus a self-asserted X-User-Id header. That
+      header alone used to be enough; now it must also match a real
+      user account, since every document-access call needs a real
+      tenant_id to scope to, and a made-up id has none. This is a real
+      hardening this feature happened to require, not new scope sought
+      out on its own.
     - Everyone else (the REST API, used by the browser frontend) must
       present a session cookie that actually exists, unexpired, in the
-      database. A missing or invalid X-User-Id header used to be enough;
-      now the header is gone entirely and a real login is required.
+      database.
 
-    Either way, a request that can't prove who it is gets rejected
-    outright rather than proceeding as some unknown caller, since every
-    downstream permission check depends on this being real.
+    Either way, a request that can't prove who it is — or whose identity
+    doesn't resolve to a real account with a real tenant — gets rejected
+    outright rather than proceeding as some unknown caller.
     """
     path = request.url.path
     if path in PUBLIC_PATHS or path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
 
     if path.startswith(MCP_PATH_PREFIX):
-        user_id = request.headers.get("X-User-Id")
-        if not user_id:
+        header_user_id = request.headers.get("X-User-Id")
+        if not header_user_id:
             return await _reject_unauthenticated(request, "missing X-User-Id header")
-        token = _user_id.set(user_id)
+
+        try:
+            parsed_user_id = uuid.UUID(header_user_id)
+        except ValueError:
+            return await _reject_unauthenticated(request, "X-User-Id is not a valid user id")
+
+        async with AsyncSessionLocal() as db_session:
+            user = await UserRepository(db_session).get_user_by_id(parsed_user_id)
+
+        if user is None:
+            return await _reject_unauthenticated(request, "X-User-Id does not match a real account")
+
+        user_token = _user_id.set(str(user.id))
+        tenant_token = _tenant_id.set(str(user.tenant_id))
         try:
             response = await call_next(request)
         finally:
-            _user_id.reset(token)
+            _user_id.reset(user_token)
+            _tenant_id.reset(tenant_token)
         return response
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -121,11 +154,13 @@ async def user_id_middleware(
     if user is None:
         return await _reject_unauthenticated(request, "invalid or expired session")
 
-    token = _user_id.set(str(user.id))
+    user_token = _user_id.set(str(user.id))
+    tenant_token = _tenant_id.set(str(user.tenant_id))
     try:
         response = await call_next(request)
     finally:
-        _user_id.reset(token)
+        _user_id.reset(user_token)
+        _tenant_id.reset(tenant_token)
 
     return response
 

@@ -2234,10 +2234,11 @@ document uploads already do with `processing_stage`.
 
 **What does this feature do, in one sentence?**
 Completes the five originally planned frontend pages with a bird's-eye
-view over data every other page already reads — documents,
-permissions, the audit log — except unscoped from "the current user"
-to "everyone," which is exactly why it's also the first page in this
-project that needed its own access check before it could ship at all.
+view over data every other page already reads — the audit log, and
+(since ADR-046) tenant management — except unscoped from "the current
+user" to "everyone," which is exactly why it's also the first page in
+this project that needed its own access check before it could ship at
+all.
 
 ```mermaid
 flowchart LR
@@ -2245,12 +2246,15 @@ flowchart LR
     AUTH -->|no| REJECT401["401 Unauthorized"]
     AUTH -->|yes| GATE{"require_admin:<br/>User.is_admin?"}
     GATE -->|no| REJECT["403 Forbidden"]
-    GATE -->|yes| SVC["get_all_recent_entries() +<br/>list_all_permissions()<br/>(unscoped — every user)"]
+    GATE -->|yes| SVC["get_all_recent_entries()<br/>(unscoped — every user)"]
     SVC --> RESP["AdminResponse"]
 ```
 
 *(Note, current as of ADR-036: `require_admin` itself changed after this
-page shipped — see the note below and Feature 23.)*
+page shipped — see the note below and Feature 23. Note, current as of
+ADR-046: this page originally also showed a per-document permissions
+list via a now-deleted `list_all_permissions` — see Feature 33 for
+what replaced it.)*
 
 **Every earlier page in this project shipped with no access gate at
 all — the Query, Dashboard, and Analytics pages were all wide open to
@@ -2262,11 +2266,11 @@ the query itself — `list_documents_for_user`,
 `get_recent_queries_for_user`, and so on all filter to
 "documents/queries *this* user has access to." An open door onto data
 already scoped to you is a much smaller risk than an open door onto
-*everyone's* data. The Admin page reads `get_all_recent_entries` and
-`list_all_permissions` — both deliberately unscoped, both new to this
+*everyone's* data. The Admin page reads `get_all_recent_entries` —
+deliberately unscoped, new to this
 codebase — so leaving it open would have meant anyone who guessed a
-header value could see every user's documents, permissions, and full
-activity history at once. That distinction is now layered on top of a
+header value could see every user's full activity history at once.
+That distinction is now layered on top of a
 second one ADR-036 added afterward: *every* REST page requires a real,
 password-verified session before it's reachable at all — `require_admin`
 is specifically about *authorization* (is this logged-in caller
@@ -2307,11 +2311,13 @@ adds a new admin route and forgets to paste the dependency in, that
 route silently ships open. Attaching it once at the router removes the
 chance to forget.
 
-**`get_all_recent_entries` and `list_all_permissions` don't check who's
-calling them — they'll happily return every user's data to whatever
-code calls them. Isn't that a bug?**
+**`get_all_recent_entries` doesn't check who's
+calling it — it'll happily return every user's data to whatever
+code calls it (and, since ADR-046, `TenantRepository`'s methods follow
+the identical pattern — `list_tenants` and `create_tenant` do no
+authorization of their own either). Isn't that a bug?**
 No — it's a deliberate split of responsibility, documented directly in
-both methods' docstrings. A repository method's job is running the
+these methods' docstrings. A repository method's job is running the
 right query; deciding *who's allowed to trigger that query* is a
 different concern, handled once, at the route layer, by
 `require_admin`. Baking an admin check into the repository itself
@@ -2993,8 +2999,8 @@ since domains are opt-in, costs exactly what it always did, with one
 extra classification call.
 
 **Why did you store domains as a plain array column instead of a
-separate join table, given this project already has one
-(`document_permissions`) for a similar purpose?**
+separate join table, given this project already has one — the
+`tenants`/`documents.tenant_id` relationship — for a similar purpose?**
 Because a join table would imply a level of structure — a `domains`
 table with real rows, a place to rename or dedupe a domain in one
 move — that doesn't exist and wasn't asked for. The explicit design
@@ -3518,6 +3524,118 @@ net this feature has. A production system handling real user data would
 likely want a soft-delete window before this kind of permanent removal.
 
 *Further reading: [PostgreSQL — Foreign Keys and cascading actions](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK) — the official documentation covering how cascading deletes work at the database level, the same concept this feature applies through SQLAlchemy's ORM-level `cascade="all, delete-orphan"` instead of a database-level `ON DELETE CASCADE`.*
+
+---
+
+## Feature 33: Multi-Tenancy — Tenant-Wide Sharing, Per-User Conversations
+
+**What does this feature do, in one sentence?**
+Every user and document now belongs to one company ("tenant"); a
+document is visible to everyone in the tenant that uploaded it, a
+user's conversations stay private to them alone, and only an admin
+can register a new tenant.
+
+```mermaid
+flowchart TD
+    SIGNUP["User signs up"] --> PICK["Picks a tenant from<br/>GET /tenants (public)"]
+    PICK --> USER["users.tenant_id set,<br/>never changes again"]
+
+    UPLOAD["User uploads a document"] --> DOC["documents.tenant_id =<br/>uploader's own tenant"]
+
+    ASK["Any user in that tenant<br/>asks a question"] --> SEARCH["Retrieval joins on<br/>documents.tenant_id"]
+    DOC -.->|"visible tenant-wide,<br/>no per-user grant"| SEARCH
+    SEARCH --> ANSWER["Answer — only from<br/>this tenant's documents"]
+
+    ADMIN["Admin"] -->|"POST /admin/tenants"| NEWTENANT["Register a new tenant —<br/>the only way one is ever created"]
+```
+
+**Why replace the old per-user `DocumentPermission` grant table
+outright, instead of keeping it as a finer layer underneath tenant
+sharing?**
+Because nothing in the product ever had a UI to create a grant more
+specific than "the uploader has access" — the same gap ADR-045 already
+named when it chose not to build a real ownership model. Keeping the
+old table around as an unreachable second access-control system would
+have meant maintaining dead code indefinitely. The trade-off is real,
+though, and worth stating precisely rather than glossing over: the
+project's own written Enterprise Requirement 5 says tenant-level
+scoping alone "is not enough," and as built today, it is exactly that
+— any user in a tenant can read every document that tenant owns, with
+no way left to restrict a document to a subset of people within it.
+
+**Could a follow-up question, or a cached answer, ever leak access to
+a tenant a user isn't actually in?**
+No — `tenant_id` is resolved fresh from the session on every single
+request, in middleware, before any route runs. It's never inherited
+from a stored conversation turn or a cache entry. A user's tenant is
+also fixed at signup with no route to change it, so there's no
+"switch tenants mid-session" state to even worry about leaking across.
+
+**Two security fixes came out of this that weren't explicitly asked
+for. What were they, and why weren't they scope creep?**
+Both were direct, mechanical consequences of `tenant_id` becoming the
+real access boundary, not scope sought out on its own. First: the
+Neo4j reference-graph builder used to search every document
+system-wide when linking documents at ingestion time; under
+tenant-wide sharing, that could create a reference edge crossing a
+tenant boundary, which the query pipeline would then read a snippet
+from and leak into an unrelated tenant's answer — closed by scoping
+that search to the tenant that owns the document being ingested, with
+the final snippet read scoped independently too, as defense in depth.
+Second: MCP's `X-User-Id` header used to be pure self-assertion, no
+database check at all; once every document call needed a real
+`tenant_id`, a fabricated header had nowhere to get one from, so it
+now has to resolve to a real account or the request is rejected.
+
+**A `/code-review` pass found a race condition in tenant registration.
+What was it, and why didn't the existing duplicate-name check catch
+it?**
+Two admins registering a tenant with the same name at nearly the same
+moment could both pass the "does this name already exist?" pre-check
+before either one had actually written their row — that check only
+ever sees a snapshot of the database at the instant it runs, not a
+lock on the name itself. The second `INSERT` then hits the database's
+own unique constraint and raises, and without a `try/except` around
+that specific call, the caller got a bare unhandled 500 instead of the
+409 the pre-check was supposed to guarantee. Fixed by catching the
+real `IntegrityError` from the insert itself and converting it to the
+same 409 — the pre-check stays, purely as a faster, friendlier common
+case, but the constraint is the actual guarantee.
+
+**The same review found a tenant named " Acme " (with spaces) could be
+created alongside "Acme." Where should that bug actually be fixed?**
+At the API boundary, not in the one frontend button that happened to
+expose it. A Pydantic validator on `CreateTenantRequest` now strips
+whitespace and rejects an all-blank name before it ever reaches the
+duplicate-name check — so the fix protects every caller (the admin
+dashboard, an MCP tool, a direct API call), not just the one path code
+review happened to test. Patching only the frontend's submit-button
+logic would have left the backend itself still creatable with a
+padded, effectively-duplicate name through any other caller.
+
+**How was tenant isolation actually verified, beyond passing tests?**
+Live, end to end: two independent users signed up into the same
+tenant, and one instantly saw a document the other had just uploaded,
+with zero grant. A second tenant was registered and a third user
+signed into it, landing at zero visible documents; asking that user a
+question answerable only from the first tenant's data came back "I
+don't know," citing only their own tenant's one document — proof the
+retrieval pipeline itself never touched the other tenant's content,
+not just that the document list hid it.
+
+**How would this change at 10x the number of tenants, or 10x the
+request volume?**
+The data model itself doesn't change — `tenant_id` is a plain,
+indexed foreign key, and every tenant-scoped query already filters on
+it before ranking, the same shape it always had. The real cost that
+does scale linearly is in `user_id_middleware`: it opens a fresh
+database session on every single authenticated request purely to
+resolve `tenant_id`, with no caching. At today's traffic that's
+invisible; at 10x it's a real, avoidable cost worth fixing, since a
+user's tenant never changes after signup — about as cache-friendly a
+value as exists in this system, and currently not cached at all.
+
+*Further reading: [Azure Architecture Center — Architectural approaches for storage and data in multitenant solutions](https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/approaches/storage-data) — Microsoft's own guidance on tenant isolation patterns (pooled vs. siloed data models), directly relevant to the pooled, row-level `tenant_id` approach this feature uses.*
 
 ---
 

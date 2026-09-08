@@ -9,7 +9,6 @@ from app.core.circuit_breaker import CircuitOpenError
 from app.core.config import get_settings
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
 from app.repositories.document_repository import DocumentRepository
-from app.repositories.permission_repository import PermissionRepository
 from app.services.chunking import chunk_text
 from app.services.embedding import embed_chunks
 from app.services.extraction import extract_text
@@ -33,29 +32,30 @@ class IngestionService:
     its own file and knows nothing about the others.
     """
 
-    def __init__(self, repository: DocumentRepository, permission_repository: PermissionRepository) -> None:
+    def __init__(self, repository: DocumentRepository) -> None:
         self.repository = repository
-        self.permission_repository = permission_repository
 
     async def create_document(
-        self, filename: str, content: bytes, user_id: str, domains: list[str] | None = None
+        self, filename: str, content: bytes, tenant_id: uuid.UUID, domains: list[str] | None = None
     ) -> Document:
-        """Record a new upload, save its original file, and give the uploader access to it.
+        """Record a new upload, owned by the uploader's tenant, and save its original file.
 
         Deliberately still fast enough to finish before the HTTP response
         goes out — the caller has a real document.id to hand back to the
         browser right away, and a single blob upload is far cheaper than
         the extraction/chunking/embedding pipeline that runs afterward in
         the background. domains are set manually at upload, for now — see
-        ADR-040. Saving the file to Blob Storage (ADR-044) is best-effort:
-        an outage there degrades to "this document has nothing to view,"
-        the same way a down reranker or an unreachable Neo4j degrades
-        elsewhere in this project, rather than failing the whole upload —
-        the file being viewable later is additive, not what this system
-        exists to do.
+        ADR-040. tenant_id is what makes this document visible to every
+        other user in the same tenant, with no separate grant needed
+        (ADR-046 replaced the old per-user access-grant step this method
+        used to do here). Saving the file to Blob Storage (ADR-044) is
+        best-effort: an outage there degrades to "this document has
+        nothing to view," the same way a down reranker or an unreachable
+        Neo4j degrades elsewhere in this project, rather than failing the
+        whole upload — the file being viewable later is additive, not
+        what this system exists to do.
         """
-        document = await self.repository.create_document(filename, domains)
-        await self.permission_repository.grant_access(document.id, user_id)
+        document = await self.repository.create_document(filename, tenant_id, domains)
 
         blob_name = f"{document.id}{Path(filename).suffix.lower()}"
         content_type = CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")

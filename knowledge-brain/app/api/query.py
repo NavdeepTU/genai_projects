@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import get_db
 from app.core.graph_database import get_graph_session
-from app.core.middleware import get_correlation_id, get_current_user_id
+from app.core.middleware import get_correlation_id, get_current_tenant_id, get_current_user_id
 from app.models.conversation import TITLE_MAX_LENGTH, Conversation, RecentTurn
 from app.models.query import QueryRequest, QueryResponse
 from app.repositories.audit_repository import AuditRepository
@@ -115,6 +115,7 @@ async def query(
     mechanism, not a replacement for this one.
     """
     user_id = get_current_user_id()
+    tenant_id = get_current_tenant_id()
     conversation_repo = ConversationRepository(db)
 
     conversation = await resolve_conversation(conversation_repo, request.conversation_id, user_id)
@@ -123,7 +124,7 @@ async def query(
     service = FederatedRetrievalService(DocumentRepository(db), GraphRepository(graph_session))
 
     try:
-        result = await service.run_query(condensed_question, user_id)
+        result = await service.run_query(condensed_question, user_id, tenant_id)
     except CircuitOpenError:
         raise HTTPException(
             status_code=503,
@@ -139,6 +140,7 @@ async def query(
     audit = AuditRepository(db)
     await audit.log_query_made(
         correlation_id=correlation_id,
+        tenant_id=tenant_id,
         user_id=user_id,
         question=request.question,
         duration_ms=result.duration_ms,
@@ -146,6 +148,7 @@ async def query(
     if result.blocked:
         await audit.log_answer_blocked(
             correlation_id=correlation_id,
+            tenant_id=tenant_id,
             user_id=user_id,
             question=request.question,
             block_reason=result.block_reason or "unknown",

@@ -65,14 +65,19 @@ and why it was made that way.
   upload endpoint and the MCP tool automatically. Fails closed, not
   open, if Azure itself is unavailable — see
   [`ADR-018`](docs/adr/ADR-018-pii-detection.md).
-- **Document-level access control** — every request must carry a
-  proven identity (see real authentication, below); missing or invalid
-  is a 401. Uploading a document auto-grants the uploader access; a new
-  endpoint lets anyone with access share it with someone else.
+- **Multi-tenancy** — every user and document belongs to one tenant (a
+  company/workspace); documents are shared with everyone in the tenant
+  that uploaded them, no per-document grant needed, while conversations
+  stay private to the individual user. A user picks their tenant at
+  signup from an already-registered list (`GET /tenants`, public);
+  only an admin can register a new one (`POST /admin/tenants`).
   Retrieval — vector search, keyword search, and graph-context
-  snippets alike — is filtered by a SQL join against a permissions
-  table before results are ever ranked, not after. See
-  [`ADR-019`](docs/adr/ADR-019-document-level-access-control.md).
+  snippets alike — is filtered by a SQL join against `documents.tenant_id`
+  before results are ever ranked, not after, replacing the earlier
+  per-user grant table this project used until this feature. See
+  [`ADR-046`](docs/adr/ADR-046-multi-tenancy.md) — including a real,
+  named tension with this project's own Enterprise Requirement 5 that
+  this decision does not fully resolve.
 - **Real authentication** — email/password login with the project's
   own server-side session cookies, not JWT and not an external
   identity provider, chosen specifically to build the real mechanics
@@ -217,14 +222,14 @@ and why it was made that way.
   documents and recent queries are pulled from data that already
   exists, with two data-less widgets (retrieval accuracy, cost per
   query) showing an honest "not tracked yet" state instead of a
-  fabricated number. The Document Library — backed by a new,
-  permission-filtered `GET /documents` endpoint — fetches server-side
+  fabricated number. The Document Library — backed by a
+  tenant-filtered `GET /documents` endpoint — fetches server-side
   from a Next.js Server Component rather than the browser, avoiding the
   backend needing any CORS configuration. Drag-and-drop upload is built
   too, with a live per-stage progress bar. A document uploaded today can
   be opened directly in the browser (its original file, saved to Azure
   Blob Storage at upload time — see `ADR-044`) and deleted completely —
-  its row, chunks, permission grants, file, and graph node all removed,
+  its row, chunks, file, and graph node all removed,
   behind a real confirmation dialog (see `ADR-045`). The Query page is a real
   chat interface: `/query`'s response carries `sources` (the
   chunks that actually informed the answer, with filenames) and
@@ -243,9 +248,9 @@ and why it was made that way.
   a small `ADMIN_USER_IDS` allowlist, upgraded once real accounts
   existed — see `ADR-036`) rather than full RBAC, since it's the first
   page that reads across every user instead of just the caller's own —
-  showing a real audit log viewer and a real document-permissions
-  list, with tenant management left an honest placeholder (this system
-  has no tenant concept at all yet). Every client-triggered action
+  showing a real audit log viewer and, since `ADR-046`, a real
+  tenant-management panel (list every registered tenant, register a
+  new one). Every client-triggered action
   talks only to same-origin Next.js Route Handlers, which proxy the
   real, secret-bearing calls to the backend server-to-server, so
   `BACKEND_GATEWAY_SECRET` never reaches client-side JavaScript. See
@@ -257,12 +262,11 @@ and why it was made that way.
   [`ADR-033`](docs/adr/ADR-033-analytics-page.md),
   [`ADR-034`](docs/adr/ADR-034-admin-page.md),
   [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md),
-  [`ADR-044`](docs/adr/ADR-044-document-viewing-and-blob-storage.md), and
-  [`ADR-045`](docs/adr/ADR-045-document-deletion.md).
+  [`ADR-044`](docs/adr/ADR-044-document-viewing-and-blob-storage.md),
+  [`ADR-045`](docs/adr/ADR-045-document-deletion.md), and
+  [`ADR-046`](docs/adr/ADR-046-multi-tenancy.md).
 
-**Not built yet:** multi-tenancy — real auth (above) and multi-tenancy
-are separate decisions, and only the former exists so far. Also not
-built: a review workflow for documents flagged for PII — they're
+**Not built yet:** a review workflow for documents flagged for PII — they're
 correctly held back from *search* today, but nothing yet lets an admin
 release or reject one, and (a real, newly-surfaced gap, not fixed yet)
 the document's original *file* is actually viewable by anyone with
@@ -271,7 +275,7 @@ it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
 `CLAUDE.md`'s build order for the full plan.
 
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 133 tests) covers ingestion
+- The automated test suite (`tests/`, 150 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
@@ -302,16 +306,19 @@ it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
   storage is unreachable, `Document.has_file`), and document deletion
   (`DocumentRepository.delete_document`'s cascade — checked against a
   real database, not assumed — `DocumentDeletionService`'s full
-  failure-isolation matrix, `GraphRepository.delete_document_node`) — it
+  failure-isolation matrix, `GraphRepository.delete_document_node`), and
+  multi-tenancy (`TenantRepository` CRUD, tenant-scoped and
+  cross-tenant-exclusion cases in `DocumentRepository`, tenant-aware
+  auth/ingestion/federated-retrieval tests, and two dedicated
+  cross-tenant graph-leak regression tests) — it
   does not yet cover hybrid search, the circuit breaker, the audit log's
   write path, LangGraph's retry logic, most of the Neo4j graph feature,
-  MCP, PII detection's own splitting/batching logic, or the rest of
-  document-level ACL (`grant_access`/`has_access` themselves). No
+  MCP, or PII detection's own splitting/batching logic. No
   dedicated route-level tests exist for `/query/stream`, `/query`, or
   the document routes — consistent with this project's convention of
   testing the service layer directly and verifying route wiring live
   instead. The frontend has its own test
-  suite too (`frontend/`, 33 tests, Vitest + React Testing Library) —
+  suite too (`frontend/`, 37 tests, Vitest + React Testing Library) —
   covering the domain-tagging upload field and its document-card
   badges, the conversation sidebar, the chat component's resume
   behavior, live streamed-chunk rendering and retract handling, a
@@ -321,13 +328,16 @@ it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
   state, and the delete confirmation dialog's full behavior (opening,
   cancelling, a successful delete, an inline error, a 401 redirect);
   run with `npm test` inside `frontend/`.
-- There's no ownership concept distinguishing a document's original
-  uploader from anyone later granted access — sharing and deletion both
-  use the same `has_access` check, so anyone a document was ever shared
-  with can also permanently delete it for everyone. Acceptable today
-  since sharing has no UI and has never actually been used; a real
-  multi-tenant deployment would need ownership tracking first. See
-  `ADR-019` and `ADR-045`.
+- There's no ownership or per-document restriction concept *within* a
+  tenant — every user in a tenant can view, share, and permanently
+  delete every document that tenant owns, with no finer-grained
+  restriction available. This is a real, current gap against this
+  project's own written Enterprise Requirement 5 ("multi-tenancy is
+  not enough — users should only retrieve chunks from documents they
+  have explicit access to"), named plainly in `ADR-046` rather than
+  smoothed over — a deliberate trade-off for that feature's stated
+  scope, not an oversight, and open for a later feature to close. See
+  `ADR-045` and `ADR-046`.
 - Deleting a document's file from Blob Storage and its node from Neo4j
   are both best-effort — an outage in either is logged and skipped,
   never blocks the deletion itself. This means a rare Blob Storage or
@@ -520,20 +530,38 @@ Every REST request needs a real, logged-in session now (see
 plus an `X-Gateway-Secret` header matching whatever value you set for
 `APIM_GATEWAY_SECRET` in `.env` (see step 3 above; in Azure, API
 Management adds this header automatically, but locally you have to
-send it yourself). Sign up, then log in — `curl -c cookies.txt` saves
-the session cookie login sets, `-b cookies.txt` sends it back on every
-call after:
+send it yourself). Signing up also needs a real `tenant_id` (see
+[`ADR-046`](docs/adr/ADR-046-multi-tenancy.md)) — on a fresh database
+there's no tenant yet and no admin to register one through the API
+either, so bootstrap the first one directly:
+
+```
+docker exec knowledge-brain-postgres psql -U knowledge_brain -d knowledge_brain \
+  -c "INSERT INTO tenants (id, name) VALUES (gen_random_uuid(), 'Acme') RETURNING id;"
+```
+
+Copy the `id` it prints, then sign up and log in — `curl -c cookies.txt`
+saves the session cookie login sets, `-b cookies.txt` sends it back on
+every call after:
 
 ```
 curl -X POST http://localhost:8000/auth/signup \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
-  -d '{"email": "you@example.com", "password": "a-real-password"}'
+  -d '{"email": "you@example.com", "password": "a-real-password", "tenant_id": "<the tenant id from above>"}'
 
 curl -X POST http://localhost:8000/auth/login -c cookies.txt \
   -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com", "password": "a-real-password"}'
+```
+
+Once at least one tenant exists, `GET /tenants` (no auth needed — it's
+the same list a real signup form's picker uses) is the normal way to
+find its id instead of reading it back from Postgres:
+
+```
+curl http://localhost:8000/tenants -H "X-Gateway-Secret: your-apim-gateway-secret-here"
 ```
 
 From here, every call just needs `-b cookies.txt` instead of an
@@ -567,24 +595,42 @@ document's filename) and a `confidence` number — the reranker's own
 relevance score on the best chunk, or `null` if reranking itself was
 unavailable for that request.
 
-Uploading a document automatically grants you access to it. To share a
-document with someone else (or test what happens when you *don't* have
-access), sign up a second user, then grant their real user id — from
-that second account's own `GET /auth/me -b cookies2.txt` — access:
+A document uploaded today is automatically visible to every user in
+the uploader's own tenant — no separate share step exists anymore (see
+[`ADR-046`](docs/adr/ADR-046-multi-tenancy.md)). To see this directly,
+sign up a second user with the *same* `tenant_id` and list documents
+from their own session — the first user's upload shows up immediately,
+with no grant of any kind:
 
 ```
-curl -X POST http://localhost:8000/documents/<document-id>/access -b cookies.txt \
+curl -X POST http://localhost:8000/auth/signup \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "<the other account'"'"'s real id from /auth/me>"}'
+  -d '{"email": "someone-else@example.com", "password": "a-real-password", "tenant_id": "<the same tenant id>"}'
+
+curl -X POST http://localhost:8000/auth/login -c cookies2.txt \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "someone-else@example.com", "password": "a-real-password"}'
+
+curl http://localhost:8000/documents -b cookies2.txt \
+  -H "X-Gateway-Secret: your-apim-gateway-secret-here"
 ```
+
+To see isolation the other way — a user in a *different* tenant seeing
+none of this — bootstrap a second tenant the same way as the first,
+and sign a third user up into it instead: `GET /documents` for that
+account comes back empty.
 
 MCP tools (`ask_knowledge_base`, `upload_document`) are also reachable
 at `http://localhost:8000/mcp`, over the Streamable HTTP transport, for
 any MCP-compatible client (e.g. Claude Desktop) — MCP was deliberately
 **not** migrated to session cookies (it can't hold one the way a
-browser does), so it still authenticates the old way: every request
-must include both the shared secret you set as `MCP_API_KEY` in an
-`X-API-Key` header, and a self-asserted `X-User-Id` header.
+browser does), so it still authenticates with the shared secret you set
+as `MCP_API_KEY` in an `X-API-Key` header, plus an `X-User-Id` header —
+no longer purely self-asserted, though: since `ADR-046`, that header
+must be a real, registered user's id, checked against the database, or
+the request is rejected.
 
 ### Running the frontend
 
