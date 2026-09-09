@@ -2,6 +2,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from voyageai.error import RateLimitError
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.services.federated_retrieval_service import (
@@ -148,6 +149,42 @@ async def test_a_failing_domain_is_excluded_and_marks_the_result_partial():
     assert result.partial is True
     assert result.domains_used == ["HR"]
     assert mock_synthesize.call_args.args[2] is True  # partial flag passed to synthesis
+
+
+async def test_a_raw_voyage_failure_in_one_domain_no_longer_fails_the_whole_question():
+    """The federated-retrieval failure-isolation gap (docs/INTERVIEW_PREP.md,
+    Feature 27): before this fix, a raw vendor exception (not yet
+    CircuitOpenError, RetrievalUnavailableError, or OpenAIError) from one
+    domain's asyncio.gather task propagated uncaught and cancelled every
+    sibling domain too — confirmed live when Voyage's free-tier rate limit
+    was hit mid-verification. One failing domain must now be excluded, the
+    same as any other anticipated failure, not take the whole question down.
+    """
+    service = _service(["HR", "Finance"])
+
+    async def fake_run_query(question, user_id, tenant_id, domain=None):
+        if domain == "Finance":
+            raise RateLimitError("rate limit exceeded")
+        return _state("HR's draft answer")
+
+    service._single.run_query = AsyncMock(side_effect=fake_run_query)
+    service._single._check_moderation_safely = AsyncMock(return_value=(False, True))
+    service._single._check_injection_safely = AsyncMock(return_value=(False, True))
+
+    with (
+        patch(
+            "app.services.federated_retrieval_service.classify_domains",
+            new=AsyncMock(return_value=["HR", "Finance"]),
+        ),
+        patch(
+            "app.services.federated_retrieval_service.synthesize_answers",
+            new=AsyncMock(return_value="merged answer, missing Finance"),
+        ),
+    ):
+        result = await service.run_query("a cross-domain question", "user-1", TENANT_ID)
+
+    assert result.partial is True
+    assert result.domains_used == ["HR"]
 
 
 async def test_raises_when_every_domain_fails():

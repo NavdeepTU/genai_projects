@@ -165,10 +165,13 @@ and why it was made that way.
   and approved before building. Verified live: a genuinely cross-domain
   question correctly merged findings from two real domain-tagged
   documents, at roughly double a single-domain question's latency. A
-  real, unfixed gap found the same session: a raw provider rate-limit
-  error isn't caught by this feature's failure isolation the way a
-  circuit-breaker error is, so one domain hitting it today can still
-  fail the whole question — documented, not hidden. See
+  real gap found the same session — a raw provider rate-limit error
+  wasn't caught by this feature's failure isolation the way a
+  circuit-breaker error was, so one domain hitting it could fail the
+  whole question — was fixed in a later session: both this feature's
+  own safety net and reranking's underlying one now catch Voyage's own
+  error class directly, confirmed with a test reproducing the exact
+  scenario. See
   [`ADR-040`](docs/adr/ADR-040-multi-agent-federated-retrieval.md).
 - **Conversation history, a real sidebar, and context condensing** —
   every question now belongs to a persisted conversation, not just
@@ -218,16 +221,19 @@ and why it was made that way.
   real bugs — a missing CI test database, a GitHub OIDC subject claim
   mismatch, and an Azure revision-naming limit — found only once the
   pipeline actually ran).
-- **API Management gateway** *(partial — see below)* — Azure API
+- **API Management gateway** — Azure API
   Management sits in front of the backend, importing its API definition
   straight from FastAPI's own OpenAPI spec and stamping a Key
   Vault-held secret onto every request it forwards; the backend rejects
   anything missing it. Verified live end-to-end: a real request through
-  the gateway returns the correct `401`. Two
-  of the original design's four pieces aren't built: network-level
-  restriction and real per-caller rate limiting both turned out to be
-  unavailable on the Consumption tier chosen for cost — see
-  [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md).
+  the gateway returns the correct `401`. Network-level restriction and
+  real per-caller rate limiting both require a paid APIM tier
+  (Developer/Premium, for VNet integration and `rate-limit-by-key`);
+  this project stays on the Consumption tier deliberately, so both stay
+  out of scope by choice, not by gap — see
+  [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md). Structured
+  request/response logging into Application Insights is unrelated to
+  tier and remains genuinely unbuilt.
 - **Frontend** *(all five planned pages built — see below)* — a
   separate Next.js project (`frontend/`, Tailwind, Shadcn/UI on Base
   UI) with a shared shell (navigation, dark mode, a responsive mobile
@@ -368,13 +374,6 @@ and why it was made that way.
   cheaper/faster model, and runs even when nothing was actually
   retrieved. Neither is wrong, both are real, un-taken levers if the
   added cost ever needs trimming. See `ADR-039` and `ADR-040`.
-- Federated retrieval's failure isolation (`_run_one_domain_safely`)
-  only catches circuit-breaker-related errors, not a raw provider
-  exception thrown before a breaker has actually tripped open — found
-  live when Voyage AI's free-tier rate limit was hit mid-verification
-  and surfaced as an unhandled 500. One domain hitting this today would
-  fail the whole federated question rather than just being excluded.
-  See `ADR-040`.
 - Domain tags are free-text with no vocabulary control and no dedup
   across documents — "HR" and "Human Resources" are two unrelated
   domains to this system, and nothing today detects or merges
@@ -407,9 +406,6 @@ and why it was made that way.
   [`ADR-009`](docs/adr/ADR-009-audit-logging-approach.md).
 - The circuit breaker's state lives in a single process's memory, so it
   doesn't share failure counts across multiple server instances yet.
-- The Container App's direct URL is still fully reachable, unrestricted
-  — the API Management gateway's secret header is the one real access
-  control today, not network isolation. See `ADR-026`.
 - Schema changes now go through Alembic (a single baseline migration
   capturing the schema as of this project's Azure Postgres setup — see
   [`ADR-027`](docs/adr/ADR-027-azure-postgres-schema-creation.md) for

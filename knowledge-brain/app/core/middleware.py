@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
+from app.core.redis_cache import cache_identity, get_cached_identity
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
@@ -93,6 +94,29 @@ async def _reject_unauthenticated(request: Request, reason: str) -> JSONResponse
     return JSONResponse({"detail": "Authentication required"}, status_code=401)
 
 
+async def _resolve_identity(
+    cache_key: str, lookup: Callable[[], Awaitable[tuple[str, str] | None]]
+) -> tuple[str, str] | None:
+    """Return (user_id, tenant_id) for cache_key, checking the cache first.
+
+    On a cache miss, runs `lookup` — the real database check — and caches
+    its result (for 60 seconds, see IDENTITY_CACHE_TTL_SECONDS) before
+    returning, so the next request using the same cache_key skips the
+    database entirely until that cache entry expires or is invalidated.
+    """
+    cached = await get_cached_identity(cache_key)
+    if cached is not None:
+        return cached["user_id"], cached["tenant_id"]
+
+    resolved = await lookup()
+    if resolved is None:
+        return None
+
+    user_id, tenant_id = resolved
+    await cache_identity(cache_key, user_id, tenant_id)
+    return user_id, tenant_id
+
+
 async def user_id_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
@@ -129,14 +153,17 @@ async def user_id_middleware(
         except ValueError:
             return await _reject_unauthenticated(request, "X-User-Id is not a valid user id")
 
-        async with AsyncSessionLocal() as db_session:
-            user = await UserRepository(db_session).get_user_by_id(parsed_user_id)
+        async def _lookup_mcp_user() -> tuple[str, str] | None:
+            async with AsyncSessionLocal() as db_session:
+                user = await UserRepository(db_session).get_user_by_id(parsed_user_id)
+            return (str(user.id), str(user.tenant_id)) if user is not None else None
 
-        if user is None:
+        identity = await _resolve_identity(header_user_id, _lookup_mcp_user)
+        if identity is None:
             return await _reject_unauthenticated(request, "X-User-Id does not match a real account")
 
-        user_token = _user_id.set(str(user.id))
-        tenant_token = _tenant_id.set(str(user.tenant_id))
+        user_token = _user_id.set(identity[0])
+        tenant_token = _tenant_id.set(identity[1])
         try:
             response = await call_next(request)
         finally:
@@ -148,14 +175,17 @@ async def user_id_middleware(
     if not session_token:
         return await _reject_unauthenticated(request, "missing session cookie")
 
-    async with AsyncSessionLocal() as db_session:
-        user = await SessionRepository(db_session).get_user_by_token(session_token)
+    async def _lookup_session_user() -> tuple[str, str] | None:
+        async with AsyncSessionLocal() as db_session:
+            user = await SessionRepository(db_session).get_user_by_token(session_token)
+        return (str(user.id), str(user.tenant_id)) if user is not None else None
 
-    if user is None:
+    identity = await _resolve_identity(session_token, _lookup_session_user)
+    if identity is None:
         return await _reject_unauthenticated(request, "invalid or expired session")
 
-    user_token = _user_id.set(str(user.id))
-    tenant_token = _tenant_id.set(str(user.tenant_id))
+    user_token = _user_id.set(identity[0])
+    tenant_token = _tenant_id.set(identity[1])
     try:
         response = await call_next(request)
     finally:

@@ -836,8 +836,8 @@
 
   <section class="block">
     <div class="block-title">
-      <h2>Feature 11 — API Management gateway <span class="status-pill partial" style="margin-left: 0.3rem;">Partial</span></h2>
-      <span class="count">4 of 4 built · 2 of 4 original requirements deferred</span>
+      <h2>Feature 11 — API Management gateway <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">4 of 4 built · 2 of 4 original requirements permanently out of scope on this tier, by choice</span>
     </div>
     <div class="row">
       <div class="node">
@@ -871,7 +871,7 @@
       </div>
     </div>
 
-    <p class="caveat"><strong>Not built, deferred on purpose:</strong> network-level restriction (Consumption tier APIM has no static outbound IP at all, confirmed live — the Container App's direct URL still works, fully unrestricted) and real per-caller rate limiting (the wanted policy isn't available on this tier; the fallback Azure offers is scoped per-subscription, meaningless since subscriptions were deliberately left unrequired). Also deferred: request/response logging and APIM's own subscription-key concept. See ADR-026.</p>
+    <p class="caveat"><strong>Permanently out of scope on this tier, by choice, not a gap:</strong> network-level restriction (Consumption tier APIM has no static outbound IP at all, confirmed live — the Container App's direct URL still works, fully unrestricted) and real per-caller rate limiting (the wanted policy isn't available on this tier; the fallback Azure offers is scoped per-subscription, meaningless since subscriptions were deliberately left unrequired). Staying on Consumption tier is a firm, ongoing decision — both are the project's intended final state, not future work. Still genuinely open, unrelated to tier: request/response logging into Application Insights and APIM's own subscription-key concept. See ADR-026.</p>
     <p class="caveat"><strong>Verified live, fully, in two stages:</strong> API Management's own request trace first confirmed the secret resolving correctly, being stamped onto the request, and being forwarded correctly to the backend. A clean end-to-end status-code test was blocked at the time by a separate, unrelated incident found the same way — the real Azure Postgres database had no application tables at all, so every rejected request crashed trying to write its audit log entry. Fixed the following session (see ADR-027): a real request through APIM now returns the correct <code>401</code> instead of a <code>500</code>.</p>
   </section>
 
@@ -1593,6 +1593,55 @@
 
     <p class="caveat"><strong>A real subtlety, caught only by running it:</strong> diffing the baseline against the already-up-to-date dev database produced an empty, useless no-op migration. Regenerated against a throwaway empty database instead, so a brand-new database can actually build the full schema from nothing.</p>
     <p class="caveat">Verified live: upgrade against an empty database produced zero schema drift against the models, and downgrade cleanly reversed everything back to nothing. Execution stays manual by design — not wired into CI/CD yet.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Identity lookup caching <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">removes a database round trip from every authenticated request</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Redis cache, 60s TTL</span>
+        <span class="path mono">session cookie + MCP X-User-Id, both paths</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Active invalidation on logout</span>
+        <span class="path mono">revoked session stops working immediately</span>
+      </div>
+    </div>
+
+    <p class="caveat">Verified live, not just mocked: a real session's cache entry proven to actually serve the second request, by deleting the underlying database row after the first request and confirming the second still succeeds. Backend suite: 216 → 229 passing.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Federated-retrieval failure isolation <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">closes the gap named when Feature 27 was built — a Voyage rate limit no longer fails a whole cross-domain question</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Reranking's own safety net widened</span>
+        <span class="path mono">catches Voyage's raw SDK errors, not just an already-open circuit</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Per-domain isolation, defense in depth</span>
+        <span class="path mono">same widened catch at the actual isolation boundary</span>
+      </div>
+    </div>
+
+    <p class="caveat">Verified: a regression test reproduces the exact scenario found live during Feature 27's own testing — one domain raises Voyage's real rate-limit error, the other domain's answer still comes back, marked partial, instead of the whole question failing.</p>
+    <p class="caveat">Named, not fixed: a couple of other safe-wrappers in the same file (query rewriting, graph-context lookup) still only catch an already-open circuit, same shape of gap. Out of scope for this pass.</p>
   </section>
 
   <footer class="roadmap">

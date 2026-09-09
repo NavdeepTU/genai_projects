@@ -3,6 +3,7 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
+from app.core.redis_cache import invalidate_identity
 from app.models.session import Session
 from app.models.user import User
 from app.repositories.session_repository import SessionRepository
@@ -81,5 +82,8 @@ class AuthService:
         return user, session
 
     async def log_out(self, token: str) -> None:
-        """End a session."""
+        """End a session, and clear its cached identity so the middleware's
+        60-second cache (app/core/redis_cache.py) can't keep treating a
+        just-revoked session as valid until that cache entry expires on its own."""
         await self.session_repository.delete_session(token)
+        await invalidate_identity(token)

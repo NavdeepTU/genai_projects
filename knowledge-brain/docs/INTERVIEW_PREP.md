@@ -1480,9 +1480,13 @@ The Terraform block that was meant to build this looped over an empty
 list, generated zero rules, and `terraform apply` reported success
 anyway — a config that was accepted but did nothing. True network
 isolation needs Developer or Premium tier's VNet integration, a real
-fixed monthly cost this project chose not to take on yet. The dead
-code was removed rather than left in, since a restriction block that
-silently protects nothing is worse than no restriction block at all.
+fixed monthly cost. The dead code was removed rather than left in,
+since a restriction block that silently protects nothing is worse than
+no restriction block at all. **This is a firm, permanent decision for
+this project, not a temporary gap** — staying on the Consumption tier
+was reaffirmed explicitly rather than left open as "upgrade later," so
+the missing network lock and the header-secret-only design are this
+project's actual, intended final state, not unfinished work.
 
 **Why Consumption tier at all, if it can't do the thing the original
 design needed?**
@@ -1583,15 +1587,17 @@ end-to-end confirmation this feature couldn't get the first time.
 
 **What would you change here if this needed to run at genuine
 production scale, with real external users?**
-Upgrade to a VNet-capable tier and let the network layer do what the
-header secret does today by convention — a compromised or leaked
-secret currently has no second obstacle in its way. Pair that with
-real per-caller rate limiting (via `rate-limit-by-key`, once available)
-and structured request/response logging into Application Insights,
-neither of which exist yet. All three are named, accepted gaps for a
-project with no real production traffic — not oversights, but not
-something that should still be true the day this handles genuine
-external load either.
+In general, a VNet-capable tier would let the network layer do what
+the header secret does today by convention — a compromised or leaked
+secret currently has no second obstacle in its way — paired with real
+per-caller rate limiting via `rate-limit-by-key`. For *this* project
+specifically, though, staying on Consumption tier is a firm, ongoing
+choice, not a placeholder waiting to be revisited — the network lock
+and full per-tenant rate limiting are accepted as permanently out of
+scope here on cost grounds, not tracked as future work. Structured
+request/response logging into Application Insights is the one item in
+this list that's unrelated to tier at all — genuinely unbuilt, not
+a cost trade-off — and stays open.
 
 *Further reading: [Microsoft's own API Management policy reference](https://learn.microsoft.com/en-us/azure/api-management/api-management-policies), covering exactly which policies are available on which tier — the source that should have been checked before assuming `rate-limit-by-key` would work on Consumption tier.*
 
@@ -3031,20 +3037,20 @@ domain wrapping the same external dependency would be redundant, since
 they'd all trip together anyway.
 
 **Is that failure isolation actually complete?**
-No, and this is worth naming honestly rather than glossing over: found
-live, not theoretical. `_run_one_domain_safely` only catches
-`(CircuitOpenError, RetrievalUnavailableError, OpenAIError)` — not a
-raw provider exception a service can throw *before* its own circuit
-breaker has tripped open. Voyage AI's free-tier rate limit (3
-requests/minute) was hit mid-verification during this feature's own
-testing and surfaced as an unhandled 500, not a graceful degradation —
-a pre-existing gap in `_rerank_safely` (which only catches
-`CircuitOpenError` too) that this feature inherits with a sharper
-consequence: that exact scenario, hit by just one domain among several,
-would propagate up through `asyncio.gather` uncaught and fail the
-*entire* federated question, not just exclude that one domain the way
-the design intends. Not fixed this session — a real, open item, not
-something this feature claims to have solved completely.
+**Correction, added once this gap was actually fixed:** at the time
+this feature was built, no — found live, not theoretical.
+`_run_one_domain_safely` only caught `(CircuitOpenError,
+RetrievalUnavailableError, OpenAIError)` — not a raw provider exception
+a service can throw *before* its own circuit breaker has tripped open.
+Voyage AI's free-tier rate limit (3 requests/minute) was hit
+mid-verification during this feature's own testing and surfaced as an
+unhandled 500, not a graceful degradation — a pre-existing gap in
+`_rerank_safely` (which only caught `CircuitOpenError` too) that this
+feature inherited with a sharper consequence: that exact scenario, hit
+by just one domain among several, would propagate up through
+`asyncio.gather` uncaught and fail the *entire* federated question, not
+just exclude that one domain the way the design intends. This is now
+fixed — see Feature 37 for how, and why the fix lives at both layers.
 
 **Could a follow-up or a cross-domain question ever leak access to a
 document a user isn't permitted to see?**
@@ -3813,6 +3819,127 @@ step reporting success proves it was *accepted*, never that it did
 what was intended.
 
 *Further reading: [Alembic's own cookbook, "Building an Up to Date Database from Scratch"](https://alembic.sqlalchemy.org/en/latest/cookbook.html#building-an-up-to-date-database-from-scratch) — the official recipe for exactly this situation: adopting Alembic on a project whose database already exists.*
+
+---
+
+## Feature 36: Caching the Per-Request Identity Lookup
+
+**What does this feature do, in one sentence?**
+Every authenticated request used to pay a database round trip just to
+resolve "who is this" before its own logic even started; that lookup
+is now cached for 60 seconds, so most requests skip the database for
+identity resolution entirely.
+
+```mermaid
+flowchart LR
+    REQ[Request: cookie<br/>or X-User-Id] --> CACHE{Cached?}
+    CACHE -->|hit| USE[Use cached<br/>user_id + tenant_id]
+    CACHE -->|miss| DB["Database lookup<br/>(session or user table)"]
+    DB --> WRITE["Cache for 60s"]
+    WRITE --> USE
+    LOGOUT[Logout] -->|explicit delete| CACHE
+```
+
+**Why did this need fixing — what was actually wrong?**
+Nothing was incorrect; it was pure waste. The identity check ran a
+database query on *every single request*, before the route's own,
+separate database work even began — effectively doubling the database
+load identity-checking alone created, on a connection pool this
+project's own retrieval feature had already flagged as the thing that
+breaks first under real concurrent load.
+
+**Why cache with a short TTL *and* actively clear it on logout, instead
+of just picking one?**
+They solve different failure modes. Active invalidation on logout
+closes the real security gap immediately — a revoked session stops
+working the instant it's revoked, not up to a minute later. The short
+TTL exists purely as a backstop, in case some future code path ever
+manages to end a session without going through that one logout
+function. Neither replaces the other.
+
+**What's the actual trade-off being accepted here?**
+For the length of the TTL, any session-ending path that *isn't*
+logout — none exist today — could keep a cached identity usable
+slightly past when it should be. That's a deliberate, bounded,
+named risk, not an oversight, in the same spirit as this project's
+existing "fail toward availability, but say so" choices for reranking
+and Neo4j — just applied to a security-adjacent path this time, which
+is why it's worth stating explicitly rather than treating it as routine.
+
+*Further reading: [OWASP's Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) — the section on session termination covers exactly this expectation: a logout should invalidate a session immediately, not just let it lapse.*
+
+---
+
+## Feature 37: Closing the Federated-Retrieval Failure-Isolation Gap
+
+**What does this feature do, in one sentence?**
+Widens what two existing safety nets around Voyage AI reranking
+actually catch, so a real vendor failure — not just "the circuit
+breaker is already open" — degrades gracefully instead of taking down
+either a single question or, with a sharper consequence, an entire
+multi-domain federated one.
+
+```mermaid
+flowchart TD
+    CALL[Voyage rerank call] -->|breaker already open| OPEN[CircuitOpenError]
+    CALL -->|fresh failure, e.g.<br/>rate limit| RAW[Voyage's own<br/>raw exception]
+    OPEN --> CATCH["_rerank_safely now catches both"]
+    RAW --> CATCH
+    CATCH --> FALLBACK[Fall back to hybrid<br/>search's own order]
+    FALLBACK --> ISOLATE["_run_one_domain_safely:<br/>same widened catch, defense in depth"]
+    ISOLATE --> OTHERS[Sibling domains'<br/>asyncio.gather tasks unaffected]
+```
+
+**Why did the old version only catch `CircuitOpenError` — wasn't that
+supposed to mean "this call can never bring down the caller"?**
+A circuit breaker only raises its own `CircuitOpenError` once it's
+*already* decided a dependency is bad, after repeated failures. A
+call's first failure — Voyage's own rate-limit error, say — is
+re-raised by the breaker exactly as the vendor's SDK raised it, not
+wrapped in anything. A safety net built to catch only the breaker's
+own error protects against a dependency that's already known-bad, not
+one failing for the first time — confirmed live when Voyage's actual
+free-tier rate limit (3 requests/minute) was hit mid-verification of
+the federated-retrieval feature.
+
+**Why did this matter more for federated retrieval than for a normal
+question?**
+A normal question just failed outright — one user, one bad answer.
+Federated retrieval runs one Voyage call per domain, concurrently, via
+`asyncio.gather`. Without `return_exceptions=True`, one task raising an
+exception nobody's watching for cancels every sibling task too — so a
+rate limit hit by *one* domain among several took the whole merged
+answer down, including domains that would have succeeded on their own.
+
+**Why catch Voyage's own SDK error class specifically, instead of a
+bare `except Exception`?**
+A real trade-off, decided deliberately rather than defaulted into.
+Catching Voyage's error class covers every kind of Voyage failure
+without exception, while a genuine bug in this project's own code —
+a typo, a wrong attribute — still fails loudly instead of being
+silently swallowed and mislabeled as "the vendor is having a bad day."
+A bare `except Exception` would be more resilient but would hide that
+second category of problem completely.
+
+**Why fix this at two layers instead of one?**
+Fixing reranking's own safety net alone would have been enough to stop
+*this specific* failure from ever reaching the federated-retrieval
+layer at all. The federated-retrieval boundary got the same widened
+catch anyway, as deliberate defense-in-depth: it's the actual place
+"one domain's failure can't sink the others" is promised, so it should
+hold that promise on its own terms, not only because a lower layer
+happens to catch everything first.
+
+**Is every safety net like this in the codebase fixed now?**
+No, and that's worth being direct about rather than implying broader
+coverage than what was actually checked. This fix closed the one
+specific, demonstrated gap — reranking. A few other safe-wrappers in
+this same file (query rewriting, graph-context lookup) still only
+catch `CircuitOpenError`. They weren't the named, tested failure; widening
+them wasn't in scope for this pass, and is flagged as a real, separate
+follow-up rather than assumed fixed by association.
+
+*Further reading: [Google's Site Reliability Engineering book, "Addressing Cascading Failures"](https://sre.google/sre-book/addressing-cascading-failures/) — covers exactly this shape of problem: one component's failure propagating through a system that fans work out concurrently, and why isolating it requires the failure to actually be caught, not just anticipated in one place.*
 
 ---
 

@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 
 from openai import OpenAIError
+from voyageai.error import VoyageError
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.middleware import get_correlation_id
@@ -305,10 +306,18 @@ class FederatedRetrievalService:
         caught right here so it can't stop the other domains' concurrent
         asyncio.gather calls, and synthesis proceeds with whichever
         domains actually came back, marked partial.
+
+        VoyageError is caught explicitly, not just CircuitOpenError,
+        as defense-in-depth at this actual isolation boundary — even
+        though _rerank_safely now degrades a Voyage failure gracefully
+        on its own, this is the boundary "failure isolation" is actually
+        named for, and a raw vendor exception surfacing from any future
+        change one level down should still be contained to this one
+        domain, not cancel every sibling domain's asyncio.gather task.
         """
         try:
             state = await self._single.run_query(question, user_id, tenant_id, domain)
-        except (CircuitOpenError, RetrievalUnavailableError, OpenAIError):
+        except (CircuitOpenError, RetrievalUnavailableError, OpenAIError, VoyageError):
             logger.error(
                 "Domain '%s' retrieval failed, excluding it from synthesis",
                 domain,

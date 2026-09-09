@@ -2,6 +2,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 from openai import OpenAIError
+from voyageai.error import RateLimitError
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.models.document import Chunk
@@ -505,3 +506,28 @@ async def test_query_graph_never_retries_when_reranking_itself_is_unavailable():
     mock_rewrite.assert_not_awaited()
     assert state["reranker_unavailable"] is True
     assert state["retry_count"] == 0
+
+
+async def test_query_graph_degrades_gracefully_on_a_raw_voyage_error_not_just_circuit_open():
+    """The federated-retrieval failure-isolation gap (docs/INTERVIEW_PREP.md,
+    Feature 27): a fresh Voyage failure (e.g. a rate limit) raises Voyage's
+    own exception, not CircuitOpenError, until the breaker has actually
+    opened. _rerank_safely must degrade the same way for both, not just
+    the already-open-circuit case.
+    """
+    chunk = Chunk(document_id=uuid.uuid4(), chunk_index=0, text="fallback result")
+    service = RetrievalService(_FakeRetrievalRepository(chunk), _FakeGraphRepositoryNoRefs())
+
+    with (
+        patch("app.services.retrieval_service.embed_chunks", new=AsyncMock(return_value=[[0.1] * 1536])),
+        patch("app.services.retrieval_service.check_moderation", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.check_jailbreak", new=AsyncMock(return_value=False)),
+        patch(
+            "app.services.retrieval_service.rerank_chunks",
+            new=AsyncMock(side_effect=RateLimitError("rate limit exceeded")),
+        ),
+    ):
+        state = await service._prepare_for_generation("original question", "user-1", str(uuid.uuid4()))
+
+    assert state["reranker_unavailable"] is True
+    assert state["reranked_chunks"] == [chunk]

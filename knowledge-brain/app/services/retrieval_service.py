@@ -5,6 +5,7 @@ import uuid
 
 from openai import OpenAIError
 from sqlalchemy.exc import SQLAlchemyError
+from voyageai.error import VoyageError
 
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.config import get_settings
@@ -427,12 +428,21 @@ class RetrievalService:
         fallback order has no real score behind it — 0.0 there would
         look identical to "genuinely searched and found nothing," which
         isn't true.
+
+        Catches VoyageError alongside CircuitOpenError: the circuit
+        breaker only raises CircuitOpenError once it's already open from
+        repeated failures — a call's *first* failure (e.g. Voyage's
+        rate limit) is Voyage's own raw exception, re-raised as-is by
+        the breaker (see app/core/circuit_breaker.py), and would
+        otherwise fail this request outright instead of degrading
+        gracefully. Caught live during Feature 27's own verification —
+        see docs/INTERVIEW_PREP.md, Feature 27.
         """
         try:
             ranked = await rerank_chunks(question, candidates, top_k=settings.retrieval_top_k)
             top_score = ranked[0].relevance_score if ranked else 0.0
             return [r.chunk for r in ranked], top_score, False
-        except CircuitOpenError:
+        except (CircuitOpenError, VoyageError):
             logger.error(
                 "Reranking unavailable, falling back to hybrid search's own ranking",
                 extra={"correlation_id": get_correlation_id()},

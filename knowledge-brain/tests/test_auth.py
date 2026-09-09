@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.core.redis_cache import cache_identity, get_cached_identity
 from app.models.session import Session
 from app.repositories.session_repository import SessionRepository
 from app.repositories.tenant_repository import TenantRepository
@@ -94,6 +95,20 @@ async def test_log_out_deletes_the_session(db_session):
 async def test_log_out_on_an_already_invalid_token_does_not_raise(db_session):
     service = _service(db_session)
     await service.log_out("this-token-was-never-real")
+
+
+async def test_log_out_clears_the_cached_identity(db_session):
+    """The middleware's identity cache (app/core/redis_cache.py) must not
+    keep treating a just-revoked session as valid until its TTL expires."""
+    service = _service(db_session)
+    tenant_id = await _tenant_id(db_session)
+    await service.sign_up("alice@example.com", "correct horse battery staple", tenant_id)
+    user, session = await service.log_in("alice@example.com", "correct horse battery staple")
+    await cache_identity(session.token, str(user.id), str(tenant_id))
+
+    await service.log_out(session.token)
+
+    assert await get_cached_identity(session.token) is None
 
 
 async def test_get_user_by_token_returns_none_for_an_expired_session(db_session):

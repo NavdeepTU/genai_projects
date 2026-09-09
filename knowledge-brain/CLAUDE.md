@@ -268,11 +268,22 @@ of the system costs per month.
 These must be built in from the start — not added later.
 
 **1. API Gateway via Azure API Management**
-All external traffic goes through APIM. Never expose the
-FastAPI service directly to the internet. APIM handles:
-- Rate limiting per tenant (100 requests/minute by default)
+All external traffic goes through APIM, which stamps a Key Vault-held
+shared secret onto every request it forwards; the backend rejects
+anything missing it. On the Consumption tier this project uses,
+deliberately kept for cost and not planned to change, APIM has no
+static outbound IP address at all — so a true network-level
+restriction (blocking the backend's raw URL from being reached any
+other way) isn't possible, and the gateway secret is the one real,
+permanent access control at this layer, not a stand-in for a second
+lock still to come. Real per-tenant rate limiting (`rate-limit-by-key`)
+is also unavailable on this tier; the per-subscription fallback Azure
+offers doesn't actually enforce "per tenant," so no rate limiting is
+implemented, permanently, on this tier. Both are accepted trade-offs
+for this project, not open work — see `ADR-026`. APIM still handles:
 - API versioning (/v1/, /v2/)
-- Request/response logging
+- Request/response logging (not yet wired up — unrelated to tier,
+  genuinely still pending)
 - Auth token validation before traffic reaches the backend
 
 **2. Managed Identity for all secrets**

@@ -4558,25 +4558,122 @@ number again.
   the better answer instead.
 
 ### What's next
-- The interview-explanation round for this feature, deferred from this
-  session.
 - Everything still on the list from before: `user_id_middleware`'s
-  per-request database round trip, APIM's remaining gaps, the
-  federated-retrieval failure-isolation gap, domain vocabulary drift,
-  and Postgres' still-open cost fix.
-- `README.md` still references the now-deleted `create_tables.py` in
-  two places (setup instructions, and a description of how the Azure
-  schema was created) — flagged, not fixed, since README updates go
-  through you.
+  per-request database round trip, the federated-retrieval
+  failure-isolation gap, domain vocabulary drift, and Postgres'
+  still-open cost fix.
+- `README.md`'s two references to the now-deleted `create_tables.py`
+  were fixed this session (setup instructions now say
+  `alembic upgrade head`; the description of how the Azure schema was
+  originally created now points at Alembic instead).
 - Wiring `alembic upgrade head` into the GitHub Actions deploy pipeline
   remains a deliberately deferred option, not a gap — revisit only if a
   real team/release cadence actually needs it.
+- **Decision, same day:** API Management's two tier-blocked items —
+  network-level restriction and real per-tenant rate limiting — are no
+  longer tracked as pending. You confirmed staying on the Consumption
+  tier permanently, so both are now the project's accepted, intended
+  final state, not open work. Structured request/response logging into
+  Application Insights is unrelated to tier and remains genuinely open.
+  `docs/INTERVIEW_PREP.md` (Feature 14), `docs/pipeline-status.html`,
+  `README.md`, and `CLAUDE.md`'s own Enterprise Requirement 1 (softened
+  from "never expose the backend directly" / "rate limiting per
+  tenant" to state the actual, permanent trade-off) were all updated to
+  reflect this the same day, ahead of the next `/end-session` — a
+  deliberate, requested exception to the usual "docs only update at
+  session close" rule, matching the same precedent as `ADR-047`'s
+  requirements correction.
 
 **Estimated completion: ~96% of the tracked build (weighted by real
 effort) is still the right figure** — this session closed
-infrastructure debt (the migration tool), not a new feature, so the
-percentage doesn't move. Rough remaining effort: ~4 hours, since the
-migration-tool item that made up a real chunk of the earlier ~5-hour
-estimate is now done. At 3–4 hours/day, still roughly 1 working day
-left, same standing caveat: a genuinely new feature request would grow
-this number again.
+infrastructure debt (the migration tool) and reclassified two
+already-accepted trade-offs, not new features, so the percentage
+doesn't move. Rough remaining effort: ~4 hours. At 3–4 hours/day, still
+roughly 1 working day left, same standing caveat: a genuinely new
+feature request would grow this number again.
+
+---
+
+## Session: 2026-09-09 (continued) — Identity-lookup caching, and the federated-retrieval failure-isolation fix
+
+### What we built
+- Cached `user_id_middleware`'s per-request identity lookup in Redis
+  (60-second TTL), for both callers it handles — the browser-facing
+  session cookie and MCP's X-User-Id header. A cache hit skips the
+  database entirely; a miss resolves it once and populates the cache.
+- Active invalidation on logout, not just the TTL: `AuthService.log_out`
+  now clears the cached identity immediately, so a revoked session
+  can't stay usable for the rest of the TTL window on that path. The
+  TTL alone is a deliberate backstop for any other session-ending path,
+  not the primary defense — confirmed as your explicit choice over a
+  TTL-only design.
+- Verified live, not mocked: a real session's cache entry proven to
+  actually serve a repeat request by deleting the underlying database
+  row after the first request and confirming the second still
+  succeeds — for both the session-cookie and MCP identity paths.
+  Backend suite: 216 → 229 passing.
+- Closed the federated-retrieval failure-isolation gap named when
+  Feature 27 shipped: `_rerank_safely` and `_run_one_domain_safely`
+  both only caught `CircuitOpenError` — the error a circuit breaker
+  raises once it's *already* open — not a fresh, first-time failure
+  straight from Voyage's own SDK (a rate limit, say). Widened both to
+  also catch Voyage's own error class specifically, not a bare
+  `except Exception` — your explicit choice, so a genuine bug in this
+  project's own code still fails loudly instead of being silently
+  mislabeled as a vendor problem.
+- Fixed at two layers deliberately: `_rerank_safely` (the root cause,
+  benefits both the single-domain and federated paths) and
+  `_run_one_domain_safely` (the actual per-domain isolation boundary
+  this pending item was named for), as real defense-in-depth rather
+  than relying on the lower layer alone.
+- A regression test reproduces the exact scenario found live during
+  Feature 27's own testing: two domains, one raises Voyage's real
+  `RateLimitError`, and the other domain's answer still comes back,
+  marked partial — not the whole question failing the way it did
+  before this fix. Backend suite: 229 → 231 passing.
+- Named, not fixed: a couple of other safe-wrappers in
+  `retrieval_service.py` (query rewriting, graph-context lookup) have
+  the identical narrow-catch shape. Not the demonstrated failure, out
+  of scope for this pass — flagged as a real, separate follow-up.
+- Updated `docs/INTERVIEW_PREP.md`: two new sections (Feature 36:
+  identity caching; Feature 37: the failure-isolation fix), plus
+  Feature 27's own "is that failure isolation actually complete?"
+  answer corrected in place — it used to say "no, not fixed this
+  session"; it now points at Feature 37.
+- Per your request, the interview-explanation round was skipped for
+  both of these features, same as the Alembic feature two sessions ago.
+
+### What I struggled with
+- Nothing new to name here — no incorrect first attempt, no live
+  surprise. Both fixes matched their design exactly once built, and
+  the regression tests passed on the first run.
+
+### Concepts to revisit
+- Why a circuit breaker's own `CircuitOpenError` only ever describes
+  "this dependency is already known-bad" — never a first-time failure —
+  and why a safety net meant to guarantee "this call can never bring
+  down the caller" has to catch the vendor's own exception types too,
+  not just the breaker's.
+- Why `asyncio.gather` without `return_exceptions=True` lets one task's
+  uncaught exception cancel every sibling task, and why that turns a
+  small, contained failure into a total one specifically in a
+  concurrent fan-out pattern like federated retrieval.
+- Why active invalidation and a short TTL solve genuinely different
+  problems for a cache, and why picking only one of them leaves a real
+  gap the other one exists specifically to close.
+
+### What's next
+- Domain vocabulary drift, and Postgres' still-open cost fix — the two
+  items remaining on the list from before this session.
+- The other safe-wrappers in `retrieval_service.py` with the same
+  narrow-catch shape (query rewriting, graph-context lookup) — named
+  this session, not yet fixed.
+- The interview-explanation round for both of this session's features,
+  deferred at your request.
+
+**Estimated completion: ~97% of the tracked build (weighted by real
+effort) is now done.** Both fixes this session closed named reliability
+gaps rather than adding new scope. Rough remaining effort: ~3 hours,
+across domain vocabulary drift and the Postgres cost fix. At 3–4
+hours/day, well under 1 working day left, same standing caveat: a
+genuinely new feature request would grow this number again.
