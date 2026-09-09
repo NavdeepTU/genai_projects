@@ -1,6 +1,6 @@
 import { FileText } from "lucide-react";
 
-import { getDocuments } from "@/lib/server-api";
+import { getDocuments, getDomains } from "@/lib/server-api";
 import { DocumentCard } from "@/components/document-card";
 import { UploadDropzone } from "@/components/upload-dropzone";
 
@@ -25,14 +25,14 @@ function EmptyState() {
 }
 
 export default async function DocumentsPage() {
-  const documents = await getDocuments();
+  const [documents, domains] = await Promise.all([getDocuments(), getDomains()]);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
       <h1 className="mb-6 text-2xl font-semibold">Documents</h1>
 
       <div className="mb-8">
-        <UploadDropzone />
+        <UploadDropzone domains={domains} />
       </div>
 
       {documents.length === 0 ? (

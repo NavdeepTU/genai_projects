@@ -15,6 +15,7 @@ import type {
   ConversationListItem,
   ConversationListResponse,
   DashboardResponse,
+  Domain,
   DocumentListItem,
   DocumentListResponse,
   ReviewQueueItem,
@@ -92,6 +93,17 @@ export async function getTenants(): Promise<Tenant[]> {
 
   const data: { tenants: Tenant[] } = await response.json();
   return data.tenants;
+}
+
+export async function getDomains(): Promise<Domain[]> {
+  const response = await authenticatedFetch("/domains");
+
+  if (!response.ok) {
+    throw new Error(`Failed to load domains (status ${response.status})`);
+  }
+
+  const data: { domains: Domain[] } = await response.json();
+  return data.domains;
 }
 
 export async function getReviewQueue(): Promise<ReviewQueueItem[]> {

@@ -12,6 +12,7 @@ from app.models import (  # noqa: F401  (import registers every table with Base)
     audit_log,
     conversation,
     document,
+    domain,
     session,
     tenant,
     user,

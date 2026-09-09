@@ -4,8 +4,10 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
+from app.models.domain import Domain, document_domains
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -32,30 +34,31 @@ class DocumentRepository:
         filename: str,
         tenant_id: uuid.UUID,
         uploaded_by: uuid.UUID | None = None,
-        domains: list[str] | None = None,
+        domain_ids: list[uuid.UUID] | None = None,
     ) -> Document:
         """Insert a new document row (status defaults to pending), owned by one tenant.
 
-        Deduped here, in the one place both the REST upload route (parsing
-        a comma-separated string) and the MCP upload tool (taking a list
-        directly) funnel through — a repeated tag like "HR, HR" would
-        otherwise store as two identical entries, which the frontend then
-        renders as two React list items sharing the same key. uploaded_by
-        is who this document is visible to exclusively while it's held
-        for PII review (ADR-048) — optional since the evaluation harness
-        has no real user account to attribute uploads to.
+        domain_ids is filtered down to only domains that actually belong
+        to this tenant before linking — a stray or cross-tenant id is
+        silently dropped, not rejected, the same "if it isn't yours, it
+        doesn't exist" pattern this project's tenant isolation already
+        uses everywhere else. uploaded_by is who this document is visible
+        to exclusively while it's held for PII review (ADR-048) —
+        optional since the evaluation harness has no real user account to
+        attribute uploads to.
         """
-        deduped_domains = list(dict.fromkeys(domains or []))
-        document = Document(
-            filename=filename, tenant_id=tenant_id, uploaded_by=uploaded_by, domains=deduped_domains
-        )
+        document = Document(filename=filename, tenant_id=tenant_id, uploaded_by=uploaded_by)
+        if domain_ids:
+            stmt = select(Domain).where(Domain.id.in_(domain_ids), Domain.tenant_id == tenant_id)
+            result = await self.session.execute(stmt)
+            document.domain_objects = list(result.scalars().all())
         self.session.add(document)
         try:
             await self.session.commit()
         except SQLAlchemyError:
             logger.exception("Failed to create document row for %s", filename)
             raise
-        await self.session.refresh(document)
+        await self.session.refresh(document, attribute_names=["domain_objects"])
         return document
 
     async def set_storage_path(self, document_id: uuid.UUID, storage_path: str) -> None:
@@ -252,7 +255,7 @@ class DocumentRepository:
             .limit(limit)
         )
         if domain is not None:
-            stmt = stmt.where(Document.domains.any(domain))
+            stmt = stmt.where(Document.domain_objects.any(Domain.name == domain))
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
@@ -291,7 +294,7 @@ class DocumentRepository:
             .limit(limit)
         )
         if domain is not None:
-            stmt = stmt.where(Document.domains.any(domain))
+            stmt = stmt.where(Document.domain_objects.any(Domain.name == domain))
         try:
             result = await self.session.execute(stmt)
         except SQLAlchemyError:
@@ -300,16 +303,21 @@ class DocumentRepository:
         return list(result.scalars().all())
 
     async def list_domains_for_tenant(self, tenant_id: uuid.UUID) -> list[str]:
-        """Return every distinct domain tag across documents this tenant can see.
+        """Return every distinct domain name currently tagged on this tenant's documents.
 
         The set the domain-classification supervisor actually chooses
         from — a domain this tenant has no documents in isn't a
-        meaningful choice, so it's never even offered. Untagged documents
-        (an empty domains array) contribute nothing here.
+        meaningful choice, so it's never even offered. An inner join
+        against document_domains is what makes that filtering automatic:
+        a registered-but-unused Domain row (see DomainRepository.list_for_tenant,
+        which returns those too, for the admin panel and upload picker)
+        simply never matches this join, and an untagged document
+        contributes nothing either.
         """
         stmt = (
-            select(func.unnest(Document.domains).label("domain"))
-            .where(Document.tenant_id == tenant_id)
+            select(Domain.name)
+            .join(document_domains, document_domains.c.domain_id == Domain.id)
+            .where(Domain.tenant_id == tenant_id)
             .distinct()
         )
         try:
@@ -358,6 +366,7 @@ class DocumentRepository:
         )
         stmt = (
             select(Document)
+            .options(selectinload(Document.domain_objects))
             .where(
                 Document.tenant_id == tenant_id,
                 (Document.status.not_in(review_statuses)) | (Document.uploaded_by == caller_id),

@@ -15,6 +15,7 @@ from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
 from app.api.dashboard import router as dashboard_router
 from app.api.documents import router as documents_router
+from app.api.domains import router as domains_router
 from app.api.query import router as query_router
 from app.api.query_stream import router as query_stream_router
 from app.api.tenants import router as tenants_router
@@ -64,6 +65,7 @@ app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(dashboard_router)
 app.include_router(documents_router)
+app.include_router(domains_router)
 app.include_router(query_router)
 app.include_router(query_stream_router)
 app.include_router(tenants_router)

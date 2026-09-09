@@ -1,13 +1,22 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import type { AdminAuditEntry, ReviewQueueItem, Tenant } from "@/lib/api";
+import type { AdminAuditEntry, Domain, ReviewQueueItem, Tenant } from "@/lib/api";
 import { AdminDashboard } from "@/components/admin-dashboard";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
-  return { ...actual, createTenant: vi.fn(), approveDocument: vi.fn(), rejectDocument: vi.fn() };
+  return {
+    ...actual,
+    createTenant: vi.fn(),
+    approveDocument: vi.fn(),
+    rejectDocument: vi.fn(),
+    createDomain: vi.fn(),
+    renameDomain: vi.fn(),
+    mergeDomain: vi.fn(),
+    deleteDomain: vi.fn(),
+  };
 });
 
 function makeAuditEntry(overrides: Partial<AdminAuditEntry> = {}): AdminAuditEntry {
@@ -41,16 +50,26 @@ function makeReviewQueueItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQu
   };
 }
 
+function makeDomain(overrides: Partial<Domain> = {}): Domain {
+  return {
+    id: "domain-1",
+    name: "HR",
+    ...overrides,
+  };
+}
+
 function renderDashboard(overrides: {
   auditEntries?: AdminAuditEntry[];
   reviewQueue?: ReviewQueueItem[];
   tenants?: Tenant[];
+  domains?: Domain[];
 } = {}) {
   return render(
     <AdminDashboard
       auditEntries={overrides.auditEntries ?? []}
       reviewQueue={overrides.reviewQueue ?? []}
       tenants={overrides.tenants ?? []}
+      domains={overrides.domains ?? []}
     />,
   );
 }
@@ -132,5 +151,96 @@ describe("AdminDashboard", () => {
 
     expect(await screen.findByText("Nothing waiting on a review decision right now.")).toBeInTheDocument();
     expect(approveDocument).toHaveBeenCalledWith("doc-1");
+  });
+
+  it("switches to the domains section and shows a registered domain", async () => {
+    const user = userEvent.setup();
+    renderDashboard({ domains: [makeDomain({ name: "Finance" })] });
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+
+    expect(screen.getByText("Finance")).toBeInTheDocument();
+    expect(screen.queryByText("Audit log (most recent, all users)")).not.toBeInTheDocument();
+  });
+
+  it("shows an empty-state message when no domains exist yet", async () => {
+    const user = userEvent.setup();
+    renderDashboard();
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+
+    expect(screen.getByText(/no domains yet/i)).toBeInTheDocument();
+  });
+
+  it("adds a newly created domain to the list", async () => {
+    const { createDomain } = await import("@/lib/api");
+    vi.mocked(createDomain).mockResolvedValue({ id: "domain-new", name: "Legal" });
+
+    const user = userEvent.setup();
+    renderDashboard();
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+    await user.type(screen.getByLabelText("Domain name"), "Legal");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("Legal")).toBeInTheDocument();
+    expect(createDomain).toHaveBeenCalledWith("Legal");
+  });
+
+  it("renames a domain in place", async () => {
+    const { renameDomain } = await import("@/lib/api");
+    vi.mocked(renameDomain).mockResolvedValue({ id: "domain-1", name: "HR" });
+
+    const user = userEvent.setup();
+    renderDashboard({ domains: [makeDomain({ name: "Human Resources" })] });
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    const input = screen.getByLabelText("Rename Human Resources");
+    await user.clear(input);
+    await user.type(input, "HR");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("HR")).toBeInTheDocument();
+    expect(renameDomain).toHaveBeenCalledWith("domain-1", "HR");
+  });
+
+  it("removes both domains from the list and shows only the merge target after a merge", async () => {
+    const { mergeDomain } = await import("@/lib/api");
+    const target = makeDomain({ id: "domain-2", name: "HR" });
+    vi.mocked(mergeDomain).mockResolvedValue([target]);
+
+    const user = userEvent.setup();
+    renderDashboard({
+      domains: [makeDomain({ id: "domain-1", name: "Human Resources" }), target],
+    });
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+    const sourceRow = screen.getByText("Human Resources", { selector: "span" }).closest("li");
+    if (!sourceRow) throw new Error("source row not found");
+    await user.selectOptions(
+      within(sourceRow).getByRole("combobox", { name: "Merge Human Resources into" }),
+      "domain-2",
+    );
+    await user.click(within(sourceRow).getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => expect(mergeDomain).toHaveBeenCalledWith("domain-1", "domain-2"));
+    expect(screen.queryByText("Human Resources")).not.toBeInTheDocument();
+    expect(screen.getByText("HR")).toBeInTheDocument();
+  });
+
+  it("removes a domain from the list once deleted", async () => {
+    const { deleteDomain } = await import("@/lib/api");
+    vi.mocked(deleteDomain).mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderDashboard({ domains: [makeDomain({ name: "HR" })] });
+
+    await user.click(screen.getByRole("button", { name: /^domains$/i }));
+    await user.click(screen.getByRole("button", { name: "Delete HR" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(await screen.findByText(/no domains yet/i)).toBeInTheDocument();
+    expect(deleteDomain).toHaveBeenCalledWith("domain-1");
   });
 });

@@ -2,6 +2,7 @@ import uuid
 
 from app.models.document import DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.domain_repository import DomainRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.user_repository import UserRepository
 
@@ -16,22 +17,34 @@ async def _user_id(db_session, tenant_id: uuid.UUID, email: str = "uploader@exam
     return user.id
 
 
+async def _domain_id(db_session, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    domain = await DomainRepository(db_session).create_domain(tenant_id, name)
+    return domain.id
+
+
 async def test_create_document_stores_domains(db_session):
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
-    document = await repository.create_document("handbook.pdf", tenant_id, domains=["HR", "Finance"])
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
+    finance_id = await _domain_id(db_session, tenant_id, "Finance")
 
-    assert document.domains == ["HR", "Finance"]
+    document = await repository.create_document("handbook.pdf", tenant_id, domain_ids=[hr_id, finance_id])
+
+    assert document.domains == ["Finance", "HR"]
 
 
-async def test_create_document_dedupes_repeated_domains(db_session):
+async def test_create_document_ignores_a_domain_id_from_another_tenant(db_session):
+    """A stray or cross-tenant id is silently dropped, not rejected — the
+    same "if it isn't yours, it doesn't exist" pattern this project's
+    tenant isolation already uses everywhere else."""
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
-    document = await repository.create_document(
-        "handbook.pdf", tenant_id, domains=["HR", "HR", "Finance"]
-    )
+    other_tenant_id = await _tenant_id(db_session, "Globex")
+    foreign_id = await _domain_id(db_session, other_tenant_id, "Finance")
 
-    assert document.domains == ["HR", "Finance"]
+    document = await repository.create_document("handbook.pdf", tenant_id, domain_ids=[foreign_id])
+
+    assert document.domains == []
 
 
 async def test_create_document_defaults_to_no_domains(db_session):
@@ -45,9 +58,11 @@ async def test_create_document_defaults_to_no_domains(db_session):
 async def test_find_by_keyword_domain_filter_excludes_other_domains(db_session):
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
+    finance_id = await _domain_id(db_session, tenant_id, "Finance")
 
-    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domain_ids=[hr_id])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domain_ids=[finance_id])
 
     from app.models.document import Chunk
 
@@ -67,9 +82,11 @@ async def test_find_by_keyword_domain_filter_excludes_other_domains(db_session):
 async def test_find_by_keyword_without_domain_searches_everything(db_session):
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
+    finance_id = await _domain_id(db_session, tenant_id, "Finance")
 
-    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domain_ids=[hr_id])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domain_ids=[finance_id])
 
     from app.models.document import Chunk
 
@@ -113,9 +130,11 @@ async def test_find_by_keyword_excludes_other_tenants_documents(db_session):
 async def test_find_similar_chunks_domain_filter_excludes_other_domains(db_session):
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
+    finance_id = await _domain_id(db_session, tenant_id, "Finance")
 
-    hr_doc = await repository.create_document("hr.txt", tenant_id, domains=["HR"])
-    finance_doc = await repository.create_document("finance.txt", tenant_id, domains=["Finance"])
+    hr_doc = await repository.create_document("hr.txt", tenant_id, domain_ids=[hr_id])
+    finance_doc = await repository.create_document("finance.txt", tenant_id, domain_ids=[finance_id])
 
     from app.models.document import Chunk
 
@@ -136,11 +155,14 @@ async def test_list_domains_for_tenant_returns_distinct_domains_across_documents
     repository = DocumentRepository(db_session)
     tenant_id = await _tenant_id(db_session)
     other_tenant_id = await _tenant_id(db_session, "Globex")
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
+    onboarding_id = await _domain_id(db_session, tenant_id, "Onboarding")
+    other_finance_id = await _domain_id(db_session, other_tenant_id, "Finance")
 
-    await repository.create_document("a.txt", tenant_id, domains=["HR", "Onboarding"])
-    await repository.create_document("b.txt", tenant_id, domains=["HR"])
+    await repository.create_document("a.txt", tenant_id, domain_ids=[hr_id, onboarding_id])
+    await repository.create_document("b.txt", tenant_id, domain_ids=[hr_id])
     # A different tenant's document — its "Finance" domain must not appear.
-    await repository.create_document("c.txt", other_tenant_id, domains=["Finance"])
+    await repository.create_document("c.txt", other_tenant_id, domain_ids=[other_finance_id])
 
     domains = await repository.list_domains_for_tenant(tenant_id)
 
@@ -152,6 +174,19 @@ async def test_list_domains_for_tenant_ignores_untagged_documents(db_session):
     tenant_id = await _tenant_id(db_session)
 
     await repository.create_document("untagged.txt", tenant_id)
+
+    domains = await repository.list_domains_for_tenant(tenant_id)
+
+    assert domains == []
+
+
+async def test_list_domains_for_tenant_ignores_a_registered_but_unused_domain(db_session):
+    """A domain an admin created but nothing has been tagged with yet isn't
+    a meaningful choice for the classifier — DomainRepository.list_for_tenant
+    is the one that returns it (for the admin panel/upload picker instead)."""
+    repository = DocumentRepository(db_session)
+    tenant_id = await _tenant_id(db_session)
+    await _domain_id(db_session, tenant_id, "Legal")
 
     domains = await repository.list_domains_for_tenant(tenant_id)
 

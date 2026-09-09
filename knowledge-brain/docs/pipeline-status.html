@@ -1644,6 +1644,31 @@
     <p class="caveat">Named, not fixed: a couple of other safe-wrappers in the same file (query rewriting, graph-context lookup) still only catch an already-open circuit, same shape of gap. Out of scope for this pass.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Domain taxonomy <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">fixes the "HR" vs "Human Resources" vocabulary drift named as an open cost when Feature 27 was built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Admin-managed domain table</span>
+        <span class="path mono">create, rename, merge, delete — replaces free-text tags</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Case-insensitive uniqueness</span>
+        <span class="path mono">enforced at the database level, not just the API pre-check</span>
+      </div>
+    </div>
+
+    <p class="caveat">Existing documents backfilled onto real domain rows in a one-time migration — no existing tagging lost in the switch. Upload form's domain picker now lists the tenant's real, admin-created domains instead of accepting free text.</p>
+    <p class="caveat">A <code>/code-review</code> pass found and fixed four issues the same session: two response models missing <code>correlation_id</code>, two repository methods missing error handling, and one unused frontend helper.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
     <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, multi-tenancy, and the PII human review workflow. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>

@@ -4,9 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, ShieldAlert, UploadCloud, XCircle } from "lucide-react";
 
-import type { DocumentStatusResponse, DocumentUploadResponse, ProcessingStage } from "@/lib/api";
+import type { Domain, DocumentStatusResponse, DocumentUploadResponse, ProcessingStage } from "@/lib/api";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ProgressBar } from "@/components/progress-bar";
 import { cn } from "@/lib/utils";
 
@@ -99,11 +99,11 @@ function UploadCard({ upload }: { upload: InFlightUpload }) {
   );
 }
 
-export function UploadDropzone() {
+export function UploadDropzone({ domains }: { domains: Domain[] }) {
   const router = useRouter();
   const [isDragging, setIsDragging] = useState(false);
   const [uploads, setUploads] = useState<InFlightUpload[]>([]);
-  const [domains, setDomains] = useState("");
+  const [selectedDomainIds, setSelectedDomainIds] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollTimers = useRef(new Map<string, ReturnType<typeof setInterval>>());
 
@@ -206,7 +206,7 @@ export function UploadDropzone() {
       try {
         const formData = new FormData();
         formData.append("file", file);
-        formData.append("domains", domains);
+        formData.append("domain_ids", Array.from(selectedDomainIds).join(","));
 
         const response = await fetch("/api/documents/upload", { method: "POST", body: formData });
         if (response.status === 401) {
@@ -231,7 +231,7 @@ export function UploadDropzone() {
         settleAndRemove(key);
       }
     },
-    [domains, pollStatus, router, settleAndRemove, updateUpload],
+    [selectedDomainIds, pollStatus, router, settleAndRemove, updateUpload],
   );
 
   const handleFiles = useCallback(
@@ -247,19 +247,37 @@ export function UploadDropzone() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="upload-domains" className="text-xs font-medium text-muted-foreground">
-          Domains (optional)
-        </label>
-        <Input
-          id="upload-domains"
-          placeholder="e.g. HR, Finance"
-          value={domains}
-          onChange={(e) => setDomains(e.target.value)}
-          className="max-w-xs"
-        />
-        <p className="text-[0.65rem] text-muted-foreground">
-          Comma-separated tags applied to whatever you upload next — leave blank for untagged.
-        </p>
+        <span className="text-xs font-medium text-muted-foreground">Domains (optional)</span>
+        {domains.length === 0 ? (
+          <p className="text-[0.65rem] text-muted-foreground">
+            No domains have been set up yet — an admin can create some in the Admin panel.
+            Uploads stay untagged until then.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+              {domains.map((domain) => (
+                <label key={domain.id} className="flex items-center gap-1.5 text-xs">
+                  <Checkbox
+                    checked={selectedDomainIds.has(domain.id)}
+                    onCheckedChange={(checked) => {
+                      setSelectedDomainIds((current) => {
+                        const next = new Set(current);
+                        if (checked) next.add(domain.id);
+                        else next.delete(domain.id);
+                        return next;
+                      });
+                    }}
+                  />
+                  {domain.name}
+                </label>
+              ))}
+            </div>
+            <p className="text-[0.65rem] text-muted-foreground">
+              Applied to whatever you upload next — leave everything unchecked for untagged.
+            </p>
+          </>
+        )}
       </div>
 
       <div

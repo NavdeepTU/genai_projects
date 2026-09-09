@@ -1,13 +1,33 @@
 "use client";
 
 import { useState } from "react";
-import { Building2, ExternalLink, ScrollText, ShieldAlert } from "lucide-react";
+import { Building2, ExternalLink, ScrollText, ShieldAlert, Tags } from "lucide-react";
 
-import type { AdminAuditEntry, ReviewQueueItem, Tenant } from "@/lib/api";
-import { approveDocument, createTenant, rejectDocument } from "@/lib/api";
+import type { AdminAuditEntry, Domain, ReviewQueueItem, Tenant } from "@/lib/api";
+import {
+  approveDocument,
+  createDomain,
+  createTenant,
+  deleteDomain,
+  mergeDomain,
+  rejectDocument,
+  renameDomain,
+} from "@/lib/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ListCard } from "@/components/list-card";
 import { cn } from "@/lib/utils";
@@ -29,12 +49,13 @@ function formatTimestamp(value: string) {
   });
 }
 
-type SectionId = "audit-log" | "review-queue" | "tenants";
+type SectionId = "audit-log" | "review-queue" | "tenants" | "domains";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: "audit-log", label: "Audit log", icon: ScrollText },
   { id: "review-queue", label: "Review queue", icon: ShieldAlert },
   { id: "tenants", label: "Tenant management", icon: Building2 },
+  { id: "domains", label: "Domains", icon: Tags },
 ];
 
 function AuditLogSection({ entries }: { entries: AdminAuditEntry[] }) {
@@ -219,6 +240,258 @@ function TenantsSection({ tenants }: { tenants: Tenant[] }) {
   );
 }
 
+function DomainRow({
+  domain,
+  otherDomains,
+  onRenamed,
+  onMerged,
+  onDeleted,
+  className,
+}: {
+  domain: Domain;
+  otherDomains: Domain[];
+  onRenamed: (domain: Domain) => void;
+  onMerged: (removedId: string, remaining: Domain[]) => void;
+  onDeleted: (removedId: string) => void;
+  className?: string;
+}) {
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [name, setName] = useState(domain.name);
+  const [mergeTargetId, setMergeTargetId] = useState("");
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleRename() {
+    setIsBusy(true);
+    setError(null);
+    try {
+      const renamed = await renameDomain(domain.id, name);
+      onRenamed(renamed);
+      setIsRenaming(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleMerge() {
+    if (!mergeTargetId) return;
+    setIsBusy(true);
+    setError(null);
+    try {
+      const remaining = await mergeDomain(domain.id, mergeTargetId);
+      onMerged(domain.id, remaining);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+      setIsBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    setIsBusy(true);
+    setError(null);
+    try {
+      await deleteDomain(domain.id);
+      onDeleted(domain.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+      setIsBusy(false);
+    }
+  }
+
+  return (
+    <li className={cn("flex flex-col gap-2 text-sm", className)}>
+      <div className="flex flex-wrap items-center gap-2">
+        {isRenaming ? (
+          <>
+            <Input
+              aria-label={`Rename ${domain.name}`}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={isBusy}
+              className="h-7 max-w-40 text-xs"
+            />
+            <Button size="sm" className="h-7 text-xs" disabled={isBusy} onClick={handleRename}>
+              Save
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={isBusy}
+              onClick={() => {
+                setIsRenaming(false);
+                setName(domain.name);
+                setError(null);
+              }}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 truncate font-medium">{domain.name}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => setIsRenaming(true)}
+            >
+              Rename
+            </Button>
+          </>
+        )}
+      </div>
+
+      {otherDomains.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            aria-label={`Merge ${domain.name} into`}
+            value={mergeTargetId}
+            onChange={(e) => setMergeTargetId(e.target.value)}
+            disabled={isBusy}
+            className="h-7 w-auto text-xs"
+          >
+            <option value="">Merge into…</option>
+            {otherDomains.map((other) => (
+              <option key={other.id} value={other.id}>
+                {other.name}
+              </option>
+            ))}
+          </Select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={isBusy || !mergeTargetId}
+            onClick={handleMerge}
+          >
+            Merge
+          </Button>
+        </div>
+      )}
+
+      <div>
+        <AlertDialog>
+          <AlertDialogTrigger
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`Delete ${domain.name}`}
+                className="h-7 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                disabled={isBusy}
+              />
+            }
+          >
+            Delete
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete {domain.name}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Any document tagged with this domain is simply untagged — nothing about the
+                document itself is deleted.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction variant="destructive" onClick={handleDelete}>
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+
+      {error && <p className="text-xs text-destructive">{error}</p>}
+    </li>
+  );
+}
+
+function DomainsSection({ domains }: { domains: Domain[] }) {
+  const [domainList, setDomainList] = useState(domains);
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      const domain = await createDomain(name);
+      setDomainList((current) => [...current, domain].sort((a, b) => a.name.localeCompare(b.name)));
+      setName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-medium text-muted-foreground">
+            Create a new domain
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} className="flex items-start gap-2">
+            <Input
+              aria-label="Domain name"
+              placeholder="HR"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={isSubmitting}
+              required
+            />
+            <Button type="submit" disabled={isSubmitting || name.trim().length === 0}>
+              {isSubmitting ? "Creating..." : "Create"}
+            </Button>
+          </form>
+          {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
+        </CardContent>
+      </Card>
+
+      <ListCard
+        icon={Tags}
+        title="Domains"
+        isEmpty={domainList.length === 0}
+        emptyMessage="No domains yet — use the form above to create the first one. Documents can then be tagged with it at upload."
+      >
+        {domainList.map((domain, i) => (
+          <DomainRow
+            key={domain.id}
+            domain={domain}
+            otherDomains={domainList.filter((d) => d.id !== domain.id)}
+            className={i > 0 ? "border-t border-border pt-3" : undefined}
+            onRenamed={(renamed) =>
+              setDomainList((current) =>
+                current
+                  .map((d) => (d.id === renamed.id ? renamed : d))
+                  .sort((a, b) => a.name.localeCompare(b.name)),
+              )
+            }
+            onMerged={(removedId, remaining) => setDomainList(remaining)}
+            onDeleted={(removedId) =>
+              setDomainList((current) => current.filter((d) => d.id !== removedId))
+            }
+          />
+        ))}
+      </ListCard>
+    </div>
+  );
+}
+
 function NavButton({
   section,
   active,
@@ -249,10 +522,12 @@ export function AdminDashboard({
   auditEntries,
   reviewQueue,
   tenants,
+  domains,
 }: {
   auditEntries: AdminAuditEntry[];
   reviewQueue: ReviewQueueItem[];
   tenants: Tenant[];
+  domains: Domain[];
 }) {
   const [activeSection, setActiveSection] = useState<SectionId>("audit-log");
 
@@ -273,6 +548,7 @@ export function AdminDashboard({
         {activeSection === "audit-log" && <AuditLogSection entries={auditEntries} />}
         {activeSection === "review-queue" && <ReviewQueueSection documents={reviewQueue} />}
         {activeSection === "tenants" && <TenantsSection tenants={tenants} />}
+        {activeSection === "domains" && <DomainsSection domains={domains} />}
       </div>
     </div>
   );

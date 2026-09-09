@@ -41,7 +41,7 @@ class IngestionService:
         content: bytes,
         tenant_id: uuid.UUID,
         uploaded_by: uuid.UUID | None = None,
-        domains: list[str] | None = None,
+        domain_ids: list[uuid.UUID] | None = None,
     ) -> Document:
         """Record a new upload, owned by the uploader's tenant, and save its original file.
 
@@ -49,18 +49,20 @@ class IngestionService:
         goes out — the caller has a real document.id to hand back to the
         browser right away, and a single blob upload is far cheaper than
         the extraction/chunking/embedding pipeline that runs afterward in
-        the background. domains are set manually at upload, for now — see
-        ADR-040. tenant_id is what makes this document visible to every
-        other user in the same tenant, with no separate grant needed
-        (ADR-046 replaced the old per-user access-grant step this method
-        used to do here). Saving the file to Blob Storage (ADR-044) is
-        best-effort: an outage there degrades to "this document has
-        nothing to view," the same way a down reranker or an unreachable
-        Neo4j degrades elsewhere in this project, rather than failing the
-        whole upload — the file being viewable later is additive, not
-        what this system exists to do.
+        the background. domain_ids are picked from an admin-managed list,
+        not typed freely (ADR-040's original free-text design, since
+        replaced — see app/models/domain.py); the repository silently
+        drops any id that doesn't belong to this tenant. tenant_id is
+        what makes this document visible to every other user in the same
+        tenant, with no separate grant needed (ADR-046 replaced the old
+        per-user access-grant step this method used to do here). Saving
+        the file to Blob Storage (ADR-044) is best-effort: an outage
+        there degrades to "this document has nothing to view," the same
+        way a down reranker or an unreachable Neo4j degrades elsewhere in
+        this project, rather than failing the whole upload — the file
+        being viewable later is additive, not what this system exists to do.
         """
-        document = await self.repository.create_document(filename, tenant_id, uploaded_by, domains)
+        document = await self.repository.create_document(filename, tenant_id, uploaded_by, domain_ids)
 
         blob_name = f"{document.id}{Path(filename).suffix.lower()}"
         content_type = CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")

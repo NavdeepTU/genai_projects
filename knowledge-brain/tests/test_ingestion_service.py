@@ -7,8 +7,14 @@ from sqlalchemy import select
 from app.core.circuit_breaker import CircuitOpenError
 from app.models.document import Chunk, Document, DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.domain_repository import DomainRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.services.ingestion_service import IngestionService
+
+
+async def _domain_id(db_session, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    domain = await DomainRepository(db_session).create_domain(tenant_id, name)
+    return domain.id
 
 
 async def _tenant_id(db_session) -> uuid.UUID:
@@ -43,14 +49,15 @@ async def test_ingest_document_succeeds(db_session):
 
 
 async def test_create_document_stores_domains(db_session):
-    """domains flows through to the repository unchanged."""
+    """domain_ids flows through to the repository unchanged."""
     repository = DocumentRepository(db_session)
     service = IngestionService(repository)
     tenant_id = await _tenant_id(db_session)
+    hr_id = await _domain_id(db_session, tenant_id, "HR")
 
     with patch("app.services.ingestion_service.upload_document", new=AsyncMock()):
         document = await service.create_document(
-            "handbook.pdf", b"handbook contents", tenant_id, domains=["HR"]
+            "handbook.pdf", b"handbook contents", tenant_id, domain_ids=[hr_id]
         )
 
     assert document.domains == ["HR"]

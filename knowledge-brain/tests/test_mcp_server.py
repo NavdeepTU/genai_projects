@@ -10,6 +10,7 @@ from app.mcp.server import ask_knowledge_base, upload_document
 from app.models.audit_log import AuditLog
 from app.models.document import DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.domain_repository import DomainRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.user_repository import UserRepository
 from app.services.retrieval_service import RetrievalUnavailableError
@@ -196,6 +197,43 @@ async def test_upload_document_creates_and_processes_a_document(db_session):
     entry = result.scalars().first()
     assert entry is not None
     assert entry.tenant_id == str(tenant_id)
+
+
+async def test_upload_document_tags_it_with_a_real_domain(db_session):
+    """domain_ids is a list of real domain ids (see GET /domains), not free
+    text — an id that doesn't belong to this tenant is silently dropped."""
+    tenant_id = await _tenant_id(db_session)
+    user = await UserRepository(db_session).create_user("mcp-user@example.com", "hashed", tenant_id)
+    domain = await DomainRepository(db_session).create_domain(tenant_id, "HR")
+    other_tenant = await TenantRepository(db_session).create_tenant("Globex")
+    foreign_domain = await DomainRepository(db_session).create_domain(other_tenant.id, "Finance")
+    content = b"hello world, nothing sensitive here"
+
+    tokens = _set_caller(tenant_id, user.id)
+    try:
+        with (
+            patch("app.mcp.server.AsyncSessionLocal", new=_FakeAsyncSessionLocal(db_session)),
+            patch("app.mcp.server.graph_driver", new=_FakeGraphDriver()),
+            patch("app.services.ingestion_service.upload_document", new=AsyncMock()),
+            patch("app.services.ingestion_service.detect_pii", new=AsyncMock(return_value=[])),
+            patch(
+                "app.services.ingestion_service.embed_chunks",
+                new=AsyncMock(return_value=[[0.1] * 1536]),
+            ),
+            patch("app.mcp.server.DocumentGraphService") as mock_graph_service_class,
+        ):
+            mock_graph_service_class.return_value.build_references = AsyncMock()
+            await upload_document(
+                "notes.txt",
+                base64.b64encode(content).decode(),
+                domain_ids=[str(domain.id), str(foreign_domain.id), "not-a-uuid"],
+            )
+    finally:
+        _reset_caller(tokens)
+
+    documents = await DocumentRepository(db_session).list_documents_for_tenant(tenant_id, user.id)
+    uploaded = next(d for d in documents if d.filename == "notes.txt")
+    assert uploaded.domains == ["HR"]
 
 
 async def test_upload_document_flags_pii_and_never_reaches_the_reference_graph_step(db_session):

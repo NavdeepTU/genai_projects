@@ -3005,19 +3005,18 @@ entirely — zero or one domain needed, which is every question today
 since domains are opt-in, costs exactly what it always did, with one
 extra classification call.
 
-**Why did you store domains as a plain array column instead of a
-separate join table, given this project already has one — the
-`tenants`/`documents.tenant_id` relationship — for a similar purpose?**
-Because a join table would imply a level of structure — a `domains`
-table with real rows, a place to rename or dedupe a domain in one
-move — that doesn't exist and wasn't asked for. The explicit design
-choice was "a simple free-text category, set manually, multiple per
-document" — a plain string array matches that directly, with no
-implied vocabulary control. The honest cost: "HR" and "Human Resources"
-are two completely different domains to this system, and nothing
-today catches that. If domains ever become a real managed entity — a
-fixed, admin-editable taxonomy — that's the moment to introduce a join
-table, not before.
+**Domains started as a plain free-text array column — is that still
+true?**
+**Correction, added once this changed:** no. That was the original
+design, and the honest cost named at the time was real — "HR" and
+"Human Resources" really did drift apart as two unrelated tags with
+nothing to notice or fix that. Domains are now a real, tenant-scoped
+taxonomy: a `domains` table with its own rows, created, renamed, and
+merged only by an admin, linked to documents through a real join
+table instead of a string match. See Feature 38 for the full design
+and the trade-offs that move made. Nothing about *this* feature's own
+supervisor/fan-out/synthesis flow changed — only where the domain list
+`AVAIL` reads from in the flowchart above now lives.
 
 **Walk me through what happens when one domain's retrieval pass fails
 but the others succeed.**
@@ -3189,7 +3188,7 @@ flowchart TD
 question actually needs it?**
 Simplicity and an honest failure mode, the same trade this project has
 made elsewhere (plain-truncated conversation titles over an
-LLM-generated one, free-text domains over a managed taxonomy). A
+LLM-generated one). A
 detection step is itself a judgment call, and it can fail in two
 directions: condensing something that didn't need it just wastes one
 LLM call, the same cost always-condensing already pays; but skipping
@@ -3940,6 +3939,81 @@ them wasn't in scope for this pass, and is flagged as a real, separate
 follow-up rather than assumed fixed by association.
 
 *Further reading: [Google's Site Reliability Engineering book, "Addressing Cascading Failures"](https://sre.google/sre-book/addressing-cascading-failures/) — covers exactly this shape of problem: one component's failure propagating through a system that fans work out concurrently, and why isolating it requires the failure to actually be caught, not just anticipated in one place.*
+
+---
+
+## Feature 38: Domain Taxonomy — Fixing Vocabulary Drift
+
+**What does this feature do, in one sentence?**
+Domains — the category tags a document carries, and the same tags the
+multi-agent classifier in Feature 27 routes questions by — went from
+free-text strings typed at upload to a real, admin-managed taxonomy, so
+"HR" and "Human Resources" can never again exist as two unrelated tags
+with nothing to notice or fix that.
+
+```mermaid
+flowchart TD
+    ADMIN["Admin panel"] -->|"create"| DOMAIN[("Domain row,\ntenant-scoped,\nunique name")]
+    DOMAIN --> PICKER["Upload form's domain\npicker (GET /domains)"]
+    PICKER -->|"user checks boxes"| UPLOAD["Document upload"]
+    UPLOAD --> LINK["Document <-> Domain\nlink, many per document"]
+    ADMIN -->|"rename"| DOMAIN
+    ADMIN -->|"merge A into B"| REASSIGN["Every document linked to A\nrelinked to B, A deleted"]
+    ADMIN -->|"delete"| UNTAG["Documents simply untagged,\nnot deleted"]
+    LINK --> CLASSIFY["Feature 27's classifier still only\noffers domains actually in use"]
+```
+
+**Why replace free-text tags with a real, admin-managed taxonomy
+instead of just deduplicating strings at read time?**
+Deduplicating at read time is a band-aid — it cleans up drift that
+already happened, but a new upload can reintroduce it the very next
+minute, since nothing stops one at the point of entry. The real fix has
+to be structural: a domain now exists exactly once per tenant, as a row
+with its own identity, created only by an admin. A document links to
+that row directly rather than storing a copy of its name, so renaming a
+domain or merging two together is one instant, atomic move — every
+document already tagged with it is unaffected, because it was never
+pointing at a string, it was pointing at the row. What we gave up: an
+uploader can no longer invent a tag on the spot; they're limited to
+whatever an admin has already set up, trading upload-time flexibility
+for long-term consistency. Every document tagged under the old scheme
+also had to be backfilled onto a real row in a one-time migration, so
+no existing tagging was lost in the switch.
+
+**Why enforce the domain name's uniqueness case-insensitively at the
+database level, and not just in the check the API already runs before
+inserting?**
+The application-level check alone only protects the common,
+single-request case. Two admins creating "HR" and "hr" for the same
+tenant at nearly the same instant would both pass that check — neither
+request can see the other's not-yet-committed row — and a plain,
+case-sensitive database constraint would then let both inserts through
+anyway, reproducing the exact drift bug this feature exists to prevent,
+one layer further down. The fix was moving the real guarantee into the
+database itself: a unique index computed on the lowercased name, so the
+database — not just the API's pre-check — is the thing that actually
+refuses the second insert. The trade-off: an expression index like this
+is tied fairly specifically to how the database engine supports it, not
+something guaranteed to look identical if the underlying database ever
+changed.
+
+**A `/code-review` pass found real issues after the initial build. What
+were they?**
+Four confirmed issues, all fixed the same session. Two response models
+were missing `correlation_id` — a field every other API response in
+this project carries for tracing — because the code reused the same
+model for both a single-object response and a list item nested inside
+a bigger response, and only the wrapper needed the field; fixed by
+giving the single-object case its own response model, the same pattern
+`CreateTenantResponse` already used elsewhere. Two repository lookup
+methods had no error handling or logging around their database call,
+unlike every sibling method in the same file — a transient database
+error there would have surfaced as an unhandled crash instead of the
+graceful, logged failure the rest of the codebase produces. And a
+frontend helper function was written but never actually called from
+anywhere, left over from an earlier version of the upload picker.
+
+*Further reading: [PostgreSQL's official documentation on indexes on expressions](https://www.postgresql.org/docs/current/indexes-expressional.html) — covers exactly this pattern: building a unique index on a function of a column, like `lower(name)`, so a constraint the application logic assumes case-insensitive is actually case-insensitive at the database level too.*
 
 ---
 

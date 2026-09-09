@@ -79,12 +79,14 @@ async def ask_knowledge_base(question: str) -> str:
         "be answered from it. Only .pdf and .txt files are supported. "
         "content_base64 must be the raw file bytes, base64-encoded — not "
         "plain text — since MCP tool arguments can only carry JSON-safe "
-        "strings, not binary data. domains is an optional list of free-text "
-        "category tags (e.g. [\"HR\", \"Finance\"]) — set manually, for now."
+        "strings, not binary data. domain_ids is an optional list of real "
+        "domain ids (see the GET /domains endpoint for this tenant's "
+        "admin-managed list) — an id that doesn't belong to this tenant "
+        "is silently dropped, not an error."
     )
 )
 async def upload_document(
-    filename: str, content_base64: str, domains: list[str] | None = None
+    filename: str, content_base64: str, domain_ids: list[str] | None = None
 ) -> str:
     """Wrap the same ingest-then-link pipeline documents.py uses, for MCP callers."""
     if not filename.lower().endswith(ALLOWED_EXTENSIONS):
@@ -94,11 +96,18 @@ async def upload_document(
     user_id = get_current_user_id()
     tenant_id = uuid.UUID(get_current_tenant_id())
 
+    parsed_domain_ids: list[uuid.UUID] = []
+    for raw_id in domain_ids or []:
+        try:
+            parsed_domain_ids.append(uuid.UUID(raw_id))
+        except ValueError:
+            continue
+
     async with AsyncSessionLocal() as db, graph_driver.session() as graph_session:
         repository = DocumentRepository(db)
         service = IngestionService(repository)
         document = await service.create_document(
-            filename, content, tenant_id, uuid.UUID(user_id), domains
+            filename, content, tenant_id, uuid.UUID(user_id), parsed_domain_ids
         )
         await service.process_document(document.id, filename, content)
 

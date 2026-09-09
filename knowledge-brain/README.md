@@ -150,9 +150,12 @@ and why it was made that way.
   automatically. See
   [`ADR-039`](docs/adr/ADR-039-real-time-answer-guardrails.md).
 - **Multi-agent federated retrieval** — documents can now be tagged
-  with one or more free-text domains at upload (manual, for now); a
-  supervisor LLM call decides which of a user's own domains a question
-  actually needs. Zero or one domain — every question today, since
+  with one or more domains at upload, picked from a real, admin-managed
+  taxonomy (created, renamed, and merged only by an admin — no more
+  free-text tags, so "HR" and "Human Resources" can't drift apart as
+  two unrelated domains) rather than typed freely; a supervisor LLM
+  call decides which of a user's own domains a question actually needs.
+  Zero or one domain — every question today, since
   domains are opt-in — costs exactly what it always did. Two or more
   domains runs one full retrieval-and-generation pass per domain,
   concurrently, each producing its own independent draft answer, then a
@@ -374,10 +377,6 @@ and why it was made that way.
   cheaper/faster model, and runs even when nothing was actually
   retrieved. Neither is wrong, both are real, un-taken levers if the
   added cost ever needs trimming. See `ADR-039` and `ADR-040`.
-- Domain tags are free-text with no vocabulary control and no dedup
-  across documents — "HR" and "Human Resources" are two unrelated
-  domains to this system, and nothing today detects or merges
-  near-duplicate names. See `ADR-040`.
 - Context condensing adds one more LLM call to every follow-up
   question, unconditionally — no cheaper "does this actually need
   rewriting" check first, a deliberate choice over a smarter but

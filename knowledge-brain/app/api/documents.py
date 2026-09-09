@@ -97,20 +97,32 @@ async def _process_uploaded_document(
 async def upload_document(
     file: UploadFile,
     background_tasks: BackgroundTasks,
-    domains: str = Form(""),
+    domain_ids: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentUploadResponse:
     """Accept one uploaded file, record it, and process it in the background.
 
-    domains is a comma-separated string, not a real list — multipart form
-    fields don't carry structured types the way a JSON body would. Set
-    manually at upload, for now (see ADR-040); empty means untagged, same
-    as before this feature existed.
+    domain_ids is a comma-separated string of domain UUIDs, not a real
+    list — multipart form fields don't carry structured types the way a
+    JSON body would. Picked from GET /domains's real, admin-managed list
+    (see app/models/domain.py) rather than typed freely; an entry that
+    doesn't parse as a UUID is silently skipped, and IngestionService
+    drops anything that doesn't belong to this tenant. Empty means
+    untagged, same as before this feature existed.
     """
     if not file.filename or not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(status_code=400, detail="Only .pdf and .txt files are supported")
 
-    domain_list = [d.strip() for d in domains.split(",") if d.strip()]
+    parsed_domain_ids: list[uuid.UUID] = []
+    for raw_id in domain_ids.split(","):
+        raw_id = raw_id.strip()
+        if not raw_id:
+            continue
+        try:
+            parsed_domain_ids.append(uuid.UUID(raw_id))
+        except ValueError:
+            continue
+
     content = await file.read()
     user_id = get_current_user_id()
     tenant_id = uuid.UUID(get_current_tenant_id())
@@ -118,7 +130,7 @@ async def upload_document(
 
     service = IngestionService(DocumentRepository(db))
     document = await service.create_document(
-        file.filename, content, tenant_id, uuid.UUID(user_id), domain_list
+        file.filename, content, tenant_id, uuid.UUID(user_id), parsed_domain_ids
     )
 
     await AuditRepository(db).log_action(
@@ -126,7 +138,7 @@ async def upload_document(
         action="document_upload",
         resource_type="document",
         resource_id=str(document.id),
-        extra_data={"filename": document.filename, "status": document.status.value, "domains": domain_list},
+        extra_data={"filename": document.filename, "status": document.status.value, "domains": document.domains},
         tenant_id=str(tenant_id),
         user_id=user_id,
     )

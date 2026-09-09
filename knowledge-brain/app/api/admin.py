@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,9 +13,18 @@ from app.core.graph_database import driver as graph_driver
 from app.core.middleware import get_correlation_id, get_current_tenant_id, get_current_user_id
 from app.models.admin import AdminAuditEntry, AdminResponse, ReviewQueueItem, ReviewQueueResponse
 from app.models.document import DocumentStatus, DocumentStatusResponse
+from app.models.domain import (
+    CreateDomainRequest,
+    DomainDetailResponse,
+    DomainListResponse,
+    DomainResponse,
+    MergeDomainRequest,
+    RenameDomainRequest,
+)
 from app.models.tenant import CreateTenantRequest, CreateTenantResponse
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.domain_repository import DomainRepository
 from app.repositories.graph_repository import GraphRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.services.document_graph_service import DocumentGraphService
@@ -215,3 +225,146 @@ async def reject_document(
         failure_reason=document.failure_reason,
         correlation_id=get_correlation_id(),
     )
+
+
+@router.post("/domains", response_model=DomainDetailResponse, status_code=201)
+async def create_domain(body: CreateDomainRequest, db: AsyncSession = Depends(get_db)) -> DomainDetailResponse:
+    """Register a new domain for the admin's own tenant — the only way one can be created.
+
+    This is the actual fix for domain vocabulary drift: a domain can no
+    longer be typed freely at upload (ADR-040's original design), only
+    created here, deliberately, by an admin.
+    """
+    correlation_id = get_correlation_id()
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Domain name cannot be empty")
+
+    repository = DomainRepository(db)
+    existing = await repository.get_by_name_for_tenant(tenant_id, name)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="A domain with this name already exists")
+
+    try:
+        domain = await repository.create_domain(tenant_id, name)
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="A domain with this name already exists") from None
+
+    await AuditRepository(db).log_action(
+        correlation_id=correlation_id,
+        action="domain_created",
+        resource_type="domain",
+        resource_id=str(domain.id),
+        extra_data={"name": domain.name},
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
+    )
+
+    return DomainDetailResponse(id=domain.id, name=domain.name, correlation_id=correlation_id)
+
+
+@router.patch("/domains/{domain_id}", response_model=DomainDetailResponse)
+async def rename_domain(
+    domain_id: uuid.UUID, body: RenameDomainRequest, db: AsyncSession = Depends(get_db)
+) -> DomainDetailResponse:
+    """Rename a domain — fixes drift already noticed ("Human Resources" → "HR")
+    in one action, since every document already tagged with it keeps pointing
+    at the same domain_id."""
+    correlation_id = get_correlation_id()
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Domain name cannot be empty")
+
+    repository = DomainRepository(db)
+    domain = await repository.get_by_id_for_tenant(domain_id, tenant_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    existing = await repository.get_by_name_for_tenant(tenant_id, name)
+    if existing is not None and existing.id != domain_id:
+        raise HTTPException(status_code=409, detail="A domain with this name already exists")
+
+    try:
+        await repository.rename_domain(domain_id, name)
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="A domain with this name already exists") from None
+
+    await AuditRepository(db).log_action(
+        correlation_id=correlation_id,
+        action="domain_renamed",
+        resource_type="domain",
+        resource_id=str(domain_id),
+        extra_data={"old_name": domain.name, "new_name": name},
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
+    )
+
+    domain.name = name
+    return DomainDetailResponse(id=domain.id, name=domain.name, correlation_id=correlation_id)
+
+
+@router.post("/domains/{domain_id}/merge", response_model=DomainListResponse)
+async def merge_domain(
+    domain_id: uuid.UUID, body: MergeDomainRequest, db: AsyncSession = Depends(get_db)
+) -> DomainListResponse:
+    """Merge one domain into another — every document tagged with domain_id
+    ends up tagged with target_id instead, and domain_id is deleted.
+
+    The real fix for drift that's already happened: "HR" and "Human
+    Resources" both existing as separate domains gets collapsed to one,
+    in a single action, instead of hunting down every document that used
+    the old spelling.
+    """
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    if domain_id == body.target_id:
+        raise HTTPException(status_code=400, detail="Cannot merge a domain into itself")
+
+    repository = DomainRepository(db)
+    source = await repository.get_by_id_for_tenant(domain_id, tenant_id)
+    target = await repository.get_by_id_for_tenant(body.target_id, tenant_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    await repository.merge_domain(domain_id, body.target_id)
+
+    await AuditRepository(db).log_action(
+        correlation_id=get_correlation_id(),
+        action="domain_merged",
+        resource_type="domain",
+        resource_id=str(body.target_id),
+        extra_data={"merged_name": source.name, "into_name": target.name},
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
+    )
+
+    remaining = await repository.list_for_tenant(tenant_id)
+    return DomainListResponse(
+        domains=[DomainResponse.model_validate(d) for d in remaining],
+        correlation_id=get_correlation_id(),
+    )
+
+
+@router.delete("/domains/{domain_id}", status_code=204)
+async def delete_domain(domain_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> Response:
+    """Delete a domain entirely — any document tagged with it is simply untagged."""
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    repository = DomainRepository(db)
+    domain = await repository.get_by_id_for_tenant(domain_id, tenant_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    await repository.delete_domain(domain_id)
+
+    await AuditRepository(db).log_action(
+        correlation_id=get_correlation_id(),
+        action="domain_deleted",
+        resource_type="domain",
+        resource_id=str(domain_id),
+        extra_data={"name": domain.name},
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
+    )
+
+    return Response(status_code=204)

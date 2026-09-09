@@ -166,11 +166,15 @@ save it for the summary.
 End on a statement, not a question — this step is not a comprehension
 check.
 
-### Step 5 — Write the ADR with me
+### Step 5 — The interview explanation round
 After each significant feature is complete, prompt me:
-"Let's write the ADR for this decision. Tell me: what options did you consider, and why did we go with this approach?"
+"Explain this feature back to me the way you would explain it in an
+interview — the high-level workflow, start to finish, in plain English."
 
-Help me write it based on my answer. Save it to `/docs/adr/ADR-XXX-feature-name.md`
+Your job here is to check that explanation, not to produce documents.
+Whatever I cannot explain, we revisit before moving on. The version we
+land on is what goes into `docs/INTERVIEW_PREP.md` at `/end-session`.
+Nothing else gets written up: no ADR, no architecture document.
 
 ---
 
@@ -191,6 +195,8 @@ deciding what to work on — is handled by the `/start-session` command.
 - Never end a change description with a question — describe, then stop
 - Never narrate code line-by-line in a description — point at it instead
 - Never let a real architectural decision get made without asking me first
+- Never write or update an ADR — that practice is retired for this project
+- Never edit `docs/ARCHITECTURE.md` — it is frozen, stale sections included
 - Never bury an architect-level summary in routine implementation detail
 
 ---
@@ -475,7 +481,7 @@ service-name/
 │   └── workers/      # Background jobs, queue consumers
 ├── tests/
 ├── docs/
-│   └── adr/          # Architecture Decision Records
+│   └── adr/          # Architecture Decision Records (frozen — no new ones)
 ├── infra/            # All Terraform files live here
 │   ├── main.tf
 │   ├── variables.tf
@@ -525,11 +531,11 @@ I should be able to answer from memory. If I can't, we revisit before moving on.
 
 ## Documentation Bar — Big Tech Interview Standard
 
-ARCHITECTURE.md, INTERVIEW_PREP.md, every ADR, PROGRESS.md, README.md,
-and this CLAUDE.md file itself must be written to the standard a senior
-engineer at Google, Microsoft, Amazon, or Meta would be held to in an
-actual interview loop — not just technically correct, but answering what
-these companies specifically probe for:
+`docs/INTERVIEW_PREP.md`, `docs/PROGRESS.md`, `README.md`, and this
+CLAUDE.md file itself must be written to the standard a senior engineer
+at Google, Microsoft, Amazon, or Meta would be held to in an actual
+interview loop — not just technically correct, but answering what these
+companies specifically probe for:
 - **Trade-offs, not just choices** — for every decision, what the
   alternatives were and what we gave up to get this one.
 - **Scale and failure** — what breaks at 10x/100x load, how the system
@@ -545,166 +551,110 @@ these companies specifically probe for:
   a grammar slip there is one I might repeat out loud in a real
   interview.
 - **Stay in sync, not just additive** — when a new feature directly
-  changes how an earlier feature behaves, update that earlier feature's
-  existing section in ARCHITECTURE.md and its existing Q&A in
-  INTERVIEW_PREP.md in place, so they describe the system as it actually
-  works now. A new feature gets its own new section in addition to
-  that — it never stands in for fixing the old one. An answer describing
-  a design that has since changed is wrong, not just outdated, and must
-  be corrected rather than left next to a newer section that contradicts
-  it. ADRs are the one exception: don't rewrite an old ADR's reasoning
-  after the fact — write a new ADR for the change and mark the old one's
-  status as "Superseded by ADR-XXX" (or "Extended by ADR-XXX" if it's
-  additive rather than a reversal), so the decision history stays honest.
+  changes how an earlier feature behaves, fix that earlier feature's
+  existing section in INTERVIEW_PREP.md in place, so it describes the
+  system as it actually works now. The new feature gets its own section
+  in addition to that — it never stands in for fixing the old one. An
+  answer describing a design that has since changed is wrong, not just
+  outdated.
 
-This is the bar the existing structure and rules for ADRs, the
-architecture doc, the interview prep doc, and every other document in
-this project are held to — it doesn't replace them, it's what "done
-well" means for all of them.
+This is the bar for the three documents we still maintain — the progress
+tracker, the interview prep doc, and the README. It does not apply to
+the frozen documents below, which are not maintained at all.
 
 ---
 
-## Architecture Document
+## Documents — What We Maintain and What Is Frozen
 
-Maintain a living file at `docs/ARCHITECTURE.md` for the entire project.
+Only three documents are kept current from here on, and all three are
+updated by `/end-session`, never ad hoc:
+- `docs/PROGRESS.md` — what is done, what is pending, how long is left
+- `docs/INTERVIEW_PREP.md` — the high-level workflow of each feature
+- `docs/pipeline-status.html` — the visual done-vs-pending board
 
-This is not a technical spec — it is a plain English guide that anyone (including future-me) can read to understand how the whole system works.
+**Frozen — never write to these:**
+- `docs/adr/` — no new ADRs, and no edits to the existing ones. Do not
+  ask me to write one, do not offer to, do not add "Superseded by"
+  notes. The ADRs already there stay exactly as they are, as history.
+- `docs/ARCHITECTURE.md` — never updated again. Do not add sections, do
+  not correct stale ones, do not redraw its diagrams.
 
-Updated automatically by `/end-session` at the close of each session —
-you shouldn't need to touch it manually mid-session. It should always
-reflect the current state of the project, not what we planned to build.
-
-Structure it like this:
-
-```
-# Project Name — Architecture Guide
-
-## What this system does (2–3 sentences, no jargon)
-
-## The big picture — how the pieces fit together
-  Plain English description + a simple text diagram showing
-  how data flows from one part of the system to another.
-
-## The main components
-  For each major part of the system:
-  - What is it called
-  - What is its one job (one sentence)
-  - What does it talk to and why
-  - What would break if it disappeared
-
-## Key decisions we made and why
-  Short summaries of the most important architectural choices.
-  Link to the full ADR for each one.
-
-## How data moves through the system
-  Walk through the two or three most important user journeys
-  step by step in plain English. No code.
-
-## Enterprise and security decisions
-  How PII detection works, how ACL is enforced at retrieval
-  time, how Managed Identity keeps secrets out of the code,
-  how the audit log works and why it is append-only.
-
-## Multi-agent retrieval (domain-scoped agents)
-  How the supervisor decides which document domains a question
-  touches, how each domain-scoped retrieval agent enforces its
-  own ACL, how the synthesis agent reconciles answers across
-  domains, and what happens when one domain's agent fails.
-
-## Conversation history and context condensing
-  How a follow-up question gets rewritten into a standalone
-  question before retrieval, why condensing beats passing raw
-  chat history into the prompt, where conversations and turns
-  are stored, and how document-level ACL still applies fresh on
-  every turn regardless of what an earlier turn in the same
-  conversation could see.
-
-## Streamed answer generation
-  Why SSE instead of WebSocket, why streaming attaches only to
-  the final generation step and not to retrieval or the
-  multi-agent path, how sentence-chunked guardrail checks keep
-  streaming compatible with the moderation requirement, and why
-  time-to-first-token is tracked separately from total latency.
-
-## What could go wrong and how we handle it
-  For each major failure scenario, explain in plain English
-  what happens and how the system recovers.
-
-## Azure infrastructure overview
-  What runs where in Azure, how Terraform provisions it,
-  how GitHub Actions deploys it. Plain English, no commands.
-
-## Glossary
-  Define every technical term used in this project in one
-  plain English sentence. Add a new term every time we
-  introduce one.
-```
-
-**Diagrams are part of this document, not optional.** Add a flowchart
-wherever it makes the system clearer than prose alone — a small diagram
-for a single feature's flow, and a larger connected diagram once
-multiple features interact. Use Mermaid diagrams (fenced code blocks
-tagged `mermaid` — GitHub renders these natively); a simple
-boxes-and-arrows text sketch is fine for something trivial. Diagrams
-don't need to exist upfront — add, redraw, or expand them as features
-are actually built, kept current by `/end-session` alongside the rest
-of this file.
-
-**Rules for this document:**
-- No code snippets — this is a reading document, not a code document.
-  Diagrams are the one exception — everything else stays prose.
-- No bullet point walls — write in short paragraphs
-- Every section must make sense to someone who has never seen the codebase
-- If a section becomes too long, it means the system is too complex — flag it
+If a new feature changes how an earlier feature behaves, the only
+document that gets corrected is `docs/INTERVIEW_PREP.md` — fix that
+feature's existing section in place, so I never rehearse an answer
+describing a design we have since changed. `docs/ARCHITECTURE.md` and
+the ADRs going out of date is expected and fine; leave them alone.
 
 ---
 
 ## Progress Tracker
 
-Maintain a `docs/PROGRESS.md` file. Updated automatically by
-`/end-session` at the close of each session — each entry covers:
-- What we built
-- What I struggled with
-- What concepts I need to revisit
-- What's next
-- Percent of the project complete, percent remaining, and an
-  estimated number of days left to finish
+Maintain `docs/PROGRESS.md`. Updated by `/end-session`, and kept
+minimal — it is a current-state snapshot, not a session diary. Three
+things only:
 
-**How to estimate percent complete and time remaining:** Base it on
-the build order in this file — weight by real effort, not a flat step
-count (step 4's reranking is not the same size as step 9's evaluation
-harness). Give a one-line plain-English reason for the percentage, not
-just a number. For time remaining, estimate the realistic effort left
-in hours for the remaining steps, then convert to days assuming 3–4
-hours of focused work per day — state that assumption explicitly every
-time ("at 3–4 hours/day, roughly X working days left") so the number
-stays honest as scope changes.
+- **Done** — one short line per feature that is actually built and
+  working.
+- **Pending** — one short line per feature still to build, in build
+  order.
+- **Time to finish** — the realistic effort left in hours across the
+  pending items, converted to days at 3–4 hours of focused work per
+  day. State the assumption every time: "at 3–4 hours/day, roughly X
+  working days left." Weight by real effort, not a flat step count —
+  a Terraform and Kubernetes deployment step is not the same size as
+  a result-formatting step.
+
+Nothing else goes in this file: no struggle log, no lessons learned, no
+per-session narrative, no percentage essay. A session that finishes one
+feature moves one line from Pending to Done and re-states the estimate.
+Lines that are already there and still correct stay untouched.
+
+---
+
+## Pipeline Status Page
+
+`docs/pipeline-status.html` is the visual board — every build-order step
+shown as done or pending at a glance. Updated by `/end-session`.
+
+Keep the change minimal: mark newly finished steps as done, leave the
+rest pending, and match the page's existing layout, colours, and style.
+It is a picture of where the project stands, not a document — no
+paragraphs, no per-step write-ups, no redesign unless I ask for one.
 
 ---
 
 ## Interview Prep Document
 
 Maintain a `docs/INTERVIEW_PREP.md` file — a study sheet for reviewing
-before an actual interview, separate from the ADRs and the architecture
-doc.
+before an actual interview. It is the one document that gets real
+writing effort, and the only place a completed feature is written up.
 
 Updated automatically by `/end-session` at the close of each session.
-Each new section covers the Q&A pairs from that feature's protocol Step
-5/interview-prep round: what it does in one sentence, why we chose what
-we chose over the alternatives, what happens on the failure scenarios we
-walked through, and the 10x-scale question and answer.
+Each feature gets one short section covering **only the high-level
+workflow**: what the feature does in one sentence, then the flow from
+start to finish the way I would say it out loud in an interview, plus
+the one or two design choices an interviewer would actually push on —
+a line each, with what we gave up. Nothing below that altitude: no file
+names, no function names, no class or configuration detail, no
+implementation walkthrough. If it would not be said out loud in an
+interview answer, it does not belong here. Include the
+project-specific interview questions listed under "Interview Prep Built
+In" too, once they have actually been answered.
 
 **Rules for this document:**
 - Plain, simple language — no jargon without a plain-English explanation,
   same communication rules as everywhere else in this file.
 - Written as answers meant to be said back naturally in an interview, not
   recited word-for-word.
+- If a later feature changes how an earlier one works, fix the earlier
+  section in place rather than leaving two sections that contradict
+  each other.
 - Each feature's section must include a small flowchart of that
   feature's own flow — not the whole system — placed after the text
   explanation, so it reinforces what was just said rather than
   repeating it. Use a Mermaid diagram (fenced code block tagged
-  `mermaid`, same convention as `docs/ARCHITECTURE.md`); a simple
-  boxes-and-arrows text sketch is fine if the feature is trivial.
+  `mermaid`); a simple boxes-and-arrows text sketch is fine if the
+  feature is trivial.
 - Add a "General concepts" section at the bottom for things worth knowing
   independent of any one feature (e.g. what RAG is, what a
   service/repository split is for).
@@ -732,13 +682,13 @@ walked through, and the 10x-scale question and answer.
 
 **Summarize changes, don't narrate files.** When a feature (or a full chunk of one) is done, describe what changed the way Step 4 describes — architecture-level and plain English, not a technical walkthrough — and how it fits into the overall system.
 
-**Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands.
+**Docs and commits happen via the session commands.** Use `/start-session` to begin and `/end-session` to close out — don't update `docs/PROGRESS.md`, `docs/INTERVIEW_PREP.md`, `docs/pipeline-status.html`, or commit/push ad hoc outside of those commands. `docs/ARCHITECTURE.md` and `docs/adr/` are not updated by either command, or by anything else.
 
 **Remind me of enterprise requirements.** If I suggest building a feature without a correlation ID, without going through APIM, or without Key Vault — stop me and remind me of the requirement before writing any code.
 
 **Point out the Claude Code feature that could help.** Before or while we build a feature, tell me which Claude Code capability — subagents, hooks, skills, plan mode, MCP servers, custom slash commands, background tasks, and so on — could make building it faster or better, and briefly why. Learning Claude Code itself is part of why I'm building these projects with it, so don't skip this even on small features.
 
-**Keep earlier docs honest when a feature changes them.** If a new feature changes how an earlier feature behaves, don't just add new documentation for it — call out exactly which existing ARCHITECTURE.md section and INTERVIEW_PREP.md Q&A now describe stale behavior, and fix them in place before we close out the session. Nothing should be left describing a design that's since changed as if it were still current.
+**Keep the interview prep doc honest when a feature changes it.** If a new feature changes how an earlier feature behaves, don't just add a new section for it — call out exactly which existing INTERVIEW_PREP.md section now describes stale behaviour, and fix it in place before we close out the session. I should never rehearse an answer for a design we've since changed. ARCHITECTURE.md and the ADRs are frozen and will go stale by design — leave them.
 
 ---
 

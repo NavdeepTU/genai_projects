@@ -5,11 +5,15 @@ description: Read project context and prep for a new work session
 Start a new working session on this project:
 
 1. Read `CLAUDE.md` in the project root for the operating rules.
-2. Read `docs/PROGRESS.md` for what happened in past sessions.
-3. Read `docs/ARCHITECTURE.md` for what's been built so far.
-4. Skim `docs/INTERVIEW_PREP.md`, any files in `docs/adr/`, and the actual
-   codebase (recently touched files, README) to confirm the docs match
-   reality.
+2. Read `docs/PROGRESS.md` — the current Done / Pending snapshot and the
+   time-to-finish estimate.
+3. Read `docs/INTERVIEW_PREP.md` for how the features built so far
+   actually work.
+4. Skim the actual codebase (recently touched files, README) to confirm
+   those two docs match reality. Do not rely on `docs/ARCHITECTURE.md`
+   or `docs/adr/` — both are frozen history and may describe designs
+   that have since changed; the code and INTERVIEW_PREP.md are the
+   source of truth.
 5. Give a short summary (5–10 lines, per CLAUDE.md's "keep updates short"
    rule) of what happened last session and where things stand now.
 6. Point me to `docs/pipeline-status.html` — give its file path and note

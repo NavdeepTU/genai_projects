@@ -137,6 +137,106 @@ export type Tenant = {
   name: string;
 };
 
+export type Domain = {
+  id: string;
+  name: string;
+};
+
+export async function createDomain(name: string): Promise<Domain> {
+  const response = await fetch("/api/admin/domains", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to create domain (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+export async function renameDomain(domainId: string, name: string): Promise<Domain> {
+  const response = await fetch(`/api/admin/domains/${domainId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to rename domain (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+export async function mergeDomain(domainId: string, targetId: string): Promise<Domain[]> {
+  const response = await fetch(`/api/admin/domains/${domainId}/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_id: targetId }),
+  });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to merge domain (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  const data: { domains: Domain[] } = await response.json();
+  return data.domains;
+}
+
+export async function deleteDomain(domainId: string): Promise<void> {
+  const response = await fetch(`/api/admin/domains/${domainId}`, { method: "DELETE" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to delete domain (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+}
+
 // Called from the Admin page's tenant-management section (a Client
 // Component), so this hits the same-origin proxy at /api/admin/tenants,
 // never the backend directly — same reasoning as every other

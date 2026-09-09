@@ -4,12 +4,23 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from app.api.admin import approve_document, create_tenant, get_review_queue, reject_document
+from app.api.admin import (
+    approve_document,
+    create_domain,
+    create_tenant,
+    delete_domain,
+    get_review_queue,
+    merge_domain,
+    reject_document,
+    rename_domain,
+)
 from app.core import admin_auth, middleware
 from app.models.document import DocumentStatus
+from app.models.domain import CreateDomainRequest, MergeDomainRequest, RenameDomainRequest
 from app.models.tenant import CreateTenantRequest
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.domain_repository import DomainRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.user_repository import UserRepository
 
@@ -225,3 +236,138 @@ async def test_get_review_queue_returns_only_this_tenants_in_review_documents(db
     assert next(item for item in response.documents if item.id == mine.id).uploaded_by_email == (
         "uploader@example.com"
     )
+
+
+async def test_create_domain_registers_it_for_the_admins_tenant(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        response = await create_domain(CreateDomainRequest(name="HR"), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert response.name == "HR"
+    domains = await DomainRepository(db_session).list_for_tenant(tenant_id)
+    assert [d.name for d in domains] == ["HR"]
+
+
+async def test_create_domain_rejects_a_case_insensitive_duplicate(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    await DomainRepository(db_session).create_domain(tenant_id, "HR")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_domain(CreateDomainRequest(name="hr"), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert exc_info.value.status_code == 409
+
+
+async def test_create_domain_rejects_an_empty_name(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_domain(CreateDomainRequest(name="   "), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert exc_info.value.status_code == 400
+
+
+async def test_rename_domain_fixes_drift_already_noticed(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    domain = await DomainRepository(db_session).create_domain(tenant_id, "Human Resources")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        response = await rename_domain(domain.id, RenameDomainRequest(name="HR"), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert response.name == "HR"
+
+
+async def test_rename_domain_404s_for_another_tenants_domain(db_session):
+    tenant_id = await _tenant_id(db_session)
+    other_tenant_id = await _tenant_id(db_session, "Globex")
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    foreign_domain = await DomainRepository(db_session).create_domain(other_tenant_id, "Finance")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await rename_domain(foreign_domain.id, RenameDomainRequest(name="Finances"), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert exc_info.value.status_code == 404
+
+
+async def test_merge_domain_collapses_two_domains_into_one(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    source = await DomainRepository(db_session).create_domain(tenant_id, "Human Resources")
+    target = await DomainRepository(db_session).create_domain(tenant_id, "HR")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        response = await merge_domain(source.id, MergeDomainRequest(target_id=target.id), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert [d.name for d in response.domains] == ["HR"]
+
+
+async def test_merge_domain_rejects_merging_into_itself(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    domain = await DomainRepository(db_session).create_domain(tenant_id, "HR")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await merge_domain(domain.id, MergeDomainRequest(target_id=domain.id), db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert exc_info.value.status_code == 400
+
+
+async def test_delete_domain_removes_it(db_session):
+    tenant_id = await _tenant_id(db_session)
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    domain = await DomainRepository(db_session).create_domain(tenant_id, "HR")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        await delete_domain(domain.id, db_session)
+    finally:
+        _reset_caller(tokens)
+
+    domains = await DomainRepository(db_session).list_for_tenant(tenant_id)
+    assert domains == []
+
+
+async def test_delete_domain_404s_for_another_tenants_domain(db_session):
+    tenant_id = await _tenant_id(db_session)
+    other_tenant_id = await _tenant_id(db_session, "Globex")
+    admin = await UserRepository(db_session).create_user("admin@example.com", "hashed", tenant_id)
+    foreign_domain = await DomainRepository(db_session).create_domain(other_tenant_id, "Finance")
+
+    tokens = _set_caller(tenant_id, admin.id)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await delete_domain(foreign_domain.id, db_session)
+    finally:
+        _reset_caller(tokens)
+
+    assert exc_info.value.status_code == 404

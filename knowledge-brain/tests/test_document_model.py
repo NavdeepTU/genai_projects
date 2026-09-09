@@ -10,7 +10,6 @@ def _document(storage_path: str | None) -> Document:
         filename="handbook.pdf",
         status=DocumentStatus.READY,
         pii_detected=False,
-        domains=[],
         uploaded_at=datetime.now(UTC),
         storage_path=storage_path,
     )
