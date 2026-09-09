@@ -1562,6 +1562,39 @@
     <p class="caveat">Backend suite: 170 → 216 passing. Every FastAPI route and MCP tool tested here is driven as a plain function directly — this project's established convention, no HTTP test client anywhere in the suite.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Alembic migrations <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">replaces create_tables.py and hand-run SQL after three real migration bugs</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">env.py wired to models + settings</span>
+        <span class="path mono">async, no hardcoded DB URL</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Baseline migration, from an empty DB</span>
+        <span class="path mono">all 8 tables · pgvector extension</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">create_tables.py deleted</span>
+        <span class="path mono">one way to build the schema, not two</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real subtlety, caught only by running it:</strong> diffing the baseline against the already-up-to-date dev database produced an empty, useless no-op migration. Regenerated against a throwaway empty database instead, so a brand-new database can actually build the full schema from nothing.</p>
+    <p class="caveat">Verified live: upgrade against an empty database produced zero schema drift against the models, and downgrade cleanly reversed everything back to nothing. Execution stays manual by design — not wired into CI/CD yet.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
     <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, multi-tenancy, and the PII human review workflow. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>

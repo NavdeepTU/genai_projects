@@ -410,12 +410,13 @@ and why it was made that way.
 - The Container App's direct URL is still fully reachable, unrestricted
   — the API Management gateway's secret header is the one real access
   control today, not network isolation. See `ADR-026`.
-- There's no migration tool (no Alembic) — the real Azure Postgres
-  schema was created by running `create_tables.py` directly against it
-  by hand (see [`ADR-027`](docs/adr/ADR-027-azure-postgres-schema-creation.md)),
-  and a future schema change would need that same manual process
-  repeated; nothing automates it the way CI/CD already automates
-  deploying a new image.
+- Schema changes now go through Alembic (a single baseline migration
+  capturing the schema as of this project's Azure Postgres setup — see
+  [`ADR-027`](docs/adr/ADR-027-azure-postgres-schema-creation.md) for
+  how that original schema was created by hand, before Alembic
+  existed), but running `alembic upgrade head` is still a manual step
+  you run yourself, locally and against Azure; it isn't wired into
+  CI/CD the way deploying a new image already is.
 
 ## How it works
 
@@ -528,7 +529,7 @@ needed it, not ahead of time.
    ```
 5. **Create the database tables** (one-time, per fresh database volume):
    ```
-   PYTHONPATH=. uv run python scripts/create_tables.py
+   uv run alembic upgrade head
    ```
 6. **Run the server:**
    ```

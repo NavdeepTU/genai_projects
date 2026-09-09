@@ -1640,27 +1640,28 @@ one feature earlier).
 
 **Why not build this into the GitHub Actions pipeline, so a schema
 change ships automatically the way a code change already does?**
-A real alternative, deliberately not taken yet: this project has no
-migration tool. `create_tables.py` only knows how to create tables
-that don't exist — it has no concept of *altering* a table that
-already exists to match a model that changed, which is exactly what
-the next real schema change would need. Automating today's
-create-everything-once script into CI would just automate running
-something that can't safely handle that next change anyway, without
-fixing the actual gap underneath it.
+At the time, a real alternative was deliberately not taken: this
+project had no migration tool yet. `create_tables.py` only knew how to
+create tables that didn't exist — it had no concept of *altering* a
+table that already existed to match a model that changed, which is
+exactly what the next real schema change would need. Automating that
+create-everything-once script into CI would have just automated
+running something that couldn't safely handle that next change anyway,
+without fixing the actual gap underneath it. **Correction, added when
+Feature 35 (Alembic Migrations) was actually built:** that gap is now
+closed — `create_tables.py` no longer exists, replaced by versioned
+Alembic migrations. See Feature 35 for how schema changes work now.
 
 **What would you change here if this needed to run at genuine
 production scale, with a real team?**
-Add a real migration tool — Alembic is the natural fit, given the
-project already uses SQLAlchemy models — wired into the same CI/CD
-pipeline that already deploys images automatically, so a schema
-change and a code change ship together, versioned, on every push to
-`main`. That closes both halves of the gap this incident exposed: no
-human touching the database's firewall by hand again, and a schema
-change that can no longer be forgotten the way this one was for
-several sessions running.
-
-*Further reading: [Alembic's own official tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html), covering exactly the versioned-migration model this project doesn't have yet.*
+**Correction, added when Feature 35 (Alembic Migrations) was actually
+built:** this used to be future work — it's now done. A real migration
+tool (Alembic) replaced `create_tables.py` project-wide. It still isn't
+wired into the GitHub Actions pipeline automatically — that's a
+deliberate, separate decision, not an oversight — so a schema change
+today still ships by someone running one command by hand, the same way
+this original Azure schema push did. See Feature 35 for the full
+reasoning and the real gotchas hit building it.
 
 ---
 
@@ -3738,6 +3739,80 @@ answer to "could PII ever end up in your vector database," and the
 honest answer is now "yes, if an admin explicitly approved it."
 
 *Further reading: [NIST SP 800-53, AC-3: Access Enforcement](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final) — the control family covering explicit, human-authorized exceptions to an automated access/data-handling policy, the same shape as an admin's approval overriding the automated PII gate here.*
+
+---
+
+## Feature 35: Alembic Migrations
+
+**What does this feature do, in one sentence?**
+Replaces hand-run SQL and a create-once-only script with Alembic, a
+real migration tool that records every future database schema change
+as its own versioned, reversible file instead of a one-off command
+nobody remembers running — adopted after three separate hand-run-SQL
+migration bugs across two earlier features.
+
+```mermaid
+flowchart LR
+    MODELS[SQLAlchemy models] --> ENV["env.py: wired to the app's<br/>own metadata + settings"]
+    ENV --> BASELINE["One baseline migration:<br/>today's real schema"]
+    BASELINE --> VERSION["alembic_version table:<br/>tracks what's applied"]
+    VERSION --> FUTURE["Every future change:<br/>its own versioned file"]
+```
+
+**Why one baseline migration instead of replaying every historical
+schema change as its own migration?**
+The real trade-off: a full replay is more faithful history, but only a
+brand-new, empty database would ever actually run that chain — the
+project's real local and Azure databases already have today's schema
+either way, so both approaches end at the exact same place for them.
+A single baseline captures the same practical outcome — a new database
+can be built from nothing, existing ones just get marked caught up —
+for meaningfully less work and less risk of re-encoding an old bug by
+replaying it.
+
+**A real subtlety came up generating that baseline migration — what,
+and why does it matter?**
+Autogenerating the baseline by diffing against the project's *actual*
+existing database produced a completely empty migration — no bug, just
+autogenerate correctly reporting there's no difference, since the real
+database already matched the models. That's useless as a baseline: a
+genuinely new database would run it and get zero tables. The fix was
+generating it against a throwaway, completely empty database instead,
+so the file actually captured the real schema — a good example of a
+tool doing exactly what it was asked and still producing the wrong
+artifact, catchable only by checking the actual output, not by reading
+documentation.
+
+**Autogenerate is supposed to read the schema for you — what did it
+still get wrong on its own?**
+Two things, both found only by actually running the migration, not by
+reading it. It rendered the vector-search column's type without adding
+the import that type needs, a real bug in the generated file. And it
+had no way to know Postgres itself needs an extension enabled before
+that column type can exist at all — a brand-new database would fail on
+its very first migration without that line added by hand. Neither is
+an Alembic limitation specific to this project; both are standard
+gaps in autogenerate for any non-trivial column type.
+
+**Why does execution stay manual instead of wired into the deploy
+pipeline?**
+A deliberate, separate decision, not an oversight. Running a schema
+change by hand, once, deliberately, is a smaller, more reversible
+action than letting it fire automatically as part of every deploy —
+worth doing once there's a team and a release cadence that actually
+needs it, not by default the moment the tool exists.
+
+**What would actually go wrong if this had shipped without ever
+generating the baseline against an empty database — say, straight to
+a new teammate cloning the repo?**
+Their local setup would run every migration successfully, report
+success, and hand them a database with zero tables — a clean exit code
+hiding a completely broken result, the same shape of failure this
+project has already hit more than once with Terraform and Azure: a
+step reporting success proves it was *accepted*, never that it did
+what was intended.
+
+*Further reading: [Alembic's own cookbook, "Building an Up to Date Database from Scratch"](https://alembic.sqlalchemy.org/en/latest/cookbook.html#building-an-up-to-date-database-from-scratch) — the official recipe for exactly this situation: adopting Alembic on a project whose database already exists.*
 
 ---
 
