@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Building2, ScrollText } from "lucide-react";
+import { Building2, ExternalLink, ScrollText, ShieldAlert } from "lucide-react";
 
-import type { AdminAuditEntry, Tenant } from "@/lib/api";
-import { createTenant } from "@/lib/api";
+import type { AdminAuditEntry, ReviewQueueItem, Tenant } from "@/lib/api";
+import { approveDocument, createTenant, rejectDocument } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,10 +29,11 @@ function formatTimestamp(value: string) {
   });
 }
 
-type SectionId = "audit-log" | "tenants";
+type SectionId = "audit-log" | "review-queue" | "tenants";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: "audit-log", label: "Audit log", icon: ScrollText },
+  { id: "review-queue", label: "Review queue", icon: ShieldAlert },
   { id: "tenants", label: "Tenant management", icon: Building2 },
 ];
 
@@ -61,6 +62,90 @@ function AuditLogSection({ entries }: { entries: AdminAuditEntry[] }) {
           <span className="shrink-0 text-xs text-muted-foreground">
             {formatTimestamp(entry.timestamp)}
           </span>
+        </li>
+      ))}
+    </ListCard>
+  );
+}
+
+function ReviewQueueSection({ documents }: { documents: ReviewQueueItem[] }) {
+  const [queue, setQueue] = useState(documents);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorId, setErrorId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleDecision(documentId: string, decision: "approve" | "reject") {
+    setBusyId(documentId);
+    setErrorId(null);
+    setError(null);
+    try {
+      if (decision === "approve") {
+        await approveDocument(documentId);
+      } else {
+        await rejectDocument(documentId);
+      }
+      setQueue((current) => current.filter((doc) => doc.id !== documentId));
+    } catch (err) {
+      setErrorId(documentId);
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <ListCard
+      icon={ShieldAlert}
+      title="Documents awaiting PII review"
+      isEmpty={queue.length === 0}
+      emptyMessage="Nothing waiting on a review decision right now."
+    >
+      {queue.map((doc, i) => (
+        <li
+          key={doc.id}
+          className={cn("flex flex-col gap-2 text-sm", i > 0 && "border-t border-border pt-3")}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate">{doc.filename}</span>
+              <span className="text-xs text-muted-foreground">
+                uploaded by {doc.uploaded_by_email ?? "unknown user"}
+              </span>
+            </div>
+            {doc.has_file && (
+              <a
+                href={`/api/documents/${doc.id}/content`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex shrink-0 items-center gap-1 text-xs font-medium text-primary hover:underline"
+              >
+                <ExternalLink className="size-3.5" />
+                View
+              </a>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={busyId === doc.id}
+              onClick={() => handleDecision(doc.id, "approve")}
+            >
+              {busyId === doc.id ? "Working…" : "Approve"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={busyId === doc.id}
+              onClick={() => handleDecision(doc.id, "reject")}
+            >
+              Reject
+            </Button>
+          </div>
+          {errorId === doc.id && error && <p className="text-xs text-destructive">{error}</p>}
         </li>
       ))}
     </ListCard>
@@ -162,9 +247,11 @@ function NavButton({
 
 export function AdminDashboard({
   auditEntries,
+  reviewQueue,
   tenants,
 }: {
   auditEntries: AdminAuditEntry[];
+  reviewQueue: ReviewQueueItem[];
   tenants: Tenant[];
 }) {
   const [activeSection, setActiveSection] = useState<SectionId>("audit-log");
@@ -184,6 +271,7 @@ export function AdminDashboard({
 
       <div className="min-w-0 flex-1">
         {activeSection === "audit-log" && <AuditLogSection entries={auditEntries} />}
+        {activeSection === "review-queue" && <ReviewQueueSection documents={reviewQueue} />}
         {activeSection === "tenants" && <TenantsSection tenants={tenants} />}
       </div>
     </div>

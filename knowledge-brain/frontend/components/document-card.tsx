@@ -4,6 +4,7 @@ import type { DocumentListItem, DocumentStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DeleteDocumentButton } from "@/components/delete-document-button";
+import { SubmitForReviewButton } from "@/components/submit-for-review-button";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABEL: Record<DocumentStatus, string> = {
@@ -12,16 +13,18 @@ const STATUS_LABEL: Record<DocumentStatus, string> = {
   ready: "Ready",
   failed: "Failed",
   pending_review: "Needs review",
+  in_review: "In review",
+  rejected: "Rejected",
 };
 
 function StatusBadge({ status }: { status: DocumentStatus }) {
   if (status === "ready") {
     return <Badge>{STATUS_LABEL[status]}</Badge>;
   }
-  if (status === "failed") {
+  if (status === "failed" || status === "rejected") {
     return <Badge variant="destructive">{STATUS_LABEL[status]}</Badge>;
   }
-  if (status === "pending_review") {
+  if (status === "pending_review" || status === "in_review") {
     return (
       <Badge
         variant="outline"
@@ -66,33 +69,49 @@ export function DocumentCard({ document }: { document: DocumentListItem }) {
           </div>
         )}
       </CardHeader>
-      <CardContent className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>Uploaded {formatUploadedAt(document.uploaded_at)}</span>
-        <div className="flex items-center gap-3">
-          {document.pii_detected && (
-            <span
-              className={cn(
-                "flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400",
-              )}
-            >
-              <ShieldAlert className="size-3.5" />
-              PII detected
-            </span>
-          )}
-          {document.has_file ? (
-            <a
-              href={`/api/documents/${document.id}/content`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 font-medium text-primary hover:underline"
-            >
-              <ExternalLink className="size-3.5" />
-              View
-            </a>
-          ) : (
-            <span className="text-muted-foreground/60">Not viewable</span>
-          )}
+      <CardContent className="flex flex-col gap-2">
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Uploaded {formatUploadedAt(document.uploaded_at)}</span>
+          <div className="flex items-center gap-3">
+            {document.pii_detected && (
+              <span
+                className={cn(
+                  "flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400",
+                )}
+              >
+                <ShieldAlert className="size-3.5" />
+                PII detected
+              </span>
+            )}
+            {document.has_file ? (
+              <a
+                href={`/api/documents/${document.id}/content`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                <ExternalLink className="size-3.5" />
+                View
+              </a>
+            ) : (
+              <span className="text-muted-foreground/60">Not viewable</span>
+            )}
+          </div>
         </div>
+        {document.status === "pending_review" && (
+          <div className="flex items-center justify-between gap-2 rounded-md border border-amber-600/20 bg-amber-500/5 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-400">
+            <span>This document contains possible PII — review it, then send it for approval.</span>
+            <SubmitForReviewButton documentId={document.id} />
+          </div>
+        )}
+        {document.status === "in_review" && (
+          <p className="text-xs text-muted-foreground">Awaiting an admin&apos;s decision.</p>
+        )}
+        {document.status === "rejected" && (
+          <p className="text-xs text-destructive">
+            Rejected by an admin — this document was never added to the knowledge base.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

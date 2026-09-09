@@ -18,13 +18,24 @@ EMBEDDING_DIMENSIONS = 1536
 
 
 class DocumentStatus(str, Enum):
-    """The stages a document moves through during ingestion."""
+    """The stages a document moves through during ingestion.
+
+    PENDING_REVIEW, IN_REVIEW, and REJECTED are the PII human-review
+    workflow (ADR-048): a document with PII detected is held at
+    PENDING_REVIEW until its uploader submits it, moves to IN_REVIEW for
+    an admin of the same tenant to decide on, and ends at either READY
+    (approved — reprocessed and embedded, the same as any other
+    document) or REJECTED (terminal — no further review can be
+    requested).
+    """
 
     PENDING = "pending"
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
     PENDING_REVIEW = "pending_review"
+    IN_REVIEW = "in_review"
+    REJECTED = "rejected"
 
 
 class ProcessingStage(str, Enum):
@@ -81,6 +92,16 @@ class Document(Base):
     # document, no per-document grant needed (ADR-046 replaced the old
     # per-user DocumentPermission table with this).
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"))
+    # Who uploaded this document — reintroduced (ADR-046 had removed all
+    # per-user tracking on documents) specifically for the PII review
+    # workflow (ADR-048): a document held for review is visible only to
+    # its own uploader, not the whole tenant, until an admin decides on
+    # it. Nullable because documents created before this feature existed
+    # have no recorded uploader at all — treated as visible only to an
+    # admin of the tenant, never to a specific "owner" that doesn't exist.
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), default=None
+    )
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"

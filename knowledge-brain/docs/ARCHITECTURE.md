@@ -70,7 +70,7 @@ flowchart TD
         BG --> STATUS0["status → processing"]
         STATUS0 --> EXTRACT["stage: extracting<br/>Extract text (PDF / .txt)"]
         EXTRACT --> PIICHECK{"stage: checking_pii<br/>(Azure AI Language, via circuit breaker)"}
-        PIICHECK -->|PII found| FLAG["Status: pending_review<br/>pii_detected = true — stop, never embedded"]
+        PIICHECK -->|PII found| FLAG["Status: pending_review<br/>pii_detected = true — held, visible<br/>only to uploader (ADR-048)"]
         PIICHECK -->|Azure unavailable| FAILCLOSED["Status: failed<br/>(fail closed — not embedded unchecked)"]
         PIICHECK -->|clean| CHUNK["stage: chunking<br/>Chunk text"]
         CHUNK --> EMBED["stage: embedding<br/>Embed chunks (OpenAI, via circuit breaker)"]
@@ -78,6 +78,14 @@ flowchart TD
         SAVESTAGE --> SAVE[Save to Postgres<br/>documents + chunks]
         SAVE --> READY["status → ready"]
         READY --> BUILDREFS["Extract references & write to Neo4j<br/>(scoped to this document's own tenant —<br/>ADR-046 closed a cross-tenant leak here)"]
+    end
+
+    subgraph review["PII review workflow (ADR-048)"]
+        FLAG --> SUBMIT["Uploader: POST /submit-review"]
+        SUBMIT --> INREVIEW["Status: in_review<br/>visible to uploader + tenant admins only"]
+        INREVIEW -->|"admin approves"| REAPPROVE["Re-enter pipeline at EXTRACT<br/>(re-downloaded from Blob Storage) —<br/>skips PIICHECK entirely"]
+        REAPPROVE --> CHUNK
+        INREVIEW -->|"admin rejects"| REJECTED["Status: rejected (terminal)<br/>no resubmission, never embedded"]
     end
 
     POLL["Frontend: GET /documents/id/status<br/>every 2s while processing"] -.->|"tenant-checked read"| STATUSREAD[("documents.status +<br/>documents.processing_stage")]
@@ -179,8 +187,13 @@ is pulled out, and before anything else happens, that text is checked
 for personal information (names, phone numbers, government IDs, that
 kind of thing) by Azure AI Language. If it finds any, the document
 stops right there: it's marked `pending_review` with `pii_detected =
-true`, and nothing about it is ever chunked or embedded — its raw text
-never reaches the vector index. If Azure itself is unavailable, the
+true`, and nothing about it is chunked or embedded automatically — its
+raw text never reaches the vector index on its own. That's not
+necessarily the end of the road for it anymore, though (see ADR-048): the
+uploader can submit it into an admin review queue, and an admin of that
+same tenant can approve it, which re-runs this exact pipeline from
+extraction onward — PII and all, a deliberate human override, not an
+automatic one. If Azure itself is unavailable, the
 document fails closed the same way any other ingestion failure does,
 rather than skipping the check and embedding something unverified.
 Only once a document is confirmed clean does the rest of the pipeline
@@ -306,7 +319,47 @@ both search backends down or a circuit already open) skips this
 entirely — nothing about a request that never got a real answer is
 recorded as if it did.
 
-**What's new since the last update:** multi-tenancy. A `Tenant` (a
+**What's new since the last update:** two things. First, a small but
+real correction: this project's own Enterprise Requirement 5 used to
+demand a per-document access restriction *within* a tenant, on top of
+tenant-wide sharing — a requirement written before multi-tenancy existed
+at all, never revisited once it did. Retired, not silently dropped: the
+requirement itself was rewritten to describe tenant-level scoping as
+sufficient, since that was always the actual intended design (see
+ADR-047).
+
+Second, and the larger piece: the PII human review workflow named as a
+gap several updates ago is now built. A document flagged for PII no
+longer dead-ends — its uploader can submit it into an admin review
+queue, scoped to that document's own tenant (an admin never reviews
+another tenant's flagged content, the same boundary ADR-046 already
+enforces everywhere else). An admin's approval re-runs the ingestion
+pipeline on the original file — chunking and embedding it, PII included
+— a deliberate, audited human override of "never embed raw PII," made
+once, on one document, by one specific admin, not a policy change.
+Rejection is terminal: no resubmission, the document never joins the
+knowledge base. Getting there needed a real, security-relevant
+correction along the way: the request said "any admin" could review a
+submission, but read literally that would let an admin from a
+*different* tenant see another company's flagged PII — exactly the leak
+ADR-046 spent a session closing elsewhere — so it was built scoped to
+the document's own tenant instead, confirmed before writing any code.
+Tracking who a document is held for required reintroducing
+`Document.uploaded_by`, a column ADR-046 had removed entirely on the
+theory that tenant membership was the whole of document access — this
+feature is the one deliberate exception: a held document is visible
+only to its own uploader and to admins of its tenant, not the rest of
+the tenant, until it's approved. A real migration mistake surfaced
+live the same day it was written: the hand-run SQL for the two new
+status values used their lowercase Python `.value` strings
+(`'in_review'`, `'rejected'`), but every existing `DocumentStatus` value
+in this database has actually been stored as the enum member's
+uppercase *name* since the very first migration — invisible until the
+very first query compared against more than one status value in a list,
+fixed the same day with a plain `ALTER TYPE ... RENAME VALUE`. See
+ADR-048.
+
+**What's new before that:** multi-tenancy. A `Tenant` (a
 company or workspace) is now the group every user and document
 belongs to — a user picks theirs once, at signup, from a list an admin
 has already registered (`GET /tenants`, public, since no session
@@ -359,13 +412,13 @@ signed into it landed at zero documents, and a question answerable
 only from the first tenant's data came back "I don't know," citing
 only that user's own tenant's content — confirming isolation holds at
 the retrieval layer itself, not just in what the document list shows.
-This does put the system in real, current tension with this project's
-own Enterprise Requirement 5 ("multi-tenancy is not enough — users
-should only retrieve chunks from documents they have explicit access
-to"): as built, every user in a tenant can read every document that
-tenant owns, with no remaining way to narrow that further. Named here
-plainly, not smoothed over — see ADR-046's Reasoning section for the
-full trade-off. See ADR-046.
+This put the system in real tension with this project's own Enterprise
+Requirement 5 at the time, which demanded a per-document restriction on
+top of tenant-wide sharing — named plainly rather than smoothed over
+(see ADR-046's Reasoning section for the full original trade-off). That
+requirement was itself retired shortly after, once it was confirmed
+tenant-wide sharing was always the intended final design, not an
+incomplete step toward something finer — see ADR-047. See ADR-046.
 
 **What's new before that:** build-order item 18's other half
 — context condensing — plus Redis, the technology whose only real job
@@ -646,18 +699,18 @@ no tenant concept anywhere in this system's data model yet, and
 building one just for this page would mean quietly implementing a
 piece of item 14 under a different feature's name. See ADR-034.
 
-A real, related gap surfaced in conversation after the page shipped,
-deliberately not built yet: documents flagged `pending_review` for PII
-have no reviewer workflow at all. Worth naming precisely because it's
-not just "add an approve button" — `IngestionService.process_document`
-extracts a document's text into a local variable, checks it for PII,
-and if flagged, discards both the extracted text and the original file
-bytes once `flag_for_review` runs; neither is persisted anywhere. A
-real review workflow needs its own decision about where flagged
-content lives long enough to be reviewed, and needs to be admin-gated
-for the same separation-of-duties reason `require_admin` exists at
-all — the uploader who created the risk shouldn't be the one clearing
-it. Tracked as its own future item, not folded into ADR-034.
+A real, related gap surfaced in conversation after the page shipped, at
+the time deliberately not built: documents flagged `pending_review` for
+PII had no reviewer workflow at all. Named precisely because it wasn't
+just "add an approve button" — `IngestionService.process_document`
+discarded both the extracted text and (before ADR-044) the original file
+bytes once `flag_for_review` ran, so a real workflow needed its own
+decision about where flagged content lives long enough to be reviewed.
+**This gap is now closed, by ADR-048** — see that ADR, and the "Resolved"
+entry in this document's "What could go wrong" section, for the actual
+review workflow: uploader submits, an admin of the same tenant approves
+or rejects, admin-gated for exactly the separation-of-duties reason
+named here at the time.
 
 **What's new before that:** the Analytics page (build-order
 item 13's fourth page) now exists — real query volume over the last 30
@@ -1182,10 +1235,13 @@ real tenant-management panel: a list of every registered tenant
 (`TenantRepository.list_tenants`, via the public `GET /tenants`) and a
 register-a-new-tenant form (`POST /admin/tenants`) — replacing the
 honest placeholder this section used to describe, now that a tenant
-concept actually exists in the data model. The page's own sidebar
-navigation (`AdminDashboard`, a Client Component) was rebuilt into two
-sections instead of three when the old per-document permissions viewer
-was deleted along with `DocumentPermission` itself. `admin/error.tsx` deliberately shows the real error
+concept actually exists in the data model. Since ADR-048, a third
+section, the review queue (`GET /admin/review-queue`), lists every
+document `IN_REVIEW` in the admin's own tenant with an Approve/Reject
+action on each — the page's own sidebar navigation (`AdminDashboard`, a
+Client Component) grew back to three sections for this, having been
+trimmed to two when the old per-document permissions viewer was deleted
+along with `DocumentPermission` itself. `admin/error.tsx` deliberately shows the real error
 message rather than a fixed generic one — a `403` ("you're not an
 admin") and a genuine server failure are different situations worth
 telling apart here specifically. Talks to: `GET /admin` on the
@@ -1368,7 +1424,15 @@ synchronously, `process_document` as a background task) and MCP's
 `upload_document` tool (both called back to back, synchronously — MCP
 has no notion of "return now, poll later"). Anything added inside
 `process_document`, like the PII check below, protects both callers
-automatically.
+automatically. Since ADR-048, a third entry point, `approve_and_process`,
+resumes a held document after an admin approves it — re-downloading the
+original bytes from Blob Storage (never discarded, saved before the PII
+check ever ran) and re-entering at extraction, skipping the PII check
+entirely, since a human already made that call. The chunk/embed/save
+tail both `process_document` and `approve_and_process` share was pulled
+into a private `_chunk_embed_and_save` so the two entry points can't
+silently drift apart the way `create_document`/`process_document`'s
+MCP call site once did (see ADR-030's own incident).
 
 **PII detection (`app/services/pii_detection.py`)** — a single
 function, `detect_pii`, that sends a document's text to Azure AI
@@ -1484,7 +1548,17 @@ same set, so `find_by_keyword` itself now serves both callers.
 `list_documents_for_tenant` (added for the Document Library page,
 renamed from `_for_user` by ADR-046) is the same pattern applied to
 browsing instead of search — a document belonging to a different
-tenant simply never appears in the result. `get_document_for_tenant`
+tenant simply never appears in the result. Since ADR-048, it also takes
+a `caller_id` and applies its first-ever non-tenant filter: a document
+held anywhere in the PII review workflow only appears here for its own
+uploader (tracked via the `uploaded_by` column ADR-046 had removed and
+this feature reintroduced, nullable, specifically for this purpose) —
+an admin sees those documents through the separate, tenant-scoped
+`list_review_queue_for_tenant` instead, not this list.
+`submit_for_review` and `reject_document` perform the review workflow's
+two state transitions; neither checks who's allowed to call it, the
+same split of responsibility `require_admin` already draws elsewhere —
+that's the route layer's job. `get_document_for_tenant`
 (added for status polling, ADR-030; renamed the same way) is the same
 join narrowed to one document by id, returning `None` identically
 whether the document doesn't exist or belongs to another tenant — the
@@ -2295,10 +2369,25 @@ pre-existing users and thirty-two pre-existing documents into one
 named backfill tenant ("Microsoft") rather than leaving `tenant_id`
 nullable indefinitely, since the "no tenant yet" state only needed to
 exist for one migration, not as a permanent three-way branch every
-future query has to account for. See ADR-046 — including its
-Reasoning section for the real, named tension this creates with this
-project's own Enterprise Requirement 5, which this decision does not
-fully satisfy.
+future query has to account for. See ADR-046 for the full decision,
+including the real tension it named with this project's own Enterprise
+Requirement 5 at the time — since resolved by retiring that
+requirement's stricter clause (ADR-047), once it was confirmed
+tenant-wide sharing was the intended design all along, not a step
+toward something finer.
+
+For the PII review workflow, we read "any admin" as "any admin within
+the document's own tenant" rather than literally, since the literal
+reading would let one company's admin see another company's flagged PII
+— confirmed with the requester before writing any code, not decided
+silently. We chose to let approval fully re-embed the original,
+PII-bearing text — a deliberate, audited override of this project's own
+"never embed raw PII" rule — over redaction, since this project has no
+redaction capability and building one was never actually requested.
+Rejected documents are left permanently in place rather than
+auto-deleted, matching this project's append-only audit philosophy
+elsewhere; an uploader who wants a rejected document gone can still use
+the existing delete flow themselves. See ADR-048.
 
 ## How data moves through the system
 
@@ -2322,10 +2411,12 @@ separate progress field is updated before each real step, purely so a
 frontend polling `GET /documents/{id}/status` can show which one is
 currently happening. The document's text is extracted, then checked
 for personal information by Azure AI Language, scoped to a specific
-14-category allowlist. If any is found, the document stops here:
-marked "pending review," `pii_detected` set permanently to true, and
-nothing further happens to it — no chunking, no embedding. If Azure
-itself can't be reached, the document fails closed the same way any
+14-category allowlist. If any is found, the document is held: marked
+"pending review," `pii_detected` set permanently to true, visible only
+to its own uploader, and nothing further happens to it automatically —
+no chunking, no embedding — unless the uploader submits it and an admin
+of that same tenant approves it (see the PII review workflow entry
+below). If Azure itself can't be reached, the document fails closed the same way any
 other failure does, with the reason recorded, rather than skipping the
 check. Only a document confirmed clean continues: its text is split
 into chunks, each chunk becomes a meaning-vector, and everything is
@@ -2377,6 +2468,28 @@ deleted from Neo4j, both best-effort — an outage in either is logged
 and skipped, never blocks the deletion. The document row is deleted
 last, and its chunks disappear with it
 automatically. An audit log entry records who deleted it. See ADR-045.
+
+**Submitting a document for PII review, and an admin deciding on it
+(ADR-048):** the uploader of a `pending_review` document — and only
+them, or an admin, if it's a legacy document with no recorded uploader —
+sends `POST /documents/{id}/submit-review`; anyone else in the tenant
+gets the same 404 shape a document in a different tenant would, since
+they have no business knowing it exists. The document moves to
+`in_review` and now shows up in `GET /admin/review-queue`, scoped to
+that document's own tenant — an admin from a different tenant never
+sees it, the same boundary every other document read in this system
+already respects. An admin approving it (`POST /admin/documents/{id}/approve`)
+schedules the exact same background-task pattern a fresh upload uses:
+the response returns immediately with `status: processing`, while
+`IngestionService.approve_and_process` re-downloads the original file
+from Blob Storage and re-enters the pipeline at extraction — skipping
+the PII check this time, since a human already made that call — and, if
+it reaches `ready`, builds its reference-graph links exactly like any
+other successful upload. An admin rejecting it
+(`POST /admin/documents/{id}/reject`) is simpler: the document moves to
+`rejected`, a terminal state with no route back, and it's never chunked
+or embedded. Either decision is audit-logged with the deciding admin's
+`user_id`.
 
 **Asking a question:** a user sends a question to the query address,
 again proven by their session cookie, naming an existing conversation
@@ -2697,29 +2810,20 @@ request, but there's no dedicated "admin viewed the audit log" or
 trusted operators; a real gap before this system could honestly
 support more than a small, known set of administrators. See ADR-034.
 
-**A document flagged for PII has no reviewer, and its file is now
-viewable anyway** — `pending_review` and `pii_detected` have been
-correctly set since ADR-018, but nothing has ever moved a document back
-out of that status: no approve, no reject, no delete. This section used
-to also say the original file bytes were discarded — true before
-ADR-044, no longer true now: `create_document` saves a document's file
-to Blob Storage synchronously, before `process_document` ever runs the
-PII check that might flag it, so a flagged document's `storage_path` is
-already set by the time it's held for review. That's a real, new gap
-this document-viewing feature introduced without meaning to: the
-content route checks document-level *access*, not `status`, so a
-document sitting in `pending_review` — supposedly held back — can still
-be opened and viewed by anyone with access, PII and all, through the
-same "View" link a normal document uses. The extracted *text* is still
-genuinely discarded (`flag_for_review` returns before chunking ever
-runs), so it isn't searchable — only the raw file itself is exposed. A
-real fix needs its own decision about whether the content route should
-also gate on `status`, and, separately, where flagged content lives
-long enough for an actual reviewer to act on it, gated behind
-`require_admin` — the uploader who created the risk shouldn't be the
-one clearing it, the same separation-of-duties reasoning the Admin page
-exists for. Tracked as a distinct future item, not folded into ADR-034,
-ADR-044, or ADR-045.
+**Resolved (ADR-048): a document flagged for PII now has a real
+reviewer.** This section used to describe two compounding gaps — no way
+to approve, reject, or delete a held document, and a held document's
+file being fully viewable by anyone with access despite supposedly being
+"held back," since the content route checked tenant access, not status.
+Both are closed by the same fix: a document held anywhere in the review
+workflow (`PENDING_REVIEW`, `IN_REVIEW`, or `REJECTED`) is now visible
+only to its own uploader and to admins of that same tenant — the one
+exception to ADR-046's "tenant membership is the whole of document
+access control." The uploader decides whether to submit it
+(`POST /documents/{id}/submit-review`); an admin of that tenant decides
+whether it's approved (re-embedded, PII included — a deliberate, audited
+override of "never embed raw PII," not a redaction step) or rejected
+(terminal, no resubmission). See ADR-048.
 
 **The deployed backend now pays a real cold-start delay after any idle
 period** — `min_replicas = 0` (ADR-035) means the first request after
@@ -2853,13 +2957,13 @@ gate but flagged, after the feature shipped, as worth reconsidering
 once this handles real production traffic rather than test uploads.
 See ADR-018.
 
-**A flagged document has nowhere to actually be reviewed** — `pending_review`
-and `pii_detected` exist correctly in the database, but there's no
-admin UI yet for a human to look at a flagged document and release or
-delete it. At any meaningful upload volume, this becomes a second,
-separate risk from the fail-closed one above: a growing backlog of
-documents nobody has looked at, with no alerting on queue size either.
-Frontend work, a future build-order item, not built here.
+**Resolved (ADR-048): a flagged document now has somewhere to actually
+be reviewed** — the admin review queue (`GET /admin/review-queue`), with
+Approve/Reject actions, closes what used to be a growing, invisible
+backlog risk at any meaningful upload volume. One related risk is still
+real and not addressed by this feature: there's no alerting on queue
+size itself, so a genuinely large backlog would still go unnoticed
+without someone thinking to check the Admin page.
 
 **The PII allowlist only recognizes US and India identity formats** —
 a document containing, say, a French social security number or a UK
@@ -3343,9 +3447,11 @@ one row per (document, user) pair explicitly granted, stored in
 tenant membership is now the whole of document access control, so
 there's no longer a per-document, per-user list to speak of; a
 document is visible to everyone in the tenant that owns it, full stop.
-Not the same as a role (like "admin"), which grants broad,
-resource-agnostic capability regardless of which specific resource is
-involved.
+ADR-048 added the one deliberate exception: a document held anywhere in
+the PII review workflow is visible only to its own uploader and to
+admins of its tenant, until it's approved. Not the same as a role (like
+"admin"), which grants broad, resource-agnostic capability regardless
+of which specific resource is involved.
 
 **Tenant** — a company or workspace: the group every user and document
 belongs to (ADR-046). Every document is shared with every user in its

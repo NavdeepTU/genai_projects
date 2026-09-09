@@ -1490,14 +1490,81 @@
       </div>
     </div>
 
-    <p class="caveat"><strong>A real, named tension with this project's own Enterprise Requirement 5:</strong> "multi-tenancy is not enough — users should only retrieve chunks from documents they have explicit access to." As built, tenant membership is the whole of document access control — every user in a tenant can read every document that tenant owns, with no remaining per-document restriction. A deliberate trade-off for this feature's stated scope, not an oversight, recorded plainly in <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a> rather than smoothed over.</p>
+    <p class="caveat"><strong>A real tension with this project's own Enterprise Requirement 5, since resolved:</strong> "multi-tenancy is not enough — users should only retrieve chunks from documents they have explicit access to." As built, tenant membership was the whole of document access control, with no per-document restriction — recorded plainly in <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a> as a deliberate trade-off, not smoothed over. The requirement itself was retired shortly after, once it was confirmed tenant-wide sharing was always the intended design, not an incomplete step toward something finer — see <a href="adr/ADR-047-retire-per-document-acl-requirement.md">ADR-047</a>.</p>
     <p class="caveat"><strong>Two real bugs caught by <code>/code-review</code>, both fixed the same session:</strong> two concurrent requests to register the same tenant name could both pass the pre-check and the second would surface an unhandled 500 instead of a 409 — fixed by catching the underlying <code>IntegrityError</code>. A tenant name with leading/trailing whitespace could bypass the duplicate-name check entirely — fixed with a Pydantic validator on the request model itself, not just the one frontend form that exposed it.</p>
     <p class="caveat"><strong>Verified live:</strong> two independent users signed up into the same tenant, one instantly saw a document the other had just uploaded, with zero grant. A second tenant registered, a third user signed into it landed at zero documents, and a question answerable only from the first tenant's data came back "I don't know" — confirming isolation holds at retrieval, not just in the document list. Backend suite: 133 → 150 passing · frontend suite: 37 passing (restructured, not added to). See <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a>.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Feature 28 — PII human review workflow <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">a flagged document can now be submitted, reviewed, approved, or rejected — instead of dead-ending forever</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Submit → review queue</span>
+        <span class="path mono">uploader-only submit · tenant-scoped admin queue</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Approve → re-embed, PII included</span>
+        <span class="path mono">audited human override of "never embed raw PII"</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Reject → terminal</span>
+        <span class="path mono">no resubmission · never chunked or embedded</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real security correction, made before writing any code:</strong> the request said "any admin" could review a submission — read literally, that would let an admin from a <em>different</em> tenant see another company's flagged PII, exactly the leak <a href="adr/ADR-046-multi-tenancy.md">ADR-046</a> closed everywhere else. Built scoped to the document's own tenant instead, confirmed with the requester first.</p>
+    <p class="caveat"><strong>A real migration bug, caught by the first live query that needed it:</strong> the hand-run SQL added the two new statuses using their lowercase Python <code>.value</code> strings, but every existing <code>DocumentStatus</code> in this database is actually stored as the enum member's uppercase <em>name</em> — invisible until the first query compared against more than one status in a list. Fixed same-day with <code>ALTER TYPE ... RENAME VALUE</code>.</p>
+    <p class="caveat"><strong>Verified live:</strong> a real flagged document, visible only to its uploader; submitted, approved, and confirmed actually re-chunked and re-embedded with its real PII content intact, instantly visible tenant-wide. A second document rejected and confirmed terminal — zero chunks, no resubmission, visible only to its uploader. Backend suite: 150 → 170 passing · frontend suite: 37 → 43 passing. See <a href="adr/ADR-048-pii-review-workflow.md">ADR-048</a>.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Test-coverage hardening <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">closed 7 standing gaps named across prior sessions — no application code changed</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Hybrid search, circuit breaker, audit log</span>
+        <span class="path mono">15 + 5 = 20 new tests</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Neo4j create_reference, LangGraph retry loop</span>
+        <span class="path mono">6 + 3 new tests</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">PII splitting/batching, MCP (new module)</span>
+        <span class="path mono">12 + 6 new tests</span>
+      </div>
+    </div>
+
+    <p class="caveat"><strong>A real test-authoring bug caught before it shipped:</strong> the first attempt at the PII batching test used paragraphs too small to actually force a split, so it silently tested nothing. Caught by re-checking the assertion against the real 5,000-character limit, not by trusting a green run.</p>
+    <p class="caveat">Backend suite: 170 → 216 passing. Every FastAPI route and MCP tool tested here is driven as a plain function directly — this project's established convention, no HTTP test client anywhere in the suite.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
-    <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, and multi-tenancy. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy, and ADR-046 for the one place multi-tenancy currently falls short of Requirement 5.</p>
+    <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, multi-tenancy, and the PII human review workflow. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>
   </footer>
 
 </div>

@@ -141,3 +141,59 @@ async def test_ingest_document_flags_pii_for_review(db_session):
 
     result = await db_session.execute(select(Chunk).where(Chunk.document_id == document.id))
     assert result.scalars().all() == []
+
+
+async def test_approve_and_process_reprocesses_a_reviewed_document_without_rechecking_pii(db_session):
+    """An admin's approval (ADR-048) re-downloads the original file and embeds it,
+    skipping detect_pii entirely — a human already made this call.
+    """
+    repository = DocumentRepository(db_session)
+    service = IngestionService(repository)
+    tenant_id = await _tenant_id(db_session)
+    fake_embedding = [0.1] * 1536
+
+    with patch("app.services.ingestion_service.upload_document", new=AsyncMock()):
+        document = await service.create_document("notes.txt", b"John Doe, SSN 123-45-6789", tenant_id)
+    await repository.flag_for_review(document.id)
+    await repository.submit_for_review(document.id)
+
+    with (
+        patch(
+            "app.services.ingestion_service.download_document",
+            new=AsyncMock(return_value=b"John Doe, SSN 123-45-6789"),
+        ),
+        patch("app.services.ingestion_service.detect_pii", new=AsyncMock()) as mock_detect_pii,
+        patch(
+            "app.services.ingestion_service.embed_chunks",
+            new=AsyncMock(return_value=[fake_embedding]),
+        ),
+    ):
+        await service.approve_and_process(document.id)
+
+    refreshed = await repository.get_by_id(document.id)
+    assert refreshed.status == DocumentStatus.READY
+    mock_detect_pii.assert_not_called()
+
+    result = await db_session.execute(select(Chunk).where(Chunk.document_id == document.id))
+    chunks = result.scalars().all()
+    assert len(chunks) == 1
+    assert chunks[0].text == "John Doe, SSN 123-45-6789"
+
+
+async def test_approve_and_process_fails_when_the_original_file_is_unavailable(db_session):
+    """A document whose blob save failed at upload time has nothing to re-process."""
+    repository = DocumentRepository(db_session)
+    service = IngestionService(repository)
+    tenant_id = await _tenant_id(db_session)
+
+    with patch(
+        "app.services.ingestion_service.upload_document",
+        new=AsyncMock(side_effect=CircuitOpenError("blob storage is down")),
+    ):
+        document = await service.create_document("notes.txt", b"hello world", tenant_id)
+    assert document.storage_path is None
+
+    await service.approve_and_process(document.id)
+
+    refreshed = await repository.get_by_id(document.id)
+    assert refreshed.status == DocumentStatus.FAILED

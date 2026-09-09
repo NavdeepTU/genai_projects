@@ -6,7 +6,14 @@
 // server-only code out of this file is what keeps query/page.tsx (a
 // Client Component that imports streamQuery from here) buildable at all.
 
-export type DocumentStatus = "pending" | "processing" | "ready" | "failed" | "pending_review";
+export type DocumentStatus =
+  | "pending"
+  | "processing"
+  | "ready"
+  | "failed"
+  | "pending_review"
+  | "in_review"
+  | "rejected";
 
 export type ProcessingStage =
   | "queued"
@@ -275,4 +282,81 @@ export async function deleteDocument(documentId: string): Promise<void> {
     }
     throw new Error(detail);
   }
+}
+
+// Called from the browser (the document card's "Send for review" button),
+// so this hits the same-origin proxy, never the backend directly — same
+// reasoning as every other client-triggered call in this file (ADR-048).
+export async function submitDocumentForReview(documentId: string): Promise<DocumentStatusResponse> {
+  const response = await fetch(`/api/documents/${documentId}/submit-review`, { method: "POST" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to send for review (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+export type ReviewQueueItem = {
+  id: string;
+  filename: string;
+  uploaded_at: string;
+  uploaded_by_email: string | null;
+  has_file: boolean;
+};
+
+// Called from the Admin page's review-queue section (a Client Component),
+// so these hit the same-origin proxies, never the backend directly — same
+// reasoning as every other client-triggered call in this file (ADR-048).
+export async function approveDocument(documentId: string): Promise<DocumentStatusResponse> {
+  const response = await fetch(`/api/admin/documents/${documentId}/approve`, { method: "POST" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to approve document (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+export async function rejectDocument(documentId: string): Promise<DocumentStatusResponse> {
+  const response = await fetch(`/api/admin/documents/${documentId}/reject`, { method: "POST" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Failed to reject document (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
 }

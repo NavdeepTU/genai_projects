@@ -1,6 +1,7 @@
+import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class AdminAuditEntry(BaseModel):
@@ -23,4 +24,23 @@ class AdminResponse(BaseModel):
     """
 
     audit_entries: list[AdminAuditEntry]
+    correlation_id: str
+
+
+class ReviewQueueItem(BaseModel):
+    """One document awaiting a human PII-review decision (ADR-048)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    uploaded_at: datetime
+    uploaded_by_email: str | None
+    has_file: bool
+
+
+class ReviewQueueResponse(BaseModel):
+    """Every document currently IN_REVIEW in the admin's own tenant."""
+
+    documents: list[ReviewQueueItem]
     correlation_id: str

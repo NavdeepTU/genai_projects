@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,11 @@ class DocumentRepository:
         self.session = session
 
     async def create_document(
-        self, filename: str, tenant_id: uuid.UUID, domains: list[str] | None = None
+        self,
+        filename: str,
+        tenant_id: uuid.UUID,
+        uploaded_by: uuid.UUID | None = None,
+        domains: list[str] | None = None,
     ) -> Document:
         """Insert a new document row (status defaults to pending), owned by one tenant.
 
@@ -35,10 +40,15 @@ class DocumentRepository:
         a comma-separated string) and the MCP upload tool (taking a list
         directly) funnel through — a repeated tag like "HR, HR" would
         otherwise store as two identical entries, which the frontend then
-        renders as two React list items sharing the same key.
+        renders as two React list items sharing the same key. uploaded_by
+        is who this document is visible to exclusively while it's held
+        for PII review (ADR-048) — optional since the evaluation harness
+        has no real user account to attribute uploads to.
         """
         deduped_domains = list(dict.fromkeys(domains or []))
-        document = Document(filename=filename, tenant_id=tenant_id, domains=deduped_domains)
+        document = Document(
+            filename=filename, tenant_id=tenant_id, uploaded_by=uploaded_by, domains=deduped_domains
+        )
         self.session.add(document)
         try:
             await self.session.commit()
@@ -114,6 +124,68 @@ class DocumentRepository:
         except SQLAlchemyError:
             logger.exception("Failed to flag document %s for review", document_id)
             raise
+
+    async def submit_for_review(self, document_id: uuid.UUID) -> None:
+        """Move a held document into the admin review queue (ADR-048).
+
+        The route layer, not this method, checks that the caller is
+        actually allowed to submit this particular document (its own
+        uploader, or an admin for a legacy document with no recorded
+        uploader) and that it's currently PENDING_REVIEW — this method
+        just performs the transition once that's already been decided.
+        """
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.status = DocumentStatus.IN_REVIEW
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to submit document %s for review", document_id)
+            raise
+
+    async def reject_document(self, document_id: uuid.UUID) -> None:
+        """Move a document from IN_REVIEW to the terminal REJECTED state (ADR-048).
+
+        Terminal on purpose — nothing in this codebase moves a document
+        out of REJECTED again, matching the product decision that a
+        rejected upload can't be resubmitted, only re-uploaded fresh.
+        """
+        document = await self.session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.status = DocumentStatus.REJECTED
+        try:
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to reject document %s", document_id)
+            raise
+
+    async def list_review_queue_for_tenant(
+        self, tenant_id: uuid.UUID
+    ) -> list[tuple[Document, str | None]]:
+        """Return every IN_REVIEW document in this tenant, with its uploader's email.
+
+        Scoped to one tenant, not global (ADR-048) — an admin only ever
+        reviews their own tenant's flagged content, never another
+        tenant's, the same boundary every other document read in this
+        system respects. The email is a left outer join since a legacy
+        document's uploaded_by can be null.
+        """
+        stmt = (
+            select(Document, User.email)
+            .outerjoin(User, User.id == Document.uploaded_by)
+            .where(Document.tenant_id == tenant_id, Document.status == DocumentStatus.IN_REVIEW)
+            .order_by(Document.uploaded_at.asc())
+        )
+        try:
+            result = await self.session.execute(stmt)
+        except SQLAlchemyError:
+            logger.exception("Failed to list review queue for tenant %s", tenant_id)
+            raise
+        return [(doc, email) for doc, email in result.all()]
 
     async def mark_failed(self, document_id: uuid.UUID, reason: str) -> None:
         """Mark a document failed, recording why.
@@ -266,11 +338,30 @@ class DocumentRepository:
             raise
         return result.scalar_one_or_none()
 
-    async def list_documents_for_tenant(self, tenant_id: uuid.UUID) -> list[Document]:
-        """Return every document this tenant can see, newest first (ADR-046)."""
+    async def list_documents_for_tenant(
+        self, tenant_id: uuid.UUID, caller_id: uuid.UUID
+    ) -> list[Document]:
+        """Return every document this caller can see, newest first (ADR-046).
+
+        A document held for PII review (PENDING_REVIEW, IN_REVIEW, or
+        REJECTED) is the one exception to "every document in this tenant
+        is visible to everyone in it" — it only shows up here for its own
+        uploader, not the rest of the tenant, until an admin approves it
+        and it becomes a normal, fully tenant-visible document (ADR-048).
+        An admin reviewing someone else's flagged document does so
+        through the dedicated review queue, not this list.
+        """
+        review_statuses = (
+            DocumentStatus.PENDING_REVIEW,
+            DocumentStatus.IN_REVIEW,
+            DocumentStatus.REJECTED,
+        )
         stmt = (
             select(Document)
-            .where(Document.tenant_id == tenant_id)
+            .where(
+                Document.tenant_id == tenant_id,
+                (Document.status.not_in(review_statuses)) | (Document.uploaded_by == caller_id),
+            )
             .order_by(Document.uploaded_at.desc())
         )
         try:

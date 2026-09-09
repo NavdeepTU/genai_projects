@@ -1,7 +1,10 @@
 # ADR-046: Multi-tenancy — tenant-wide document sharing, per-user conversations
 
 ## Status
-Accepted.
+Accepted. Extended by ADR-047, which retires the Enterprise
+Requirement 5 tension this ADR's Reasoning and Scale sections named as
+open — tenant-level scoping is now the deliberate, sufficient
+requirement, not a stand-in for a per-document restriction still owed.
 
 ## Context
 Every document and every user in this system has, until now, belonged

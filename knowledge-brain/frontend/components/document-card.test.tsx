@@ -1,11 +1,18 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
 
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return { ...actual, submitDocumentForReview: vi.fn() };
+});
+
 import type { DocumentListItem } from "@/lib/api";
+import { submitDocumentForReview } from "@/lib/api";
 import { DocumentCard } from "@/components/document-card";
 
 function makeDocument(overrides: Partial<DocumentListItem> = {}): DocumentListItem {
@@ -52,5 +59,37 @@ describe("DocumentCard", () => {
 
     expect(screen.queryByRole("link", { name: /view/i })).not.toBeInTheDocument();
     expect(screen.getByText("Not viewable")).toBeInTheDocument();
+  });
+
+  it("shows a send-for-review button for a document held pending review", async () => {
+    vi.mocked(submitDocumentForReview).mockResolvedValue({
+      id: "doc-1",
+      status: "in_review",
+      processing_stage: "checking_pii",
+      pii_detected: true,
+      failure_reason: null,
+      correlation_id: "c1",
+    });
+
+    const user = userEvent.setup();
+    render(<DocumentCard document={makeDocument({ status: "pending_review", pii_detected: true })} />);
+
+    const button = screen.getByRole("button", { name: /send for review/i });
+    await user.click(button);
+
+    expect(submitDocumentForReview).toHaveBeenCalledWith("doc-1");
+  });
+
+  it("shows an awaiting-decision note for a document already in review", () => {
+    render(<DocumentCard document={makeDocument({ status: "in_review" })} />);
+
+    expect(screen.getByText(/awaiting an admin's decision/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send for review/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a rejected message for a document an admin rejected", () => {
+    render(<DocumentCard document={makeDocument({ status: "rejected" })} />);
+
+    expect(screen.getByText(/rejected by an admin/i)).toBeInTheDocument();
   });
 });

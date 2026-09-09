@@ -60,11 +60,22 @@ and why it was made that way.
   text is checked by Azure AI Language against an explicit 14-category
   allowlist (names, contact info, financial data, US and India
   government IDs). Any match holds the document for human review
-  instead of embedding it — `pending_review`, never made searchable.
-  Runs inside the shared ingestion service, so it protects the REST
-  upload endpoint and the MCP tool automatically. Fails closed, not
-  open, if Azure itself is unavailable — see
+  instead of embedding it automatically — `pending_review`, not
+  searchable unless and until an admin approves it (see the review
+  workflow below). Runs inside the shared ingestion service, so it
+  protects the REST upload endpoint and the MCP tool automatically.
+  Fails closed, not open, if Azure itself is unavailable — see
   [`ADR-018`](docs/adr/ADR-018-pii-detection.md).
+- **PII review workflow** — a flagged document isn't a dead end. Its
+  uploader submits it into an admin review queue, scoped to that
+  document's own tenant (an admin never reviews another tenant's
+  flagged content); an admin approves it (re-running the full ingestion
+  pipeline on the original text, PII included — a deliberate, audited
+  human override of "never embed raw PII," not a redaction step) or
+  rejects it (terminal, no resubmission). A held document is visible
+  only to its own uploader and to admins of its tenant, the one
+  exception to tenant-wide sharing below. See
+  [`ADR-048`](docs/adr/ADR-048-pii-review-workflow.md).
 - **Multi-tenancy** — every user and document belongs to one tenant (a
   company/workspace); documents are shared with everyone in the tenant
   that uploaded them, no per-document grant needed, while conversations
@@ -75,9 +86,11 @@ and why it was made that way.
   snippets alike — is filtered by a SQL join against `documents.tenant_id`
   before results are ever ranked, not after, replacing the earlier
   per-user grant table this project used until this feature. See
-  [`ADR-046`](docs/adr/ADR-046-multi-tenancy.md) — including a real,
-  named tension with this project's own Enterprise Requirement 5 that
-  this decision does not fully resolve.
+  [`ADR-046`](docs/adr/ADR-046-multi-tenancy.md); the per-document
+  restriction Enterprise Requirement 5 originally called for on top of
+  tenant sharing was retired once tenant-wide sharing was confirmed as
+  the actual intended design, not a step toward something finer — see
+  [`ADR-047`](docs/adr/ADR-047-retire-per-document-acl-requirement.md).
 - **Real authentication** — email/password login with the project's
   own server-side session cookies, not JWT and not an external
   identity provider, chosen specifically to build the real mechanics
@@ -266,16 +279,8 @@ and why it was made that way.
   [`ADR-045`](docs/adr/ADR-045-document-deletion.md), and
   [`ADR-046`](docs/adr/ADR-046-multi-tenancy.md).
 
-**Not built yet:** a review workflow for documents flagged for PII — they're
-correctly held back from *search* today, but nothing yet lets an admin
-release or reject one, and (a real, newly-surfaced gap, not fixed yet)
-the document's original *file* is actually viewable by anyone with
-access even while it's "held for review," since file storage now saves
-it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
-`CLAUDE.md`'s build order for the full plan.
-
 **Known gaps, tracked on purpose, not forgotten:**
-- The automated test suite (`tests/`, 150 tests) covers ingestion
+- The automated test suite (`tests/`, 216 tests) covers ingestion
   end-to-end, chunking, extraction, PII detection's "flag and stop"
   branch, the dashboard's and analytics page's repository/service
   methods, the query pipeline's source/confidence-building logic,
@@ -310,34 +315,45 @@ it before the PII check ever runs — see `ADR-034` and `ADR-044`. See
   multi-tenancy (`TenantRepository` CRUD, tenant-scoped and
   cross-tenant-exclusion cases in `DocumentRepository`, tenant-aware
   auth/ingestion/federated-retrieval tests, and two dedicated
-  cross-tenant graph-leak regression tests) — it
-  does not yet cover hybrid search, the circuit breaker, the audit log's
-  write path, LangGraph's retry logic, most of the Neo4j graph feature,
-  MCP, or PII detection's own splitting/batching logic. No
-  dedicated route-level tests exist for `/query/stream`, `/query`, or
-  the document routes — consistent with this project's convention of
-  testing the service layer directly and verifying route wiring live
-  instead. The frontend has its own test
-  suite too (`frontend/`, 37 tests, Vitest + React Testing Library) —
+  cross-tenant graph-leak regression tests), the PII review workflow
+  (visibility and state-transition tests, `approve_and_process`'s
+  reprocessing and failure paths, the cross-tenant admin-scoping check),
+  and — closed in one pass, no application code changed — every
+  previously-named standing gap: hybrid search's RRF math, the
+  hand-built circuit breaker's own state machine, the audit log's write
+  path, the Neo4j repository's `create_reference`/`get_referenced_documents`,
+  the actual compiled LangGraph retry loop (not just the routing
+  function in isolation), PII detection's paragraph-splitting and
+  Azure-batching logic, and MCP's two tools (previously zero coverage,
+  driven directly as plain functions). No
+  dedicated route-level tests exist for `/query/stream` or `/query` —
+  consistent with this project's convention of testing the service
+  layer directly and verifying route wiring live instead, though every
+  document and admin route (including the PII review routes) is tested
+  this same way, by calling the route function directly. The frontend has its own test
+  suite too (`frontend/`, 43 tests, Vitest + React Testing Library) —
   covering the domain-tagging upload field and its document-card
   badges, the conversation sidebar, the chat component's resume
   behavior, live streamed-chunk rendering and retract handling, a
   dedicated `streamQuery` SSE-parsing test (a frame split across reads,
   multiple frames in one read, a multi-byte character split
-  mid-character), the document card's "View" link and "Not viewable"
-  state, and the delete confirmation dialog's full behavior (opening,
-  cancelling, a successful delete, an inline error, a 401 redirect);
-  run with `npm test` inside `frontend/`.
-- There's no ownership or per-document restriction concept *within* a
-  tenant — every user in a tenant can view, share, and permanently
-  delete every document that tenant owns, with no finer-grained
-  restriction available. This is a real, current gap against this
-  project's own written Enterprise Requirement 5 ("multi-tenancy is
-  not enough — users should only retrieve chunks from documents they
-  have explicit access to"), named plainly in `ADR-046` rather than
-  smoothed over — a deliberate trade-off for that feature's stated
-  scope, not an oversight, and open for a later feature to close. See
-  `ADR-045` and `ADR-046`.
+  mid-character), the document card's "View" link, "Not viewable",
+  "Send for review", "in review", and "rejected" states, the delete
+  confirmation dialog's full behavior (opening, cancelling, a
+  successful delete, an inline error, a 401 redirect), and the Admin
+  page's review-queue section (rendering a flagged document with its
+  uploader's email, the empty state, and a document leaving the queue
+  once approved); run with `npm test` inside `frontend/`.
+- Outside the PII review workflow specifically, there's still no
+  ownership or per-document restriction concept within a tenant more
+  generally — every user in a tenant can view, share, and permanently
+  delete every *normal* document that tenant owns, with no
+  finer-grained restriction available. This was originally recorded as
+  a gap against this project's own written Enterprise Requirement 5;
+  that requirement was itself retired (`ADR-047`) once tenant-wide
+  sharing was confirmed as the intended design, not an incomplete step
+  toward something finer — so this is now a settled design choice, not
+  an open gap. See `ADR-045`, `ADR-046`, and `ADR-047`.
 - Deleting a document's file from Blob Storage and its node from Neo4j
   are both best-effort — an outage in either is logged and skipped,
   never blocks the deletion itself. This means a rare Blob Storage or

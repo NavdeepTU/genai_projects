@@ -3556,12 +3556,16 @@ Because nothing in the product ever had a UI to create a grant more
 specific than "the uploader has access" — the same gap ADR-045 already
 named when it chose not to build a real ownership model. Keeping the
 old table around as an unreachable second access-control system would
-have meant maintaining dead code indefinitely. The trade-off is real,
-though, and worth stating precisely rather than glossing over: the
-project's own written Enterprise Requirement 5 says tenant-level
-scoping alone "is not enough," and as built today, it is exactly that
-— any user in a tenant can read every document that tenant owns, with
-no way left to restrict a document to a subset of people within it.
+have meant maintaining dead code indefinitely. At the time, this put
+tenant-wide sharing in real tension with the project's own written
+Enterprise Requirement 5, which said tenant-level scoping alone "is not
+enough" — that requirement was itself retired shortly after (ADR-047),
+once it was confirmed tenant-wide sharing was always the intended final
+design, not an incomplete step toward something finer. A later feature,
+the PII review workflow (ADR-048), did end up adding one narrow,
+different kind of per-document restriction — not the general one
+Requirement 5 originally asked for, but worth knowing about if this
+comes up: see Feature 34.
 
 **Could a follow-up question, or a cached answer, ever leak access to
 a tenant a user isn't actually in?**
@@ -3636,6 +3640,104 @@ user's tenant never changes after signup — about as cache-friendly a
 value as exists in this system, and currently not cached at all.
 
 *Further reading: [Azure Architecture Center — Architectural approaches for storage and data in multitenant solutions](https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/approaches/storage-data) — Microsoft's own guidance on tenant isolation patterns (pooled vs. siloed data models), directly relevant to the pooled, row-level `tenant_id` approach this feature uses.*
+
+---
+
+## Feature 34: PII Human Review Workflow
+
+**What does this feature do, in one sentence?**
+A document flagged for PII no longer dead-ends: its uploader can submit
+it for review, an admin of that same tenant approves or rejects it, and
+approval re-embeds the document — PII included — as a deliberate,
+audited human override of this project's own "never embed raw PII"
+rule.
+
+```mermaid
+flowchart TD
+    UPLOAD["Document uploaded"] --> PIICHECK{"PII detected?"}
+    PIICHECK -->|no| READY["ready — normal document"]
+    PIICHECK -->|yes| HELD["pending_review<br/>visible only to uploader"]
+    HELD -->|"uploader: POST /submit-review"| INREVIEW["in_review<br/>visible to uploader + tenant admins"]
+    INREVIEW -->|"admin approves"| REPROCESS["Re-download original file,<br/>re-run pipeline, skip PII check"]
+    REPROCESS --> READY
+    INREVIEW -->|"admin rejects"| REJECTED["rejected — terminal,<br/>no resubmission, never embedded"]
+```
+
+**Your spec said "any admin" can review a submission. Why didn't you
+build it that way literally?**
+Because this system is multi-tenant (ADR-046), and an admin from a
+*different* company reviewing another company's flagged PII content
+would be exactly the cross-tenant leak that ADR-046 spent a whole
+session closing everywhere else. "Any admin" was read in context — any
+admin within that document's own tenant — and that interpretation was
+confirmed before any code was written, not assumed silently. The review
+queue and the approve/reject routes are all scoped to the caller's own
+tenant, the same boundary every other document read in this system
+already respects.
+
+**What does "approved" actually do to the document, and why not redact
+the PII instead of embedding it as-is?**
+Approval re-runs the full ingestion pipeline on the original file —
+chunking and embedding it, real PII included — because a human-in-the-
+loop override of an automated compliance check is a legitimate,
+established enterprise pattern: an admin looked at this specific
+document and decided it was fine, and that decision is what "approved"
+means. Redaction was considered and rejected — this project has no
+capability to decide what "safe to embed" text looks like after
+stripping names and numbers out of the middle of sentences, and nobody
+actually asked for that; building it would have been a materially
+larger, different feature than what was requested.
+
+**Why did a document need a `uploaded_by` column again, when the
+previous feature (multi-tenancy) deliberately removed all per-user
+tracking from documents?**
+Because this feature needed the one thing tenant-wide sharing
+intentionally gave up: knowing which single person a specific document
+belongs to, so it can be hidden from everyone except them and an admin
+while it's under review. It's nullable and scoped narrowly to this
+purpose — every other read in the system still ignores it entirely and
+scopes by tenant alone; only the three review-adjacent statuses
+(`pending_review`, `in_review`, `rejected`) ever check it.
+
+**What real bug did the migration for this feature actually hit, and
+why didn't it show up until the very first live test?**
+The hand-written SQL added the two new status values using their
+lowercase Python `.value` strings (`'in_review'`, `'rejected'`), but
+every existing `DocumentStatus` value in this database has actually
+been stored as the enum member's uppercase *name*
+(`PENDING`, `PENDING_REVIEW`, and so on) since the very first migration
+— that's simply how SQLAlchemy's `Enum` type generates its DDL by
+default. It stayed invisible because no query before this feature ever
+needed to compare a status column against more than one value in a
+list; the very first `list_documents_for_tenant` call that did surfaced
+it immediately as a Postgres `invalid input value for enum` error.
+Fixed with `ALTER TYPE ... RENAME VALUE`, safe since nothing had used
+either value yet.
+
+**A rejected document just sits there forever — was that a decision or
+an oversight?**
+A decision, matching this project's append-only audit philosophy
+everywhere else (the audit log itself, document deletion leaving a
+trail): silently destroying data as a side effect of a status change
+would be a bigger, separate decision than "reviewed and declined," and
+it would take away the uploader's own ability to see what happened to
+their upload. Someone who actually wants a rejected document gone can
+still use the existing delete flow (ADR-045) themselves.
+
+**What does this feature cost, and what's the honest, permanent
+trade-off it leaves behind?**
+The cost is exactly one more full ingestion pass — the same extraction,
+chunking, and embedding cost a normal upload already pays — paid again
+only for documents an admin explicitly approves, never automatically.
+The permanent trade-off worth being honest about in an interview: "this
+system never embeds raw PII" stopped being an absolute guarantee the
+moment this feature shipped. It's now a strong default that a specific,
+logged, human decision can knowingly override, one document at a time —
+that's the feature working as designed, not a gap, but it's a real
+answer to "could PII ever end up in your vector database," and the
+honest answer is now "yes, if an admin explicitly approved it."
+
+*Further reading: [NIST SP 800-53, AC-3: Access Enforcement](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final) — the control family covering explicit, human-authorized exceptions to an automated access/data-handling policy, the same shape as an admin's approval overriding the automated PII gate here.*
 
 ---
 

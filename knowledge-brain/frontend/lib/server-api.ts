@@ -17,6 +17,7 @@ import type {
   DashboardResponse,
   DocumentListItem,
   DocumentListResponse,
+  ReviewQueueItem,
   Tenant,
 } from "@/lib/api";
 
@@ -91,6 +92,17 @@ export async function getTenants(): Promise<Tenant[]> {
 
   const data: { tenants: Tenant[] } = await response.json();
   return data.tenants;
+}
+
+export async function getReviewQueue(): Promise<ReviewQueueItem[]> {
+  const response = await authenticatedFetch("/admin/review-queue");
+
+  if (!response.ok) {
+    throw new Error(`Failed to load the review queue (status ${response.status})`);
+  }
+
+  const data: { documents: ReviewQueueItem[] } = await response.json();
+  return data.documents;
 }
 
 export async function getDocuments(): Promise<DocumentListItem[]> {

@@ -4359,3 +4359,140 @@ hours/day, roughly 2 working days left on the currently-known list,
 with the same honest caveat as every prior estimate: a genuinely new
 feature request would grow this list again, the same way multi-tenancy
 itself did until this session actually built it.
+
+## Session: 2026-09-09 — Requirement 5 retired, the PII review workflow, and test-coverage hardening
+
+### What we built
+- Retired Enterprise Requirement 5's stricter clause. You confirmed
+  directly that tenant-wide sharing was always the intended final
+  design, not an incomplete step toward a finer, per-document
+  restriction — the tension ADR-046 had named as open. `CLAUDE.md`
+  itself was rewritten ("Document-level access control" →
+  "Tenant-level access control"), along with its two downstream
+  cross-references in Requirements 9 and 10. Wrote ADR-047 to record
+  this as a deliberate requirements fix, not a quiet scope cut after
+  the fact — the actual distinction being that the requirement predated
+  multi-tenancy's design and was never revisited once that design
+  existed.
+- The PII human review workflow — the item that's been on the "what's
+  next" list the longest. You specified it precisely up front: not sent
+  straight to an admin; visible to the uploader first, with a "send for
+  review" button; only after submission does an admin see it; approval
+  makes it available, rejection is final with no resubmission.
+- One real security correction surfaced during design, confirmed before
+  writing any code: your spec said "any admin" could review a
+  submission, but read literally that would let an admin from a
+  *different* tenant see another company's flagged PII — exactly the
+  cross-tenant leak ADR-046 spent a whole session closing elsewhere.
+  Built scoped to the document's own tenant instead.
+- Reintroduced `Document.uploaded_by` (nullable), a column ADR-046 had
+  removed entirely on the theory that tenant membership was the whole
+  of document access — this feature is the one deliberate exception: a
+  held document is visible only to its own uploader and to admins of
+  its tenant, not the rest of the tenant, until it's approved.
+- `IngestionService.approve_and_process`: re-downloads the original file
+  from Blob Storage (saved before the PII check ever ran, ADR-044, and
+  never discarded) and re-enters the pipeline at extraction, skipping
+  the PII check entirely — the human decision replaces it. The
+  chunk/embed/save tail shared with the normal upload path was factored
+  out into `_chunk_embed_and_save` so the two entry points can't
+  silently drift apart.
+- Built the whole stack: new `IN_REVIEW`/`REJECTED` statuses, the
+  submit/approve/reject routes, the admin review-queue endpoint and UI
+  section, and the document card's new states and "Send for review"
+  button.
+- A real migration bug, caught by the first live signup after running
+  it: the hand-run SQL added the two new statuses using their lowercase
+  Python `.value` strings, but every existing `DocumentStatus` in this
+  database has actually been stored as the enum member's uppercase
+  *name* since the very first migration — invisible until the very
+  first query compared a status column against more than one value in
+  a list. Fixed the same day with `ALTER TYPE ... RENAME VALUE`, safe
+  since nothing had used either value yet.
+- Verified live end to end, not just by test: a real flagged document
+  visible only to its uploader; submitted, approved, and confirmed
+  actually re-embedded with its real PII content present in `chunks`,
+  instantly visible tenant-wide; a second document rejected and
+  confirmed terminal — zero chunks, no resubmission, visible only to
+  its uploader. Wrote ADR-048.
+- 20 new backend tests for this feature specifically. Backend suite:
+  150 → 170. Frontend: 37 → 43.
+- Separately, closed all 7 standing test-coverage gaps named across
+  prior sessions' "what's next" lists: hybrid search's RRF math, the
+  hand-built circuit breaker's own state machine, the audit log's write
+  path, the Neo4j repository's `create_reference`/`get_referenced_documents`
+  (previously only covered indirectly), the actual compiled LangGraph
+  retry loop (not just `_should_retry` in isolation), PII detection's
+  paragraph-splitting and Azure batching logic, and MCP's two tools
+  (previously zero coverage at all, driven directly as plain functions,
+  the same seam every REST route in this project is already tested
+  through). No application code changed — 46 new tests, backend suite:
+  170 → 216.
+- Installed `graphify` (a third-party dev tool, not part of the
+  application) to build a queryable knowledge graph over this
+  repository, aimed at reducing how much of the codebase I need to read
+  per session. Flagged real concerns before installing it — a brand-new
+  tool (April 2026), no primary or reputable coverage beyond secondary
+  blog posts, and its own documentation warning about typosquatted
+  PyPI packages using nearly the same name — and had you run the
+  install yourself rather than doing it for you. Hit two real setup
+  snags (PATH not updated after `uv tool install`; the tool's own
+  `openai` extra not installed by default) — both fixed with the exact
+  commands its own error messages gave. Tested it with a real query
+  tracing `IngestionService.approve_and_process`'s call path — it
+  returned the correct chain (route → background task → service method
+  → blob download → chunk/embed/save → reference-graph build) with
+  accurate file and line references, though the raw result mixed in a
+  dozen unrelated test-file nodes alongside the real production path,
+  so it's a genuine research aid, not something to trust output from
+  unfiltered.
+
+### What I struggled with
+- No corrections on the review workflow's own decisions — the
+  tenant-scoping read of "any admin" was proposed and confirmed before
+  building, not corrected afterward.
+- The Enterprise Postgres enum-storage behavior (member *name*, not
+  *value*) was already known from the tenant multi-tenancy migration
+  earlier — but I still wrote the second migration's enum values
+  incorrectly on the first pass, meaning knowing a lesson abstractly
+  and applying it under time pressure while writing new SQL are
+  different things. Worth remembering that a "known" gotcha can still
+  need an explicit checklist step, not just general awareness.
+
+### Concepts to revisit
+- Why a system that has never embedded raw PII automatically can still
+  honestly say "yes, if an admin explicitly approved it" when asked
+  whether PII could ever reach its vector database — the difference
+  between an absolute technical guarantee and a strong default a human
+  can knowingly override.
+- Why the "any admin" tenant-scoping correction is the same category of
+  reasoning as reading a spec against a system's existing invariants
+  generally: a feature request's literal wording doesn't get to quietly
+  override a security boundary the system has already committed to
+  elsewhere.
+- Why `Document.uploaded_by` being nullable, and only checked for three
+  specific statuses, is a narrower reintroduction than it might first
+  sound — it doesn't undo ADR-046's tenant-wide sharing model, it adds
+  exactly one bounded exception to it.
+
+### What's next
+- Everything still on the list from before this session: `user_id_middleware`'s
+  per-request database round trip, APIM's remaining gaps, the missing
+  migration tool (three real migration bugs across two features now —
+  the strongest argument yet for Alembic), Postgres' still-open cost
+  fix, the federated-retrieval failure-isolation gap, and domain
+  vocabulary drift.
+- Nothing new was added to the list this session — both the requirement
+  retirement and the PII review workflow were already-tracked items,
+  and the test-coverage hardening closed gaps rather than opening new
+  ones.
+
+**Estimated completion: ~96% of the tracked build (weighted by real
+effort) is now done.** The PII review workflow was the last remaining
+*feature* on the list; what's left is entirely infrastructure/reliability
+work — a migration tool, a middleware caching fix, two named reliability
+gaps, and Azure-tier-limited APIM/Postgres items that may not be worth
+fully closing at this project's actual scale. Rough remaining effort:
+~5 hours. At 3–4 hours/day, roughly 1–2 working days left, with the
+same standing caveat: a genuinely new feature request would grow this
+number again.

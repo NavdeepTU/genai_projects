@@ -9,6 +9,7 @@ from neo4j import AsyncSession as Neo4jAsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.admin_auth import is_admin_user
 from app.core.blob_storage import download_document
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.database import AsyncSessionLocal, get_db
@@ -35,6 +36,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 ALLOWED_EXTENSIONS = (".pdf", ".txt")
+
+# A document held anywhere in the PII review workflow (ADR-048) is the
+# one exception to plain tenant-wide visibility — visible only to its
+# own uploader, or an admin, not the rest of the tenant.
+_REVIEW_STATUSES = (DocumentStatus.PENDING_REVIEW, DocumentStatus.IN_REVIEW, DocumentStatus.REJECTED)
+
+
+async def _visible_to_caller(document, db: AsyncSession) -> bool:
+    """Whether the current caller may view one specific document's status/content.
+
+    Every non-review-held document is visible tenant-wide already
+    (get_document_for_tenant's own filter) — this only narrows further
+    for the three review statuses, where a plain tenant member who isn't
+    the uploader or an admin gets treated as if the document doesn't
+    exist, the same indistinguishable-404 shape this project already
+    uses for a document in a different tenant entirely.
+    """
+    if document.status not in _REVIEW_STATUSES:
+        return True
+    if document.uploaded_by is not None and str(document.uploaded_by) == get_current_user_id():
+        return True
+    return await is_admin_user(db)
 
 
 async def _process_uploaded_document(
@@ -94,7 +117,9 @@ async def upload_document(
     correlation_id = get_correlation_id()
 
     service = IngestionService(DocumentRepository(db))
-    document = await service.create_document(file.filename, content, tenant_id, domain_list)
+    document = await service.create_document(
+        file.filename, content, tenant_id, uuid.UUID(user_id), domain_list
+    )
 
     await AuditRepository(db).log_action(
         correlation_id=correlation_id,
@@ -123,9 +148,14 @@ async def upload_document(
 async def list_documents(
     db: AsyncSession = Depends(get_db),
 ) -> DocumentListResponse:
-    """Return every document the calling user's tenant can see, newest first (ADR-046)."""
+    """Return every document the calling user's tenant can see, newest first (ADR-046).
+
+    A document held for PII review (ADR-048) is the one exception —
+    only its own uploader sees it here until an admin approves it.
+    """
     tenant_id = uuid.UUID(get_current_tenant_id())
-    documents = await DocumentRepository(db).list_documents_for_tenant(tenant_id)
+    caller_id = uuid.UUID(get_current_user_id())
+    documents = await DocumentRepository(db).list_documents_for_tenant(tenant_id, caller_id)
     return DocumentListResponse(
         documents=[DocumentListItem.model_validate(doc) for doc in documents],
         correlation_id=get_correlation_id(),
@@ -140,7 +170,7 @@ async def get_document_status(
     """Report one document's progress through the ingestion pipeline, for polling."""
     tenant_id = uuid.UUID(get_current_tenant_id())
     document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
-    if document is None:
+    if document is None or not await _visible_to_caller(document, db):
         raise HTTPException(status_code=404, detail="Document not found")
 
     return DocumentStatusResponse(
@@ -171,7 +201,7 @@ async def get_document_content(
     """
     tenant_id = uuid.UUID(get_current_tenant_id())
     document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
-    if document is None or document.storage_path is None:
+    if document is None or document.storage_path is None or not await _visible_to_caller(document, db):
         raise HTTPException(status_code=404, detail="Document not found")
 
     try:
@@ -190,6 +220,48 @@ async def get_document_content(
     )
 
 
+@router.post("/{document_id}/submit-review", response_model=DocumentStatusResponse)
+async def submit_document_for_review(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> DocumentStatusResponse:
+    """Move a held document into the admin review queue (ADR-048).
+
+    Only the document's own uploader can do this — or an admin, for a
+    legacy document with no recorded uploader at all, so an orphaned
+    flagged document isn't permanently stuck with no one able to act on
+    it. Anyone else gets the same 404 shape this project already uses
+    for a document they have no business knowing exists.
+    """
+    tenant_id = uuid.UUID(get_current_tenant_id())
+    document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
+    if document is None or not await _visible_to_caller(document, db):
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.status != DocumentStatus.PENDING_REVIEW:
+        raise HTTPException(status_code=400, detail="Document is not awaiting review submission")
+
+    await DocumentRepository(db).submit_for_review(document_id)
+
+    await AuditRepository(db).log_action(
+        correlation_id=get_correlation_id(),
+        action="document_submitted_for_review",
+        resource_type="document",
+        resource_id=str(document_id),
+        extra_data={"filename": document.filename},
+        tenant_id=str(tenant_id),
+        user_id=get_current_user_id(),
+    )
+
+    return DocumentStatusResponse(
+        id=document.id,
+        status=DocumentStatus.IN_REVIEW,
+        processing_stage=document.processing_stage,
+        pii_detected=document.pii_detected,
+        failure_reason=document.failure_reason,
+        correlation_id=get_correlation_id(),
+    )
+
+
 @router.delete("/{document_id}", status_code=204)
 async def delete_document(
     document_id: uuid.UUID,
@@ -205,7 +277,7 @@ async def delete_document(
     """
     tenant_id = uuid.UUID(get_current_tenant_id())
     document = await DocumentRepository(db).get_document_for_tenant(document_id, tenant_id)
-    if document is None:
+    if document is None or not await _visible_to_caller(document, db):
         raise HTTPException(status_code=404, detail="Document not found")
 
     filename = document.filename

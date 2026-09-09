@@ -297,14 +297,15 @@ Azure AI Language's PII detection API. If PII is found:
 - Never embed raw PII into the vector database
 This is a legal and compliance requirement in enterprises.
 
-**5. Document-level access control**
-Multi-tenancy (row-level security) is not enough. Within a
-tenant, individual users should only retrieve chunks from
-documents they have explicit access to. Implement a permission
-filter that intersects retrieved chunks with the user's
-document ACL (access control list) before returning results.
-Store document permissions in PostgreSQL, check them at
-retrieval time — not after.
+**5. Tenant-level access control**
+Every document belongs to exactly one tenant; a document is
+visible to every user in that tenant, and to no one outside it.
+No finer-grained, per-document restriction within a tenant is
+required — tenant membership is the whole of document access
+control (see ADR-046, retired from the original per-document ACL
+requirement by ADR-047). Enforce this at retrieval time, not
+after: every chunk search, list, and lookup filters on the
+caller's tenant_id before results are ever ranked or returned.
 
 **6. Structured audit log**
 Every state-changing action (document upload, document delete,
@@ -332,7 +333,7 @@ sub-scope). A supervisor agent first classifies which domain(s) a
 question needs, using metadata already stored per document. It
 dispatches the question to one domain-scoped retrieval agent per
 relevant domain — each agent runs the existing hybrid search,
-reranking, and document-level ACL filter (requirement 5), but scoped
+reranking, and tenant-level access control (requirement 5), but scoped
 only to its own domain. A synthesis agent then merges the per-domain
 answers into a single response, reconciles citations, and flags it
 plainly if two domains disagree. Single-domain questions skip this
@@ -357,10 +358,11 @@ Conversations and their turns (raw question, condensed question,
 answer, cited sources, confidence score, domains used, correlation_id)
 are stored in PostgreSQL; the last few turns of an active conversation
 are cached in Redis so condensing does not pay a database round trip
-on every message. Document-level ACL (requirement 5) is re-checked on
+on every message. Tenant-level access control (requirement 5) is re-checked on
 every turn against the current retrieval, never inherited from an
-earlier turn in the same conversation — a permission change mid-thread
-takes effect immediately, and a stored past answer never grants future
+earlier turn in the same conversation — even though a user's own
+tenant never changes after signup, the documents visible within it can
+(uploads, deletions), so a stored past answer never grants future
 access.
 
 **11. Streamed answer generation with in-flight guardrail checks**

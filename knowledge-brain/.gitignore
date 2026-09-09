@@ -42,3 +42,8 @@ infra/terraform.tfvars
 # convention — I write the exact SQL, you run it yourself once against
 # your own database; the ADR is the durable record, not the file)
 scripts/*.sql
+
+# Graphify's generated codebase graph — regenerable local tooling
+# output (a knowledge graph over this repo, used to cut down how much
+# of the codebase Claude has to read per session), not source
+graphify-out/

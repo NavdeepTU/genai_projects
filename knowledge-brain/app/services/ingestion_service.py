@@ -4,7 +4,7 @@ from pathlib import Path
 
 from azure.core.exceptions import AzureError
 
-from app.core.blob_storage import upload_document
+from app.core.blob_storage import download_document, upload_document
 from app.core.circuit_breaker import CircuitOpenError
 from app.core.config import get_settings
 from app.models.document import Chunk, Document, DocumentStatus, ProcessingStage
@@ -36,7 +36,12 @@ class IngestionService:
         self.repository = repository
 
     async def create_document(
-        self, filename: str, content: bytes, tenant_id: uuid.UUID, domains: list[str] | None = None
+        self,
+        filename: str,
+        content: bytes,
+        tenant_id: uuid.UUID,
+        uploaded_by: uuid.UUID | None = None,
+        domains: list[str] | None = None,
     ) -> Document:
         """Record a new upload, owned by the uploader's tenant, and save its original file.
 
@@ -55,7 +60,7 @@ class IngestionService:
         whole upload — the file being viewable later is additive, not
         what this system exists to do.
         """
-        document = await self.repository.create_document(filename, tenant_id, domains)
+        document = await self.repository.create_document(filename, tenant_id, uploaded_by, domains)
 
         blob_name = f"{document.id}{Path(filename).suffix.lower()}"
         content_type = CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")
@@ -91,20 +96,56 @@ class IngestionService:
                 await self.repository.flag_for_review(document_id)
                 return
 
-            await self.repository.update_processing_stage(document_id, ProcessingStage.CHUNKING)
-            chunk_texts = chunk_text(text, settings.chunk_size, settings.chunk_overlap)
-
-            await self.repository.update_processing_stage(document_id, ProcessingStage.EMBEDDING)
-            embeddings = await embed_chunks(chunk_texts)
-
-            chunks = [
-                Chunk(document_id=document_id, chunk_index=i, text=chunk, embedding=embedding)
-                for i, (chunk, embedding) in enumerate(zip(chunk_texts, embeddings))
-            ]
-
-            await self.repository.update_processing_stage(document_id, ProcessingStage.SAVING)
-            await self.repository.save_chunks(chunks)
-            await self.repository.update_status(document_id, DocumentStatus.READY)
+            await self._chunk_embed_and_save(document_id, text)
         except Exception as exc:
             await self.repository.mark_failed(document_id, reason=f"{type(exc).__name__}: {exc}")
             raise
+
+    async def approve_and_process(self, document_id: uuid.UUID) -> None:
+        """Resume ingestion for a document an admin approved after PII review (ADR-048).
+
+        The route layer already checked the document was IN_REVIEW and
+        the caller a same-tenant admin before scheduling this — by the
+        time this runs, that decision is final. Nothing about the
+        original process_document call survives to reuse (its extracted
+        text was deliberately never persisted, exactly so PII wouldn't
+        sit around waiting), so this re-downloads the original file
+        Blob Storage has held since before the PII check ever ran
+        (ADR-044) and re-extracts from scratch. Skips the PII check
+        entirely — a human already reviewed this exact document and
+        chose to proceed, the explicit, audited override this whole
+        workflow exists to represent, not something to silently re-flag.
+        """
+        document = await self.repository.get_by_id(document_id)
+        if document is None or document.storage_path is None:
+            await self.repository.mark_failed(
+                document_id, reason="Original file is no longer available to re-process"
+            )
+            return
+
+        await self.repository.update_status(document_id, DocumentStatus.PROCESSING)
+        try:
+            await self.repository.update_processing_stage(document_id, ProcessingStage.EXTRACTING)
+            content = await download_document(document.storage_path)
+            text = extract_text(document.filename, content)
+            await self._chunk_embed_and_save(document_id, text)
+        except Exception as exc:
+            await self.repository.mark_failed(document_id, reason=f"{type(exc).__name__}: {exc}")
+            raise
+
+    async def _chunk_embed_and_save(self, document_id: uuid.UUID, text: str) -> None:
+        """Shared tail of both process_document and approve_and_process: chunk, embed, save, ready."""
+        await self.repository.update_processing_stage(document_id, ProcessingStage.CHUNKING)
+        chunk_texts = chunk_text(text, settings.chunk_size, settings.chunk_overlap)
+
+        await self.repository.update_processing_stage(document_id, ProcessingStage.EMBEDDING)
+        embeddings = await embed_chunks(chunk_texts)
+
+        chunks = [
+            Chunk(document_id=document_id, chunk_index=i, text=chunk, embedding=embedding)
+            for i, (chunk, embedding) in enumerate(zip(chunk_texts, embeddings))
+        ]
+
+        await self.repository.update_processing_stage(document_id, ProcessingStage.SAVING)
+        await self.repository.save_chunks(chunks)
+        await self.repository.update_status(document_id, DocumentStatus.READY)

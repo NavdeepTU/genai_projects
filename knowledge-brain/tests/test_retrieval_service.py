@@ -386,3 +386,122 @@ async def test_graph_context_node_excludes_snippet_from_a_different_tenant_refer
     result = await service._graph_context_node(state)
 
     assert result["graph_context"] == []
+
+
+class _RankedResult:
+    """Stands in for reranking's own return shape: chunk + relevance_score."""
+
+    def __init__(self, chunk: Chunk, relevance_score: float) -> None:
+        self.chunk = chunk
+        self.relevance_score = relevance_score
+
+
+class _FakeRetrievalRepository:
+    """Just enough of DocumentRepository for the graph to run end to end,
+    with no real database — this suite is testing the LangGraph wiring
+    itself (the retry loop), not retrieval's own search logic.
+    """
+
+    def __init__(self, chunk: Chunk) -> None:
+        self._chunk = chunk
+
+    async def find_similar_chunks(self, *args, **kwargs) -> list[Chunk]:
+        return [self._chunk]
+
+    async def find_by_keyword(self, *args, **kwargs) -> list[Chunk]:
+        return []
+
+    def detach(self, chunks: list[Chunk]) -> None:
+        pass
+
+    async def rollback(self) -> None:
+        pass
+
+    async def get_first_chunk_text(self, *args, **kwargs) -> None:
+        return None
+
+
+class _FakeGraphRepositoryNoRefs:
+    async def get_referenced_documents(self, document_id: str) -> list[str]:
+        return []
+
+
+async def test_query_graph_rewrites_once_when_reranking_stays_weak_then_stops_retrying():
+    """The actual compiled LangGraph, not just _should_retry in isolation: weak
+    reranking should trigger exactly one rewrite-and-retry loop (MAX_RETRIES=1),
+    then proceed regardless of the second pass's own score.
+    """
+    chunk = Chunk(document_id=uuid.uuid4(), chunk_index=0, text="weak result")
+    service = RetrievalService(_FakeRetrievalRepository(chunk), _FakeGraphRepositoryNoRefs())
+
+    weak = [_RankedResult(chunk, 0.1)]
+    still_weak = [_RankedResult(chunk, 0.2)]
+
+    with (
+        patch("app.services.retrieval_service.embed_chunks", new=AsyncMock(return_value=[[0.1] * 1536])),
+        patch("app.services.retrieval_service.check_moderation", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.check_jailbreak", new=AsyncMock(return_value=False)),
+        patch(
+            "app.services.retrieval_service.rewrite_query",
+            new=AsyncMock(return_value="rewritten question"),
+        ) as mock_rewrite,
+        patch(
+            "app.services.retrieval_service.rerank_chunks",
+            new=AsyncMock(side_effect=[weak, still_weak]),
+        ) as mock_rerank,
+    ):
+        state = await service._prepare_for_generation("original question", "user-1", str(uuid.uuid4()))
+
+    mock_rewrite.assert_awaited_once()
+    assert mock_rerank.await_count == 2
+    assert state["retry_count"] == 1
+    assert state["question"] == "rewritten question"
+    assert state["blocked"] is False
+
+
+async def test_query_graph_does_not_retry_when_the_first_pass_reranking_is_already_strong():
+    chunk = Chunk(document_id=uuid.uuid4(), chunk_index=0, text="strong result")
+    service = RetrievalService(_FakeRetrievalRepository(chunk), _FakeGraphRepositoryNoRefs())
+
+    strong = [_RankedResult(chunk, 0.9)]
+
+    with (
+        patch("app.services.retrieval_service.embed_chunks", new=AsyncMock(return_value=[[0.1] * 1536])),
+        patch("app.services.retrieval_service.check_moderation", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.check_jailbreak", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.rewrite_query", new=AsyncMock()) as mock_rewrite,
+        patch(
+            "app.services.retrieval_service.rerank_chunks", new=AsyncMock(return_value=strong)
+        ) as mock_rerank,
+    ):
+        state = await service._prepare_for_generation("original question", "user-1", str(uuid.uuid4()))
+
+    mock_rewrite.assert_not_awaited()
+    assert mock_rerank.await_count == 1
+    assert state["retry_count"] == 0
+    assert state["question"] == "original question"
+
+
+async def test_query_graph_never_retries_when_reranking_itself_is_unavailable():
+    """A weak *fallback* score (0.0, no real reranker signal) must not trigger
+    a retry — there's nothing to judge, and one degraded pass shouldn't pile
+    a second one on top of it (see _should_retry's own docstring).
+    """
+    chunk = Chunk(document_id=uuid.uuid4(), chunk_index=0, text="fallback result")
+    service = RetrievalService(_FakeRetrievalRepository(chunk), _FakeGraphRepositoryNoRefs())
+
+    with (
+        patch("app.services.retrieval_service.embed_chunks", new=AsyncMock(return_value=[[0.1] * 1536])),
+        patch("app.services.retrieval_service.check_moderation", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.check_jailbreak", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.rewrite_query", new=AsyncMock()) as mock_rewrite,
+        patch(
+            "app.services.retrieval_service.rerank_chunks",
+            new=AsyncMock(side_effect=CircuitOpenError("reranker is down")),
+        ),
+    ):
+        state = await service._prepare_for_generation("original question", "user-1", str(uuid.uuid4()))
+
+    mock_rewrite.assert_not_awaited()
+    assert state["reranker_unavailable"] is True
+    assert state["retry_count"] == 0
