@@ -64,6 +64,7 @@ jobs:
           APIM_GATEWAY_SECRET: test-key
           LANGSMITH_API_KEY: test-key
           REDIS_URL: redis://localhost:6379/0
+          AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;
         run: uv run pytest
 
       - name: Azure login (OIDC, no stored secret)
