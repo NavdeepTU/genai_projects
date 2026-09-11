@@ -4,10 +4,10 @@
 # is what stands up the real thing.
 
 resource "azurerm_storage_account" "documents" {
-  name                     = replace("${var.project_name}${var.environment}docs", "-", "")
-  resource_group_name      = azurerm_resource_group.main.name
-  location                 = azurerm_resource_group.main.location
-  account_tier             = "Standard"
+  name                = replace("${var.project_name}${var.environment}docs", "-", "")
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  account_tier        = "Standard"
   # LRS (locally-redundant storage): one data centre, three copies — the
   # cheapest redundancy tier, and the right call for a project without a
   # cross-region durability requirement. Same reasoning already applied to
@@ -18,11 +18,11 @@ resource "azurerm_storage_account" "documents" {
   # account — this one or any added later — can ever be granted
   # anonymous public access, even by mistake.
   allow_nested_items_to_be_public = false
-  tags                             = local.common_tags
+  tags                            = local.common_tags
 }
 
 resource "azurerm_storage_container" "documents" {
-  name                  = "documents"
+  name                 = "documents"
   storage_account_name = azurerm_storage_account.documents.name
   # private: no anonymous public access at all. Every document is served
   # through the backend's own permission-checked route

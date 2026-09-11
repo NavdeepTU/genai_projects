@@ -67,3 +67,9 @@ output "apim_gateway_url" {
   description = "The public URL meant to be used to reach the backend. The Container App's own direct URL still works too (Consumption tier has no static IP to restrict to — see ADR-026); the gateway secret header is the one real lock, not network isolation."
   value       = "${azurerm_api_management.main.gateway_url}/${azurerm_api_management_api.backend.path}"
 }
+
+output "application_insights_connection_string" {
+  description = "Needed later if the backend's own circuit breakers ever alert through Application Insights directly (Enterprise Requirement 8), not just APIM's gateway logs."
+  value       = azurerm_application_insights.main.connection_string
+  sensitive   = true
+}

@@ -37,6 +37,7 @@ infra/*.tfstate
 infra/*.tfstate.*
 infra/terraform.tfvars
 !infra/terraform.tfvars.example
+infra/tfplan*
 
 # One-off, hand-run schema migrations (this project's no-Alembic
 # convention — I write the exact SQL, you run it yourself once against

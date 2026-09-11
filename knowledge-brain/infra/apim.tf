@@ -51,11 +51,11 @@ resource "azurerm_key_vault_access_policy" "apim" {
 }
 
 resource "azurerm_api_management_api" "backend" {
-  name                = "knowledge-brain-backend"
-  resource_group_name = azurerm_resource_group.main.name
-  api_management_name = azurerm_api_management.main.name
-  revision            = "1"
-  display_name        = "Knowledge Brain Backend"
+  name                  = "knowledge-brain-backend"
+  resource_group_name   = azurerm_resource_group.main.name
+  api_management_name   = azurerm_api_management.main.name
+  revision              = "1"
+  display_name          = "Knowledge Brain Backend"
   path                  = "v1"
   protocols             = ["https"]
   subscription_required = false

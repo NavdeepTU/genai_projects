@@ -300,8 +300,12 @@ implement it this way — never via environment variables
 containing raw values.
 
 **3. Correlation IDs on every request**
-Every request entering the system gets a unique correlation_id
-at the APIM layer. It must propagate through every service call,
+Every request entering the system gets a unique correlation_id —
+generated in the backend's own middleware (reusing an inbound
+X-Correlation-ID header if the caller already sent one), not at the
+APIM layer, which has no logic of its own to generate anything; APIM
+just forwards whatever header arrives, and now also logs it (see the
+APIM request/response logging feature). It must propagate through every service call,
 every database query log, and every LLM call. Every log line
 must include: correlation_id, tenant_id, user_id, service_name,
 level, message. No plain text logs anywhere — all logs are JSON.

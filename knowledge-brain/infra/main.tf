@@ -39,7 +39,7 @@ resource "azurerm_log_analytics_workspace" "main" {
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   sku                 = "PerGB2018"
-  retention_in_days    = 30
+  retention_in_days   = 30
   tags                = local.common_tags
 }
 
@@ -59,8 +59,8 @@ resource "azurerm_postgresql_flexible_server" "main" {
   administrator_login    = var.postgres_admin_username
   administrator_password = var.postgres_admin_password
   storage_mb             = 32768
-  sku_name                = "B_Standard_B1ms"
-  tags                    = local.common_tags
+  sku_name               = "B_Standard_B1ms"
+  tags                   = local.common_tags
 
   # Azure assigns/manages the availability zone dynamically after creation;
   # without this, Terraform keeps trying to "correct" a value it shouldn't
@@ -181,7 +181,7 @@ resource "azurerm_container_registry" "main" {
 resource "azurerm_role_assignment" "acr_pull" {
   scope                = azurerm_container_registry.main.id
   role_definition_name = "AcrPull"
-  principal_id          = azurerm_user_assigned_identity.backend.principal_id
+  principal_id         = azurerm_user_assigned_identity.backend.principal_id
 }
 
 resource "azurerm_container_app" "backend" {
@@ -330,7 +330,7 @@ resource "azurerm_container_app" "backend" {
   ingress {
     external_enabled = true
     target_port      = 8000
-    transport         = "http"
+    transport        = "http"
 
     traffic_weight {
       percentage      = 100
