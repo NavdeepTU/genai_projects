@@ -32,6 +32,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # tests/test_middleware.py deliberately exercises real caching behavior
+      # against app.core.redis_cache's real client (not a mock) — same
+      # integration-testing philosophy as the real Postgres database above,
+      # not a placeholder-URL situation. Without a real Redis here, those
+      # real calls fail, trip the shared circuit_breaker singleton open, and
+      # it stays open for the rest of the run — silently failing every later
+      # test that goes through the same breaker, mocked or not.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
