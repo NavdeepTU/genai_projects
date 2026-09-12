@@ -118,8 +118,8 @@ jobs:
           echo "Status: $status"
           cat response.json
           if [ "$status" != "401" ]; then
-            echo "Expected 401 (missing X-User-Id — proves the request reached the app through the gateway), got $status"
+            echo "Expected 401 (no session cookie — proves the request reached the app through the gateway), got $status"
             exit 1
           fi
-          grep -q "X-User-Id header is required" response.json || \
+          grep -q "Authentication required" response.json || \
             (echo "Got a 401, but not for the expected reason — the gateway check itself may be failing" && exit 1)
