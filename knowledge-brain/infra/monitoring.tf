@@ -53,14 +53,23 @@ resource "azurerm_api_management_logger" "app_insights" {
 # dependency edges are whole-resource, not per-attribute: referencing
 # .name would make this resource depend on that entire API resource,
 # which itself depends on azurerm_container_app.backend (its service_url
-# reads the container app's FQDN) — and that resource already has a
+# reads the container app's FQDN) — and that resource already had a
 # pending, unrelated change sitting in main.tf (the Blob Storage env
-# vars from an earlier, still-unapplied session), which would in turn
-# drag in creating the storage account just to turn on logging. The
-# literal string is exactly what that API resource's own `name`
-# argument is set to in apim.tf — stable, not Azure-generated — so this
-# doesn't lose anything real, only the (here, false) promise of staying
-# in sync if that name ever changed.
+# vars from an earlier, since-applied session) when this was written,
+# which would in turn have dragged in creating the storage account just
+# to turn on logging. The literal string is exactly what that API
+# resource's own `name` argument is set to in apim.tf — stable, not
+# Azure-generated.
+#
+# The real cost of that choice, hit live: a literal has no implicit
+# ordering either. Recreating both azurerm_api_management_api.backend
+# and this resource in the same apply once raced — Terraform started
+# creating this diagnostic before the API resource's own destroy+create
+# cycle had finished, and Azure rejected it with "Api not found" for
+# the ~1 minute the old API was gone and the new one wasn't ready yet.
+# depends_on restores correct ordering without reintroducing the
+# argument-level reference (and the storage entanglement it caused) —
+# it only affects apply order, not this resource's own values.
 resource "azurerm_api_management_api_diagnostic" "backend" {
   identifier               = "applicationinsights"
   resource_group_name      = azurerm_resource_group.main.name
@@ -94,5 +103,8 @@ resource "azurerm_api_management_api_diagnostic" "backend" {
     headers_to_log = ["X-Correlation-ID"]
   }
 
-  depends_on = [azurerm_api_management_logger.app_insights]
+  depends_on = [
+    azurerm_api_management_logger.app_insights,
+    azurerm_api_management_api.backend,
+  ]
 }

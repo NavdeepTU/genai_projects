@@ -79,6 +79,12 @@ variable "azure_language_key" {
   sensitive   = true
 }
 
+variable "langsmith_api_key" {
+  description = "LangSmith API key used to trace every OpenAI/Voyage call. No default, deliberately — never checked into git."
+  type        = string
+  sensitive   = true
+}
+
 variable "apim_publisher_name" {
   description = "Organization name shown on API Management's developer-facing pages (docs, notification emails). Cosmetic only, not a secret."
   type        = string

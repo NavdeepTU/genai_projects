@@ -170,6 +170,13 @@ resource "azurerm_key_vault_secret" "azure_language_key" {
   depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
 }
 
+resource "azurerm_key_vault_secret" "langsmith_api_key" {
+  name         = "langsmith-api-key"
+  value        = var.langsmith_api_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_key_vault_access_policy.terraform_admin]
+}
+
 resource "azurerm_container_registry" "main" {
   name                = replace("${var.project_name}${var.environment}acr", "-", "")
   resource_group_name = azurerm_resource_group.main.name
@@ -242,6 +249,12 @@ resource "azurerm_container_app" "backend" {
     identity            = azurerm_user_assigned_identity.backend.id
   }
 
+  secret {
+    name                = "langsmith-api-key"
+    key_vault_secret_id = azurerm_key_vault_secret.langsmith_api_key.versionless_id
+    identity            = azurerm_user_assigned_identity.backend.id
+  }
+
   template {
     # 0, not 1: lets the backend scale to zero after 5 minutes of no
     # traffic (Container Apps' default cool-down period), eliminating
@@ -310,6 +323,30 @@ resource "azurerm_container_app" "backend" {
       env {
         name        = "APIM_GATEWAY_SECRET"
         secret_name = "apim-gateway-secret"
+      }
+
+      env {
+        name        = "LANGSMITH_API_KEY"
+        secret_name = "langsmith-api-key"
+      }
+
+      # No real Azure Cache for Redis provisioned (deliberate — see the
+      # session that discovered this app had been crash-looping on
+      # Settings validation because this field was missing entirely).
+      # redis_url is required but Settings has no way to express
+      # "optional, and the app should behave as if this is unset" — every
+      # real call in app/core/redis_cache.py already wraps its Redis
+      # calls in a broad except and falls back to "cache miss" or a
+      # no-op, so pointing this at a host nothing is listening on costs
+      # nothing and breaks nothing: conversation-history and identity
+      # caching just always pay the database round trip they were built
+      # to skip, exactly as if this project's Redis feature didn't
+      # exist yet. Revisit only if production traffic ever makes that
+      # round trip cost worth ~$16/month for a real Azure Cache for
+      # Redis instance.
+      env {
+        name  = "REDIS_URL"
+        value = "redis://redis-not-provisioned:6379/0"
       }
 
       # Not a secret — the backend authenticates against this URL with its
