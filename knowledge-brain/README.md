@@ -223,7 +223,11 @@ and why it was made that way.
   [`ADR-025`](docs/adr/ADR-025-ci-cd-first-real-run.md) (three more
   real bugs — a missing CI test database, a GitHub OIDC subject claim
   mismatch, and an Azure revision-naming limit — found only once the
-  pipeline actually ran).
+  pipeline actually ran). Later silently regressed for about two
+  weeks (new required settings never added to the workflow's test
+  env) — every deploy in that window failed at the test step before
+  build/deploy ever ran, found and fixed in the same session that
+  built API gateway request/response logging below.
 - **API Management gateway** — Azure API
   Management sits in front of the backend, importing its API definition
   straight from FastAPI's own OpenAPI spec and stamping a Key
@@ -235,8 +239,10 @@ and why it was made that way.
   this project stays on the Consumption tier deliberately, so both stay
   out of scope by choice, not by gap — see
   [`ADR-026`](docs/adr/ADR-026-api-management-gateway.md). Structured
-  request/response logging into Application Insights is unrelated to
-  tier and remains genuinely unbuilt.
+  request/response logging into Application Insights — metadata only
+  (method, path, status, latency, the correlation-ID header; never a
+  request/response body), 100% sampling — is now built and verified
+  live, unrelated to tier and the last open piece of this feature.
 - **Frontend** *(all five planned pages built — see below)* — a
   separate Next.js project (`frontend/`, Tailwind, Shadcn/UI on Base
   UI) with a shared shell (navigation, dark mode, a responsive mobile
@@ -385,6 +391,14 @@ and why it was made that way.
   with no formal guarantee it produces a faithful rewrite rather than a
   subtly wrong one, and nothing today would notice if it did. See
   `ADR-042`.
+- No real Azure Cache for Redis is provisioned in the actual
+  deployment — a deliberate cost call (~$16/month for the cheapest
+  tier, not worth it yet), not an oversight. Production's `REDIS_URL`
+  points at nothing reachable, so conversation-history and identity
+  caching always take their designed fallback path there: every
+  lookup pays the database round trip they were built to skip, same
+  as before either feature existed. Revisit only if real traffic ever
+  makes that round trip cost worth the monthly price.
 - Streaming's injection check can only retract an already-streamed
   answer, not prevent it from being shown at all — it needs the
   *complete* answer to judge whether retrieved content hijacked it,

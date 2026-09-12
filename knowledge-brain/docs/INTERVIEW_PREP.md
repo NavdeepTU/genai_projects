@@ -4017,6 +4017,59 @@ anywhere, left over from an earlier version of the upload picker.
 
 ---
 
+## Feature 39: API Gateway Request/Response Logging
+
+**What does this feature do, in one sentence?**
+Every request that reaches the API gateway is now logged into Application Insights — method, path, status code, latency, and one correlation-ID header — closing the last open piece of the API Gateway requirement (versioning and the gateway-secret check were already done).
+
+```mermaid
+flowchart TD
+    C["Client request"] --> APIM["APIM: gateway-secret policy,\nversion routing (unchanged)"]
+    APIM -->|"forwards; backend sets\nX-Correlation-ID on its response"| BACKEND["Backend"]
+    APIM -->|"diagnostic setting logs:\nmethod, path, status, latency,\nthe X-Correlation-ID header —\nnever a request/response body"| AI[("Application Insights")]
+```
+
+**Why metadata only, never request/response bodies?**
+Two real reasons, not one theoretical one. Bodies would mean document text and query questions — real, potentially sensitive content — sitting in a third system nothing else in this project writes to, for no benefit this feature actually needs. It's also the cheaper choice: Azure Monitor's ingestion is billed per GB, and a metadata-only entry is a couple KB, keeping this comfortably inside the free monthly allowance at this project's real traffic; full bodies would be the first thing here to actually cost money.
+
+**Why is `api_name` a literal string instead of a reference to the actual API resource, when a reference would obviously stay in sync if that resource were ever renamed?**
+A live reference (`azurerm_api_management_api.backend.name`) creates a real Terraform dependency edge on that *entire* resource — not just its name — which meant this diagnostic would be dragged into any unrelated pending change already sitting on that resource (in practice, a Blob Storage deployment from a much earlier, unrelated session that had never actually been applied). The literal string is exactly what that resource's own `name` argument is already set to — a stable, deliberately chosen identifier, not something Azure generates — so nothing real is lost by not tracking it live. The real cost showed up later: a literal also means no *implicit ordering* between the two resources, which caused a genuine race the first time both needed recreating in the same apply.
+
+*Further reading: [Terraform's own documentation on resource dependencies](https://developer.hashicorp.com/terraform/language/resources/behavior#resource-dependencies) — covers exactly this distinction: implicit dependencies come from referencing another resource's attribute, and removing that reference removes the ordering guarantee along with the coupling.*
+
+---
+
+## Feature 40: Finding and Fixing a Two-Week Silent Deployment Failure
+
+**What does this feature do, in one sentence?**
+Not a feature — a real production incident, found while deploying Feature 39: the actual Azure deployment had been silently broken for about two weeks, meaning every feature built and marked "complete" in that window — multi-tenancy, PII review, Alembic, this session's own domain taxonomy — had only ever been verified against local dev, never the real cloud environment it was supposedly shipped to.
+
+```mermaid
+flowchart TD
+    A["CI fails at test collection —\n2 required settings never added\nto the test workflow's env"] --> B["Fixed: CI passes,\nbuild+push+deploy actually runs"]
+    B --> C["Real container crashes on\nthe SAME missing settings —\nnever wired into production either"]
+    C --> D["Fixed: container healthy, but\nAzure was still quietly serving\na 2-week-old revision underneath"]
+    D --> E["The gateway's route list is a\none-time import snapshot —\nneeds a manual resync"]
+    E --> F["Resyncing silently deletes the\nAPI's policy + logging sub-objects —\nAzure's model, not Terraform's"]
+    F --> G["Recreated both — but the\npipeline's own smoke test was\nchecking a message from before\nreal login even existed"]
+    G --> H["Fixed — but the Docker image\nnever even included the\nmigration tool"]
+    H --> I["Fixed — but the real database\nstill had a partial schema from\nbefore multi-tenancy existed"]
+    I --> J["Dropped the stale tables, ran\nthe real migration — first true\nproduction request succeeds,\nstart to finish"]
+```
+
+**Why did all six of these stay invisible for two weeks instead of surfacing immediately?**
+Because every verification step in this project's history — every "Complete," every "Verified live" — had only ever run against local dev, which always had a working `.env`, a real local Postgres, a real local Redis or Azurite. The one place that would have actually caught this, the CI pipeline, broke at the exact same time as the first missing setting and nobody was watching a red pipeline the way they'd notice a broken feature. A red CI badge doesn't page anyone; a 500 in front of a real user does — and nothing had sent a real user's request to this deployment in two weeks either.
+
+**Why did fixing one Terraform-managed resource delete two others Terraform never mentioned?**
+Terraform's plan only reasons about resources it tracks and the argument-level dependencies between them. Azure API Management treats a policy and a diagnostic setting as genuine sub-objects of the API they're attached to — deleted automatically, at the Azure level, the instant that parent API is deleted — in a way Terraform's own state has no visibility into until its *next* refresh notices they're simply gone. The lesson generalizes past this one project: any managed service with its own internal object hierarchy can have cascade behavior a general-purpose IaC tool's dependency graph doesn't model, and `-replace` on a resource with real children is exactly the situation to expect it in.
+
+**How did you actually localize which of six stacked layers was broken at each step, instead of guessing?**
+By getting one concrete, authoritative signal before moving on to the next hypothesis, every time — the real HTTP status and body, the backend's own `/openapi.json` fetched directly (bypassing the gateway entirely) to prove what code was actually running, the container's real `latestRevision` vs. `latestReadyRevision` fields to prove whether a deploy had truly gone live, the actual Python traceback from the container's own logs, and finally the real Postgres error naming the exact missing relation. Every one of those was a real, checkable fact, not an assumption carried forward from the previous fix.
+
+*Further reading: [The Twelve-Factor App, "Dev/prod parity"](https://12factor.net/dev-prod-parity) — the industry-standard articulation of exactly the gap this incident lived in: keeping development, staging, and production as similar as possible, so a difference between them can't hide a real bug for two weeks.*
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

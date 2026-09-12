@@ -45,17 +45,19 @@ and lines that are still correct are left untouched.
 - Identity-lookup caching (Redis, 60s TTL, active invalidation on logout)
 - Federated-retrieval failure-isolation fix (Voyage's own errors, not just an already-open circuit)
 - Domain taxonomy — admin-managed domains replace free-text tags, fixing "HR" vs "Human Resources" vocabulary drift
+- APIM request/response logging into Application Insights (metadata only, 100% sampling, verified live)
+- Fixed a two-week silent deployment failure discovered while deploying the logging feature above: CI/CD had been failing at test collection since 2026-08-29 (missing settings, missing Redis service container), the real Container App was crash-looping on the same missing settings once CI was fixed, the API gateway's route catalog was a stale one-time import, the Docker image never included the migration tool, and the real Azure Postgres database still had a partial, pre-multi-tenancy schema. Every feature built in that two-week window — multi-tenancy, PII review, Alembic, this session's own domain taxonomy — had only ever been verified against local dev; a real end-to-end request now succeeds against the real deployment for the first time since 2026-08-29.
 
 ## Pending
 
-- APIM request/response logging into Application Insights (unrelated to the Consumption-tier trade-offs, which are accepted permanently)
 - Postgres cost fix — a start/stop script pair for the Azure Postgres server; saves nothing until the 12-month free-tier grant expires, so deliberately low priority
 - Widen the remaining narrow-catch safe-wrappers in `retrieval_service.py` (query rewriting, graph-context lookup) to match the reranking fix — same shape of gap, not yet the demonstrated failure
+- A real Azure Cache for Redis was deliberately not provisioned (~$16/month, not worth it yet) — production `REDIS_URL` is a placeholder that always fails open, so conversation-history and identity caching currently pay a database round trip in production, same as before either feature existed
 
 ## Time to finish
 
-**~98% of the tracked build (weighted by real effort) is done.** What's
+**~99% of the tracked build (weighted by real effort) is done.** What's
 left is small, maintenance-shaped infrastructure and reliability work,
-not a feature. Rough remaining effort: ~2 hours. At 3–4 hours/day,
+not a feature. Rough remaining effort: ~1–2 hours. At 3–4 hours/day,
 well under 1 working day left — same standing caveat as always: a
 genuinely new feature request would grow this number again.

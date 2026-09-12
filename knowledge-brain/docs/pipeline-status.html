@@ -1669,6 +1669,62 @@
     <p class="caveat">A <code>/code-review</code> pass found and fixed four issues the same session: two response models missing <code>correlation_id</code>, two repository methods missing error handling, and one unused frontend helper.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>APIM request/response logging <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">closes the last open piece of Enterprise Requirement 1 (API Gateway)</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Application Insights + APIM logger</span>
+        <span class="path mono">reuses the existing Log Analytics workspace</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Metadata-only diagnostic</span>
+        <span class="path mono">100% sampling, no bodies, X-Correlation-ID captured</span>
+      </div>
+    </div>
+
+    <p class="caveat">Verified live: a real request through the gateway shows up in Application Insights with its status code, latency, and correlation ID — no request/response body ever captured.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Two-week silent deployment failure <span class="status-pill done" style="margin-left: 0.3rem;">Fixed</span></h2>
+      <span class="count">found while deploying the logging feature above — every feature built since 2026-08-29 had never actually reached the real Azure deployment</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Fixed</span>
+        <span class="label">CI/CD pipeline</span>
+        <span class="path mono">2 missing settings + 1 missing Redis service container</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Fixed</span>
+        <span class="label">Real deployment</span>
+        <span class="path mono">same missing settings, plus a stale gateway route catalog</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Fixed</span>
+        <span class="label">Real database</span>
+        <span class="path mono">partial pre-multi-tenancy schema, migration tool missing from the image</span>
+      </div>
+    </div>
+
+    <p class="caveat">Verified live end to end: a real request through the real gateway now returns a real 200 from a real, freshly-migrated database — the first time this has been true since 2026-08-29.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
     <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, multi-tenancy, and the PII human review workflow. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>

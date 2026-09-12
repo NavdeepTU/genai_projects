@@ -288,8 +288,8 @@ offers doesn't actually enforce "per tenant," so no rate limiting is
 implemented, permanently, on this tier. Both are accepted trade-offs
 for this project, not open work — see `ADR-026`. APIM still handles:
 - API versioning (/v1/, /v2/)
-- Request/response logging (not yet wired up — unrelated to tier,
-  genuinely still pending)
+- Request/response logging — Application Insights, metadata only (no
+  bodies), 100% sampling, done and verified live
 - Auth token validation before traffic reaches the backend
 
 **2. Managed Identity for all secrets**
