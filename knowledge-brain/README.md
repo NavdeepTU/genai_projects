@@ -725,5 +725,6 @@ for picking the project back up after time away, and for interview prep.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the system actually works right now, with diagrams — always current, never aspirational |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | A dated history log of every session: what was built, what was hard, what's next |
 | [`docs/INTERVIEW_PREP.md`](docs/INTERVIEW_PREP.md) | A plain-language study sheet — the Q&A behind every major decision, meant to be reviewed before an actual interview |
+| [`docs/INTERVIEW_STORY.md`](docs/INTERVIEW_STORY.md) | The one-day version of the above — the whole project as a spoken story: architecture end to end, the decisions that shaped it, the bugs worth telling, and a cheat sheet of numbers; read the day before an interview |
 | [`docs/adr/`](docs/adr/) | One Architecture Decision Record per significant choice: what was considered, what was picked, and why |
 | [`docs/pipeline-status.html`](docs/pipeline-status.html) | A visual, at-a-glance dashboard of what's built vs. pending |
