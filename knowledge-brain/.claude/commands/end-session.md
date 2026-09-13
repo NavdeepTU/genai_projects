@@ -55,4 +55,10 @@ Close out the current working session on this project:
    repository URL first.
 10. Confirm the commit and push actually happened by checking `git status`
     and `git log` — don't assume.
-11. Give a short summary (5–10 lines) of what was updated and pushed.
+11. If this session involved making changes against the real Azure
+    deployment and the Postgres server was started for that reason,
+    remind me to run `./scripts/db.sh stop` now that the session's
+    ending, so it isn't left running (and billing) until the next one.
+    Don't run this yourself; per CLAUDE.md's rule on external tools, I
+    run it.
+12. Give a short summary (5–10 lines) of what was updated and pushed.

@@ -3930,13 +3930,14 @@ hold that promise on its own terms, not only because a lower layer
 happens to catch everything first.
 
 **Is every safety net like this in the codebase fixed now?**
-No, and that's worth being direct about rather than implying broader
-coverage than what was actually checked. This fix closed the one
-specific, demonstrated gap — reranking. A few other safe-wrappers in
-this same file (query rewriting, graph-context lookup) still only
-catch `CircuitOpenError`. They weren't the named, tested failure; widening
-them wasn't in scope for this pass, and is flagged as a real, separate
-follow-up rather than assumed fixed by association.
+At the time this fix landed, no — it closed the one specific,
+demonstrated gap (reranking) and named two more of the same shape
+(query rewriting, graph-context lookup) as a deliberate follow-up
+rather than assuming they were fixed by association. That follow-up
+has since been done — see Feature 41 — so as of this writing, every
+external-call safe-wrapper in the query pipeline catches both "the
+breaker is already open" and "this call just failed for the first
+time."
 
 *Further reading: [Google's Site Reliability Engineering book, "Addressing Cascading Failures"](https://sre.google/sre-book/addressing-cascading-failures/) — covers exactly this shape of problem: one component's failure propagating through a system that fans work out concurrently, and why isolating it requires the failure to actually be caught, not just anticipated in one place.*
 
@@ -4067,6 +4068,34 @@ Terraform's plan only reasons about resources it tracks and the argument-level d
 By getting one concrete, authoritative signal before moving on to the next hypothesis, every time — the real HTTP status and body, the backend's own `/openapi.json` fetched directly (bypassing the gateway entirely) to prove what code was actually running, the container's real `latestRevision` vs. `latestReadyRevision` fields to prove whether a deploy had truly gone live, the actual Python traceback from the container's own logs, and finally the real Postgres error naming the exact missing relation. Every one of those was a real, checkable fact, not an assumption carried forward from the previous fix.
 
 *Further reading: [The Twelve-Factor App, "Dev/prod parity"](https://12factor.net/dev-prod-parity) — the industry-standard articulation of exactly the gap this incident lived in: keeping development, staging, and production as similar as possible, so a difference between them can't hide a real bug for two weeks.*
+
+---
+
+## Feature 41: Closing the Remaining Failure-Isolation Gaps
+
+**What does this feature do, in one sentence?**
+Closes the two follow-up gaps Feature 37 named but deliberately left open — query rewriting's OpenAI call and graph-context lookup's Neo4j call now catch a fresh vendor failure too, not just an already-open circuit breaker.
+
+```mermaid
+flowchart TD
+    RW["Query-rewrite call to OpenAI"] -->|"breaker already open"| RWO["CircuitOpenError"]
+    RW -->|"fresh failure, e.g.\na rate limit"| RWR["OpenAI's own\nraw exception"]
+    RWO --> RWC["_rewrite_node now\ncatches both"]
+    RWR --> RWC
+    RWC --> RWF["Retry with the same\nquestion, unchanged"]
+
+    GC["Graph-lookup call to Neo4j"] -->|"breaker already open"| GCO["CircuitOpenError"]
+    GC -->|"fresh failure, e.g. the\ndatabase is unreachable"| GCR["Neo4j driver's own\nraw exception"]
+    GCO --> GCC["_fetch_graph_context_safely\nnow catches both"]
+    GCR --> GCC
+    GCC --> GCF["Answer generates without\nrelated-document context"]
+```
+
+**Why was this left open in Feature 37 instead of just fixed at the same time?**
+Feature 37 fixed the one gap that had actually been demonstrated live — Voyage's real rate limit, hit mid-verification. These two were the same *shape* of bug, spotted by inspection, but had never actually caused an observed failure. Naming them as a follow-up instead of quietly fixing them by association keeps "fixed" meaning something specific was tested, not "this general category of bug is now assumed handled everywhere it might exist."
+
+**Why does the Neo4j fix need a different exception than the OpenAI one, when both are "catch the vendor's own error alongside CircuitOpenError"?**
+OpenAI's SDK raises one exception class for anything that can go wrong. Neo4j's driver splits into two unrelated-looking families instead — one for the database rejecting a query, another for not being able to reach it at all — with no single name most people would guess covers both. They do share one real common ancestor in the driver's own exception hierarchy, though, so catching that one base class covers every kind of Neo4j failure, present and future, without hand-maintaining two names at this call site.
 
 ---
 

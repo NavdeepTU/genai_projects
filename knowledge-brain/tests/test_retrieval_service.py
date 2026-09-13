@@ -1,6 +1,7 @@
 import uuid
 from unittest.mock import AsyncMock, patch
 
+from neo4j.exceptions import ServiceUnavailable
 from openai import OpenAIError
 from voyageai.error import RateLimitError
 
@@ -389,6 +390,32 @@ async def test_graph_context_node_excludes_snippet_from_a_different_tenant_refer
     assert result["graph_context"] == []
 
 
+class _FakeGraphRepositoryRaising:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def get_referenced_documents(self, document_id: str) -> list[str]:
+        raise self._error
+
+
+async def test_fetch_graph_context_safely_degrades_gracefully_on_a_raw_neo4j_error_not_just_circuit_open():
+    """Same gap as Feature 27's Voyage fix (docs/INTERVIEW_PREP.md): a fresh Neo4j
+    failure (e.g. the database being unreachable) raises the driver's own
+    exception, not CircuitOpenError, until the breaker has actually opened.
+    _fetch_graph_context_safely must degrade the same way for both, not just
+    the already-open-circuit case.
+    """
+    service = RetrievalService(
+        repository=None,
+        graph_repository=_FakeGraphRepositoryRaising(ServiceUnavailable("neo4j is unreachable")),
+    )
+
+    referenced_ids, unavailable = await service._fetch_graph_context_safely("some-document-id")
+
+    assert referenced_ids == []
+    assert unavailable is True
+
+
 class _RankedResult:
     """Stands in for reranking's own return shape: chunk + relevance_score."""
 
@@ -480,6 +507,37 @@ async def test_query_graph_does_not_retry_when_the_first_pass_reranking_is_alrea
     mock_rewrite.assert_not_awaited()
     assert mock_rerank.await_count == 1
     assert state["retry_count"] == 0
+    assert state["question"] == "original question"
+
+
+async def test_query_graph_retries_with_the_same_question_on_a_raw_openai_error_not_just_circuit_open():
+    """Same gap as Feature 27's Voyage fix (docs/INTERVIEW_PREP.md): a fresh OpenAI
+    failure (e.g. a rate limit) raises OpenAI's own exception, not CircuitOpenError,
+    until the breaker has actually opened. _rewrite_node must degrade the same way
+    for both, not just the already-open-circuit case — falling back to retrying
+    the same question rather than crashing the whole pipeline.
+    """
+    chunk = Chunk(document_id=uuid.uuid4(), chunk_index=0, text="weak result")
+    service = RetrievalService(_FakeRetrievalRepository(chunk), _FakeGraphRepositoryNoRefs())
+
+    weak = [_RankedResult(chunk, 0.1)]
+
+    with (
+        patch("app.services.retrieval_service.embed_chunks", new=AsyncMock(return_value=[[0.1] * 1536])),
+        patch("app.services.retrieval_service.check_moderation", new=AsyncMock(return_value=False)),
+        patch("app.services.retrieval_service.check_jailbreak", new=AsyncMock(return_value=False)),
+        patch(
+            "app.services.retrieval_service.rewrite_query",
+            new=AsyncMock(side_effect=OpenAIError("rate limit exceeded")),
+        ),
+        patch(
+            "app.services.retrieval_service.rerank_chunks", new=AsyncMock(return_value=weak)
+        ) as mock_rerank,
+    ):
+        state = await service._prepare_for_generation("original question", "user-1", str(uuid.uuid4()))
+
+    assert mock_rerank.await_count == 2
+    assert state["retry_count"] == 1
     assert state["question"] == "original question"
 
 

@@ -1641,7 +1641,7 @@
     </div>
 
     <p class="caveat">Verified: a regression test reproduces the exact scenario found live during Feature 27's own testing — one domain raises Voyage's real rate-limit error, the other domain's answer still comes back, marked partial, instead of the whole question failing.</p>
-    <p class="caveat">Named, not fixed: a couple of other safe-wrappers in the same file (query rewriting, graph-context lookup) still only catch an already-open circuit, same shape of gap. Out of scope for this pass.</p>
+    <p class="caveat">Named here as out of scope for this pass: a couple of other safe-wrappers in the same file (query rewriting, graph-context lookup) still only caught an already-open circuit, same shape of gap. Closed in a later pass — see "Closing the remaining failure-isolation gaps" below.</p>
   </section>
 
   <section class="block">
@@ -1723,6 +1723,46 @@
     </div>
 
     <p class="caveat">Verified live end to end: a real request through the real gateway now returns a real 200 from a real, freshly-migrated database — the first time this has been true since 2026-08-29.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Closing the remaining failure-isolation gaps <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">closes the two follow-ups named out of scope when the federated-retrieval fix above was built</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Query rewriting's safety net widened</span>
+        <span class="path mono">catches OpenAI's raw errors, not just an already-open circuit</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Graph-context lookup's safety net widened</span>
+        <span class="path mono">catches Neo4j's raw driver errors via their shared base class</span>
+      </div>
+    </div>
+
+    <p class="caveat">Verified: two new regression tests, mirroring the existing federated-retrieval one — a raw OpenAI error during a retry still falls back to the same question, and a raw Neo4j error still answers without related-document context. Full suite: 256 passing.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>Postgres start/stop script <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">manual cost control — pauses compute billing between work sessions</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">scripts/db.sh start|stop</span>
+        <span class="path mono">reads the server name from Terraform's own outputs</span>
+      </div>
+    </div>
+
+    <p class="caveat">Saves nothing today — the 12-month free-tier grant is still active. Storage keeps billing regardless of server state; only compute pauses. Azure force-restarts a stopped server on its own after 7 days — an accepted gap in a manual-only script, not a bug.</p>
   </section>
 
   <footer class="roadmap">

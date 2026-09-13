@@ -13,6 +13,11 @@ output "postgres_server_fqdn" {
   value       = azurerm_postgresql_flexible_server.main.fqdn
 }
 
+output "postgres_server_name" {
+  description = "The Postgres server's own resource name — what `az postgres flexible-server start/stop --name` takes, as opposed to its fqdn above."
+  value       = azurerm_postgresql_flexible_server.main.name
+}
+
 output "key_vault_uri" {
   description = "The Key Vault's address, for wiring up secret references later."
   value       = azurerm_key_vault.main.vault_uri

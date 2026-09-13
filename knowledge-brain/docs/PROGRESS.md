@@ -47,17 +47,18 @@ and lines that are still correct are left untouched.
 - Domain taxonomy — admin-managed domains replace free-text tags, fixing "HR" vs "Human Resources" vocabulary drift
 - APIM request/response logging into Application Insights (metadata only, 100% sampling, verified live)
 - Fixed a two-week silent deployment failure discovered while deploying the logging feature above: CI/CD had been failing at test collection since 2026-08-29 (missing settings, missing Redis service container), the real Container App was crash-looping on the same missing settings once CI was fixed, the API gateway's route catalog was a stale one-time import, the Docker image never included the migration tool, and the real Azure Postgres database still had a partial, pre-multi-tenancy schema. Every feature built in that two-week window — multi-tenancy, PII review, Alembic, this session's own domain taxonomy — had only ever been verified against local dev; a real end-to-end request now succeeds against the real deployment for the first time since 2026-08-29.
+- Widened the remaining narrow-catch safe-wrappers in `retrieval_service.py` (query rewriting, graph-context lookup) to match the reranking fix — a fresh OpenAI or Neo4j failure now degrades gracefully instead of crashing the query, same as reranking already did
+- Postgres cost fix — a manual `scripts/db.sh start|stop` script, reading the server name from Terraform's own outputs, so compute billing can be paused between work sessions (storage keeps billing regardless); Azure force-restarts a stopped server after 7 days regardless of this script — an accepted gap, not a bug in it
 
 ## Pending
 
-- Postgres cost fix — a start/stop script pair for the Azure Postgres server; saves nothing until the 12-month free-tier grant expires, so deliberately low priority
-- Widen the remaining narrow-catch safe-wrappers in `retrieval_service.py` (query rewriting, graph-context lookup) to match the reranking fix — same shape of gap, not yet the demonstrated failure
-- A real Azure Cache for Redis was deliberately not provisioned (~$16/month, not worth it yet) — production `REDIS_URL` is a placeholder that always fails open, so conversation-history and identity caching currently pay a database round trip in production, same as before either feature existed
+- A real Azure Cache for Redis was deliberately not provisioned (~$16/month) — raised again this session and declined again on cost, but not yet elevated to a permanent, doc-rewritten decision the way APIM's Consumption tier was. Production `REDIS_URL` stays a placeholder that always fails open, so conversation-history and identity caching currently pay a database round trip in production, same as before either feature existed.
 
 ## Time to finish
 
-**~99% of the tracked build (weighted by real effort) is done.** What's
-left is small, maintenance-shaped infrastructure and reliability work,
-not a feature. Rough remaining effort: ~1–2 hours. At 3–4 hours/day,
-well under 1 working day left — same standing caveat as always: a
-genuinely new feature request would grow this number again.
+**~99% of the tracked build (weighted by real effort) is done.** The one
+remaining item is a cost trade-off under active consideration, not
+missing engineering effort. At 3–4 hours/day, well under 1 working day
+of actual build work left if that trade-off is ever accepted the way
+APIM's was — same standing caveat as always: a genuinely new feature
+request would grow this number again.

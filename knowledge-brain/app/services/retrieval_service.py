@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 
+from neo4j.exceptions import GqlError
 from openai import OpenAIError
 from sqlalchemy.exc import SQLAlchemyError
 from voyageai.error import VoyageError
@@ -252,10 +253,18 @@ class RetrievalService:
         return "proceed"
 
     async def _rewrite_node(self, state: QueryState) -> dict:
-        """Graph node: rephrase the question and count this attempt."""
+        """Graph node: rephrase the question and count this attempt.
+
+        Catches OpenAIError alongside CircuitOpenError: the circuit
+        breaker only raises CircuitOpenError once it's already open from
+        repeated failures — a call's *first* failure is OpenAI's own raw
+        exception, re-raised as-is by the breaker, and would otherwise
+        fail this request outright instead of retrying the same question
+        (see _rerank_safely for the same gap, fixed earlier, in reranking).
+        """
         try:
             new_question = await rewrite_query(state["question"])
-        except CircuitOpenError:
+        except (CircuitOpenError, OpenAIError):
             logger.error(
                 "Query rewriting unavailable, retrying the same question once",
                 extra={"correlation_id": get_correlation_id()},
@@ -291,10 +300,21 @@ class RetrievalService:
         return {"graph_context": snippets}
 
     async def _fetch_graph_context_safely(self, document_id: str) -> tuple[list[str], bool]:
-        """Look up directly-referenced documents; on failure, report unavailable rather than raising."""
+        """Look up directly-referenced documents; on failure, report unavailable rather than raising.
+
+        Catches GqlError alongside CircuitOpenError: the circuit breaker
+        only raises CircuitOpenError once it's already open from repeated
+        failures — a call's *first* failure is Neo4j's own raw exception,
+        re-raised as-is by the breaker. Neo4j splits its exceptions into
+        two families with no shared name most people know — Neo4jError
+        (the database rejected the query) and DriverError (couldn't reach
+        it at all) — but GqlError is the real common ancestor of both, so
+        catching it alone covers everything the driver can throw (see
+        _rerank_safely for the same gap, fixed earlier, in reranking).
+        """
         try:
             return await self.graph_repository.get_referenced_documents(document_id), False
-        except CircuitOpenError:
+        except (CircuitOpenError, GqlError):
             logger.error(
                 "Graph lookup unavailable, answering without related-document context",
                 extra={"correlation_id": get_correlation_id()},

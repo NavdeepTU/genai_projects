@@ -24,3 +24,10 @@ Start a new working session on this project:
    session?" Wait for my answer. If it's reasonable, confirm it. If you
    see a better option, say so and why — but only after I've answered.
    Never propose the next step before I do.
+8. If what I choose to work on involves making changes against the real
+   Azure deployment (not just local dev) — testing against the deployed
+   backend, running a migration against it, deploying, etc. — remind me
+   to check whether the Postgres server is currently stopped, and if so,
+   to run `./scripts/db.sh start` first, before we touch anything else.
+   Don't run this yourself; per CLAUDE.md's rule on external tools, I run
+   it.
