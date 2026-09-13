@@ -392,13 +392,14 @@ and why it was made that way.
   subtly wrong one, and nothing today would notice if it did. See
   `ADR-042`.
 - No real Azure Cache for Redis is provisioned in the actual
-  deployment — a deliberate cost call (~$16/month for the cheapest
-  tier, not worth it yet), not an oversight. Production's `REDIS_URL`
-  points at nothing reachable, so conversation-history and identity
-  caching always take their designed fallback path there: every
-  lookup pays the database round trip they were built to skip, same
-  as before either feature existed. Revisit only if real traffic ever
-  makes that round trip cost worth the monthly price.
+  deployment, permanently — a deliberate cost call (~$16/month even for
+  the cheapest tier), not an oversight, and not open work: the same
+  standing as the Consumption-tier trade-offs above. Production's
+  `REDIS_URL` points at nothing reachable, so conversation-history and
+  identity caching always take their designed fallback path there:
+  every lookup pays the database round trip they were built to skip,
+  same as before either feature existed. See CLAUDE.md's Enterprise
+  Requirement 10.
 - Streaming's injection check can only retract an already-streamed
   answer, not prevent it from being shown at all — it needs the
   *complete* answer to judge whether retrieved content hijacked it,

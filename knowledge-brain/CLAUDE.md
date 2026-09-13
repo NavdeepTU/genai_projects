@@ -379,7 +379,17 @@ Conversations and their turns (raw question, condensed question,
 answer, cited sources, confidence score, domains used, correlation_id)
 are stored in PostgreSQL; the last few turns of an active conversation
 are cached in Redis so condensing does not pay a database round trip
-on every message. Tenant-level access control (requirement 5) is re-checked on
+on every message. A real Azure Cache for Redis is deliberately never
+provisioned in production, permanently, for cost (~$16/month even at
+the cheapest tier) — an accepted trade-off for this project, not open
+work, same standing as APIM's Consumption tier above. `REDIS_URL` in
+production stays a placeholder that always fails open, exactly the
+path this same caching code is built to take if Redis is ever
+unreachable for any reason (see `ADR-042`) — so this decision costs
+nothing beyond the database round trip every cached lookup (this one,
+and the separate per-request identity-lookup cache) was built to skip.
+Local dev keeps a real Redis container throughout, so the caching code
+itself stays fully exercised and tested. Tenant-level access control (requirement 5) is re-checked on
 every turn against the current retrieval, never inherited from an
 earlier turn in the same conversation — even though a user's own
 tenant never changes after signup, the documents visible within it can
