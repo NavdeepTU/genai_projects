@@ -50,6 +50,8 @@ and lines that are still correct are left untouched.
 - Widened the remaining narrow-catch safe-wrappers in `retrieval_service.py` (query rewriting, graph-context lookup) to match the reranking fix — a fresh OpenAI or Neo4j failure now degrades gracefully instead of crashing the query, same as reranking already did
 - Postgres cost fix — a manual `scripts/db.sh start|stop` script, reading the server name from Terraform's own outputs, so compute billing can be paused between work sessions (storage keeps billing regardless); Azure force-restarts a stopped server after 7 days regardless of this script — an accepted gap, not a bug in it
 - Real Azure Cache for Redis — confirmed as a permanent, accepted cost trade-off (~$16/month, declined), same standing as APIM's Consumption tier. Production `REDIS_URL` stays a placeholder that always fails open; conversation-history and identity caching pay a database round trip in production, by design, not as an open gap. See CLAUDE.md's Enterprise Requirement 10.
+- Deleting a conversation — hard delete (turns cascade, cache cleared, audit logged), mirroring how document deletion already works; user-requested, not on the original build order
+- A read-only user profile page — email, role, organization, and join date, behind a new round icon in the header; served by a new `GET /users/me` endpoint kept deliberately separate from `/auth/me` so the extra tenant-name lookup doesn't tax every page load. Needs a Terraform re-apply after the next deploy before APIM forwards to it (not run yet — see the session's own reminder).
 
 ## Pending
 

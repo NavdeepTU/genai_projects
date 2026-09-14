@@ -7,6 +7,7 @@ from app.core.redis_cache import (
     get_cached_identity,
     get_recent_turns,
     invalidate_identity,
+    invalidate_recent_turns,
 )
 
 
@@ -155,4 +156,22 @@ async def test_invalidate_identity_never_raises_when_redis_is_unreachable():
 
     with patch("app.core.redis_cache.client", mock_client):
         await invalidate_identity("token-1")
+    # No exception means the fail-open contract held.
+
+
+async def test_invalidate_recent_turns_deletes_the_cache_key():
+    mock_client = AsyncMock()
+
+    with patch("app.core.redis_cache.client", mock_client):
+        await invalidate_recent_turns("conv-1")
+
+    mock_client.delete.assert_awaited_once_with("conversation_turns:conv-1")
+
+
+async def test_invalidate_recent_turns_never_raises_when_redis_is_unreachable():
+    mock_client = AsyncMock()
+    mock_client.delete.side_effect = ConnectionError("Redis is not running")
+
+    with patch("app.core.redis_cache.client", mock_client):
+        await invalidate_recent_turns("conv-1")
     # No exception means the fail-open contract held.

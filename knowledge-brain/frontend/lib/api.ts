@@ -137,6 +137,14 @@ export type Tenant = {
   name: string;
 };
 
+export type UserProfile = {
+  email: string;
+  is_admin: boolean;
+  tenant_name: string;
+  created_at: string;
+  correlation_id: string;
+};
+
 export type Domain = {
   id: string;
   name: string;
@@ -367,6 +375,29 @@ export async function* streamQuery(
 // file (ADR-045).
 export async function deleteDocument(documentId: string): Promise<void> {
   const response = await fetch(`/api/documents/${documentId}`, { method: "DELETE" });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (!response.ok) {
+    let detail = `Delete failed (status ${response.status})`;
+    try {
+      const data = await response.json();
+      detail = data?.detail ?? detail;
+    } catch {
+      // Body wasn't JSON either — the generic message above stands.
+    }
+    throw new Error(detail);
+  }
+}
+
+// Called from the browser (the sidebar's delete confirmation dialog), so
+// this hits the same-origin proxy at /api/conversations/{id}, never the
+// backend directly — same reasoning as every other client-triggered call
+// in this file (ADR-045).
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
 
   if (response.status === 401) {
     throw new UnauthorizedError();

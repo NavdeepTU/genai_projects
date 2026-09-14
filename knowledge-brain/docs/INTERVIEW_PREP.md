@@ -4099,6 +4099,151 @@ OpenAI's SDK raises one exception class for anything that can go wrong. Neo4j's 
 
 ---
 
+## Feature 42: Deleting a Conversation
+
+**What does this feature do, in one sentence?**
+A user can permanently delete one of their own conversations — its
+turns, its cached recent-turns entry in Redis — behind a confirmation
+dialog, with an audit log entry recording that it happened.
+
+```mermaid
+flowchart TD
+    CLICK["User clicks delete on a row"] --> CONFIRM{"Confirmation dialog"}
+    CONFIRM -->|cancel| STOP["Nothing happens"]
+    CONFIRM -->|confirm| CHECK{"Started by this user?"}
+    CHECK -->|no| DENY["404"]
+    CHECK -->|yes| CACHE["Clear the cached recent<br/>turns in Redis (best-effort)"]
+    CACHE --> DB["Delete the conversation row<br/>(turns cascade with it)"]
+    DB --> AUDIT["Audit log: conversation_deleted"]
+    AUDIT --> UI{"Was this the conversation<br/>currently open?"}
+    UI -->|yes| REDIRECT["Redirected to a new,<br/>blank conversation"]
+    UI -->|no| REFRESH["Sidebar list<br/>just refreshes"]
+```
+
+**Why hard delete instead of a soft delete — a "trash" you could recover
+from?**
+Because a conversation's turns can contain retrieved document snippets,
+and those can carry PII (personal information Feature 9 exists
+specifically to catch on the way in). A soft delete would leave that
+sitting in the database indefinitely under a "hidden" flag — it wouldn't
+actually satisfy someone asking for their data to be gone. This also
+matches Feature 32's decision for documents: one delete philosophy
+across the codebase, not two.
+
+**How does deleting a conversation's turns actually happen — a second
+database call per turn?**
+No — one delete on the conversation row, and the ORM's own
+`cascade="all, delete-orphan"` relationship deletes every turn
+underneath it in the same transaction. The identical mechanism Feature
+32 already used for a document's chunks, reused rather than
+reinvented.
+
+**What's the one part of this that has to succeed, versus what's
+best-effort?**
+The database delete has to succeed — that's what "deleted" actually
+means. Clearing the Redis cache entry is best-effort, same
+failure-isolation philosophy as every other external dependency in
+this project: if Redis is briefly unreachable, a stale cache entry just
+sits there until its existing 24-hour TTL expires on its own, instead
+of blocking the deletion.
+
+**Why does deleting the conversation you're currently looking at behave
+differently from deleting any other one in the sidebar?**
+Because the page you're on stops existing the moment you delete it —
+staying put would mean showing a 404, or stale content, for a thread
+that's gone. Deleting a *different* conversation from the list has no
+such problem, so it just refreshes the sidebar in place and leaves you
+where you were.
+
+**This was the first audit log entry that ever referenced a
+conversation — why hadn't that existed before?**
+Because nothing had ever needed to record a state-changing action
+*on* a conversation before now — creating one and adding a turn to it
+aren't things a user explicitly initiates and might want undone.
+Deleting one is exactly that kind of action, so it's the first time
+`resource_type="conversation"` appears in the audit log at all — an
+addition, not a gap that had been sitting there unfixed.
+
+*Further reading: [GDPR Article 17, "Right to erasure ('right to be forgotten')," official EU legal text](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679#d1e2452-1-1) — the regulatory reasoning behind why a real deletion feature usually needs to mean *actually gone*, not hidden.*
+
+---
+
+## Feature 43: A Read-Only User Profile Page
+
+**What does this feature do, in one sentence?**
+A dedicated page shows a logged-in user their own account facts —
+email, role, organization, and join date — fetched fresh from the
+database behind the same session check every other page already uses,
+reachable from a round icon in the header.
+
+```mermaid
+flowchart TD
+    CLICK["User clicks the round<br/>icon, top-right"] --> NAV["/profile page loads"]
+    NAV --> FETCH["GET /users/me"]
+    FETCH --> AUTH{"Valid session?"}
+    AUTH -->|no| LOGIN["Redirected to /login —<br/>same check every page uses"]
+    AUTH -->|yes| USER["Look up the user row"]
+    USER --> TENANT["Look up the tenant's<br/>name from tenant_id"]
+    TENANT --> RESP["email, role,<br/>org name, join date"]
+    RESP --> CARD["Rendered as a<br/>read-only card"]
+```
+
+**Why build a second "who am I" endpoint instead of just adding fields
+to the one that already exists (`/auth/me`)?**
+`/auth/me` runs on *every single page load* — it's what decides whether
+the "Admin" link shows up in the nav. Adding the extra database join
+this page needs (resolving an organization's name) to that endpoint
+would mean every page pays for it, even the ones that never show it.
+A separate endpoint means only someone who actually visits their
+profile pays that cost.
+
+**Where does the organization name actually come from — isn't it just
+a column on the user?**
+No — a user's row only stores `tenant_id`, a raw foreign key. The
+tenant's actual name lives in a separate table, resolved by a
+repository method that already existed for a different reason
+(checking a chosen tenant is real at signup) and got reused here rather
+than duplicated.
+
+**What happens if the session cookie is stale or invalid when this page
+loads?**
+Nothing new needed to be built for that — the same helper every other
+protected page (Dashboard, Analytics, Admin) already calls treats a 401
+from the backend as "redirect to `/login`," centrally, once. This page
+needed zero new auth-handling code to get that for free.
+
+**Why is there no name or photo shown — just an email?**
+Because there's nothing to show — this app only ever asked for an
+email and a password at signup. The round icon is a generic glyph, not
+a real avatar. Worth being upfront about rather than implying more
+exists than actually does, the same honesty this project already
+applies to PII detection's country-coverage limit (Feature 9).
+
+**Could this page ever show a stale organization name — say, right
+after an admin renames a tenant?**
+No — the page is fetched fresh on every visit (`force-dynamic`, no
+caching layer in front of it), so it always reflects whatever the
+database currently holds, not a snapshot from whenever the user first
+logged in.
+
+**Does this page create any new way to see someone else's data?**
+No — there's no id anywhere in the request a user could tamper with.
+The endpoint always resolves "me" from the session's own identity
+check, the same one gating every other page; there is no parameter to
+substitute someone else's id into.
+
+**Does this feature work the moment it's merged, or does something
+else need to happen first?**
+Something else needs to happen first, and it's the same class of gap
+Feature 40 already found the hard way: this project's API gateway
+(Azure API Management) builds its list of allowed routes by reading
+the backend's live OpenAPI spec, but only when Terraform is re-applied
+— not automatically the moment new code deploys. A new route like this
+one's `/users/me` needs the backend deployed *and then* a Terraform
+re-apply before the gateway will actually forward requests to it.
+
+---
+
 ## General concepts worth being able to explain from memory
 
 **What is RAG (Retrieval-Augmented Generation)?**

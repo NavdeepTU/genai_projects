@@ -1765,6 +1765,62 @@
     <p class="caveat">Saves nothing today — the 12-month free-tier grant is still active. Storage keeps billing regardless of server state; only compute pauses. Azure force-restarts a stopped server on its own after 7 days — an accepted gap in a manual-only script, not a bug.</p>
   </section>
 
+  <section class="block">
+    <div class="block-title">
+      <h2>Deleting a conversation <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">hard delete, mirroring how document deletion already works</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Confirmation dialog</span>
+        <span class="path mono">sidebar row, trash icon</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Row + turns deleted, cache cleared</span>
+        <span class="path mono">turns cascade via the ORM, same as a document's chunks</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">Audit log entry</span>
+        <span class="path mono">first-ever conversation_deleted row</span>
+      </div>
+    </div>
+
+    <p class="caveat">Permanent — no soft delete, no trash, no recovery. Full suite: 267 backend + 59 frontend, all passing.</p>
+  </section>
+
+  <section class="block">
+    <div class="block-title">
+      <h2>A read-only user profile page <span class="status-pill done" style="margin-left: 0.3rem;">Complete</span></h2>
+      <span class="count">email, role, organization, and join date — behind a new round icon in the header</span>
+    </div>
+    <div class="row">
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">GET /users/me</span>
+        <span class="path mono">deliberately separate from /auth/me, which every page load already fetches</span>
+      </div>
+      <div class="arrow">
+        <svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h17M11 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="node">
+        <span class="status-pill done">Built</span>
+        <span class="label">/profile page</span>
+        <span class="path mono">reachable from the new nav icon, same session check as every other page</span>
+      </div>
+    </div>
+
+    <p class="caveat">Needs a Terraform re-apply after the backend deploys before APIM's route catalog picks up /users/me — same class of gap as the two-week deployment failure above.</p>
+  </section>
+
   <footer class="roadmap">
     <h2>Build order status</h2>
     <p class="caveat">Every item in the original build order (1 through 19) is now built, plus later work the user requested beyond that original scope: real auth, LLM/RAG observability, guardrails, multi-agent retrieval, conversation history, context condensing, streamed generation, document viewing, document deletion, multi-tenancy, and the PII human review workflow. Ongoing hardening, observability, and refinement continue to layer on top of this foundation as their own sessions — see CLAUDE.md's Enterprise Requirements for the non-negotiable properties every feature above was built to satisfy.</p>

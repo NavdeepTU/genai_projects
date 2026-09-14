@@ -7,6 +7,7 @@ import { MessageSquare, Plus } from "lucide-react";
 
 import type { ConversationListItem } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { DeleteConversationButton } from "@/components/delete-conversation-button";
 import {
   Sheet,
   SheetClose,
@@ -56,12 +57,16 @@ function ConversationList({
       {conversations.map((conversation) => {
         const href = `/query/${conversation.id}`;
         const isActive = pathname === href;
+        // The row's own background carries the active/hover state now, so
+        // it still spans the full width once the delete button sits beside
+        // the link instead of inside it — a button can't legally nest
+        // inside an anchor, and we don't want deleting to also navigate.
         const link = (
           <Link
             href={href}
             className={cn(
-              "flex flex-col gap-0.5 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted/40",
-              isActive ? "bg-muted font-medium" : "text-muted-foreground",
+              "flex min-w-0 flex-1 flex-col gap-0.5 px-3 py-2 text-sm",
+              isActive ? "font-medium" : "text-muted-foreground",
             )}
           >
             <span className="truncate">{conversation.title}</span>
@@ -70,7 +75,22 @@ function ConversationList({
             </span>
           </Link>
         );
-        return onNavigate ? <SheetClose key={conversation.id} render={link} /> : <div key={conversation.id}>{link}</div>;
+        return (
+          <div
+            key={conversation.id}
+            className={cn(
+              "flex items-center gap-1 rounded-md pr-1 transition-colors hover:bg-muted/40",
+              isActive && "bg-muted",
+            )}
+          >
+            {onNavigate ? <SheetClose render={link} /> : link}
+            <DeleteConversationButton
+              conversationId={conversation.id}
+              title={conversation.title}
+              isActive={isActive}
+            />
+          </div>
+        );
       })}
     </div>
   );

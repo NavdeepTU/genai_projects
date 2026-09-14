@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
-import { Menu } from "lucide-react";
+import { Menu, UserRound } from "lucide-react";
 
 import type { CurrentUser } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -81,6 +81,13 @@ function UserSection({ user }: { user: CurrentUser | null }) {
 
   return (
     <div className="flex items-center gap-2">
+      <Link
+        href="/profile"
+        aria-label="View profile"
+        className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        <UserRound className="size-4" />
+      </Link>
       <span className="hidden max-w-32 truncate text-xs text-muted-foreground sm:inline">
         {user.email}
       </span>

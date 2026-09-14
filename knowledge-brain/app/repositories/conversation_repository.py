@@ -86,6 +86,23 @@ class ConversationRepository:
             raise
         return list(result.scalars().all())
 
+    async def delete_conversation(self, conversation: Conversation) -> None:
+        """Delete a conversation and, via cascade, every turn inside it.
+
+        Takes the already-loaded Conversation object, same reasoning as
+        DocumentRepository.delete_document: the caller already fetched it
+        once for the ownership check, and turns need to be loaded (see
+        get_conversation_for_user's selectinload) for the ORM's
+        cascade="all, delete-orphan" to delete them without an extra
+        lazy-load in an async session.
+        """
+        try:
+            await self.session.delete(conversation)
+            await self.session.commit()
+        except SQLAlchemyError:
+            logger.exception("Failed to delete conversation %s", conversation.id)
+            raise
+
     async def get_conversation_for_user(
         self, conversation_id: uuid.UUID, user_id: str
     ) -> Conversation | None:

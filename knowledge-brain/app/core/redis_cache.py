@@ -99,6 +99,16 @@ async def cache_identity(token: str, user_id: str, tenant_id: str) -> None:
         logger.exception("Redis unavailable, skipping identity cache write")
 
 
+async def invalidate_recent_turns(conversation_id: str) -> None:
+    """Clear a conversation's cached recent turns immediately — called on
+    conversation delete, so condensing never reads cached turns for a
+    conversation that no longer exists for the rest of the TTL window."""
+    try:
+        await circuit_breaker.call(lambda: client.delete(_cache_key(conversation_id)))
+    except Exception:
+        logger.exception("Redis unavailable, skipping recent-turns cache invalidation")
+
+
 async def invalidate_identity(token: str) -> None:
     """Clear a cached identity immediately — called on logout, so a revoked
     session can't still be treated as valid for the rest of its TTL window."""

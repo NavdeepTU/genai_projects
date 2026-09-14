@@ -20,6 +20,7 @@ import type {
   DocumentListResponse,
   ReviewQueueItem,
   Tenant,
+  UserProfile,
 } from "@/lib/api";
 
 // Every Server Component page in this app calls the backend the same way:
@@ -126,6 +127,16 @@ export async function getDocuments(): Promise<DocumentListItem[]> {
 
   const data: DocumentListResponse = await response.json();
   return data.documents;
+}
+
+export async function getUserProfile(): Promise<UserProfile> {
+  const response = await authenticatedFetch("/users/me");
+
+  if (!response.ok) {
+    throw new Error(`Failed to load your profile (status ${response.status})`);
+  }
+
+  return response.json();
 }
 
 export async function getConversations(): Promise<ConversationListItem[]> {

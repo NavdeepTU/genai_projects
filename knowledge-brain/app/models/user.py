@@ -60,3 +60,16 @@ class UserResponse(BaseModel):
     tenant_id: uuid.UUID
     is_admin: bool
     correlation_id: str
+
+
+class UserProfileResponse(BaseModel):
+    """The read-only profile page's own shape — deliberately separate from
+    UserResponse (used by /auth/me, which every page load fetches to decide
+    nav rendering) so that the extra tenant-name join this page needs never
+    runs on requests that don't need it."""
+
+    email: str
+    is_admin: bool
+    tenant_name: str
+    created_at: datetime
+    correlation_id: str

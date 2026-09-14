@@ -1,5 +1,8 @@
 import asyncio
 
+from sqlalchemy import select
+
+from app.models.conversation import Turn
 from app.repositories.conversation_repository import ConversationRepository
 
 
@@ -127,3 +130,37 @@ async def test_get_conversation_for_user_includes_turns_in_order(db_session):
     result = await repository.get_conversation_for_user(conversation.id, "user-1")
 
     assert [t.raw_question for t in result.turns] == ["first question", "second question"]
+
+
+async def test_delete_conversation_removes_the_conversation_and_its_turns(db_session):
+    repository = ConversationRepository(db_session)
+    conversation = await repository.create_conversation("user-1", "Leave policy")
+    await repository.add_turn(
+        conversation.id,
+        raw_question="q",
+        condensed_question="q",
+        answer="a",
+        sources=[],
+        confidence=None,
+        domains_used=[],
+        correlation_id="corr-1",
+    )
+    loaded = await repository.get_conversation_for_user(conversation.id, "user-1")
+
+    await repository.delete_conversation(loaded)
+
+    assert await repository.get_conversation_for_user(conversation.id, "user-1") is None
+    remaining_turns = await db_session.execute(select(Turn).where(Turn.conversation_id == conversation.id))
+    assert remaining_turns.scalars().all() == []
+
+
+async def test_delete_conversation_leaves_other_conversations_untouched(db_session):
+    repository = ConversationRepository(db_session)
+    keep = await repository.create_conversation("user-1", "Keep this one")
+    delete_me = await repository.create_conversation("user-1", "Delete this one")
+    loaded = await repository.get_conversation_for_user(delete_me.id, "user-1")
+
+    await repository.delete_conversation(loaded)
+
+    conversations = await repository.list_conversations_for_user("user-1")
+    assert [c.id for c in conversations] == [keep.id]

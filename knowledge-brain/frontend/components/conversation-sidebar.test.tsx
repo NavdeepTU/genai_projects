@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/query/conv-1",
+  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
 
 import type { ConversationListItem } from "@/lib/api";
@@ -52,6 +53,18 @@ describe("ConversationSidebar", () => {
 
     expect(screen.getAllByText("Vacation policy").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Expense reimbursement").length).toBeGreaterThan(0);
+  });
+
+  it("renders a delete button for each conversation", () => {
+    render(
+      <ConversationSidebar
+        conversations={[makeConversation({ id: "conv-1", title: "Vacation policy" })]}
+      >
+        <div>content</div>
+      </ConversationSidebar>,
+    );
+
+    expect(screen.getAllByRole("button", { name: /delete vacation policy/i }).length).toBeGreaterThan(0);
   });
 
   it("renders the page content passed as children", () => {

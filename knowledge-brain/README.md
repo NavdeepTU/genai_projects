@@ -243,7 +243,7 @@ and why it was made that way.
   (method, path, status, latency, the correlation-ID header; never a
   request/response body), 100% sampling — is now built and verified
   live, unrelated to tier and the last open piece of this feature.
-- **Frontend** *(all five planned pages built — see below)* — a
+- **Frontend** *(all five planned pages built, plus a read-only Profile page — see below)* — a
   separate Next.js project (`frontend/`, Tailwind, Shadcn/UI on Base
   UI) with a shared shell (navigation, dark mode, a responsive mobile
   menu). The Dashboard, at the app's root, is a real digest — total
@@ -264,7 +264,8 @@ and why it was made that way.
   `confidence` alongside the answer text, not just the answer alone. A
   single-domain question now streams for real, sentence by sentence
   over Server-Sent Events (`POST /query/stream`), with a resumable
-  sidebar of past conversations and context-condensed follow-ups — see
+  sidebar of past conversations (each deletable behind its own
+  confirmation dialog) and context-condensed follow-ups — see
   `ADR-041`, `ADR-042`, and `ADR-043`. The Analytics page
   adds a real, genuinely new metric — average response time, timed
   once inside `RetrievalService.run_query` so both REST and MCP queries
@@ -683,8 +684,9 @@ npm run dev
 ```
 
 Visit `http://localhost:3000`. All five planned pages exist (Dashboard,
-Document Library, Query, Analytics, Admin) — you'll land on `/login`
-first if you don't have a session yet. Sign up (or log in, if you
+Document Library, Query, Analytics, Admin), plus a read-only Profile
+page reachable from the round icon in the header — you'll land on
+`/login` first if you don't have a session yet. Sign up (or log in, if you
 already have an account) and you're in; see real authentication, above,
 and [`ADR-037`](docs/adr/ADR-037-real-authentication-frontend.md) for
 how the frontend and backend sessions connect.
